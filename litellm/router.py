@@ -7275,7 +7275,7 @@ class Router:
         self,
         requests: List[RouterParallelRequest],
         *,
-        concurrency: int = 8,
+        concurrency: Optional[int] = None,
         return_exceptions: bool = True,
         preserve_order: bool = False,
     ) -> List[RouterParallelResult]:
@@ -7288,10 +7288,17 @@ class Router:
             raise RuntimeError(
                 "parallel_acompletions disabled; set LITELLM_ENABLE_PARALLEL_ACOMPLETIONS=1"
             )
+        # Concurrency default tie-in
+        _concurrency = (
+            concurrency
+            if concurrency is not None
+            else (self.default_max_parallel_requests or 8)
+        )
+
         return await _gather_parallel_acompletions(
             self,
             requests,
-            concurrency=concurrency,
+            concurrency=_concurrency,
             return_exceptions=return_exceptions,
             preserve_order=preserve_order,
         )
@@ -7300,7 +7307,7 @@ class Router:
         self,
         requests: List[RouterParallelRequest],
         *,
-        concurrency: int = 8,
+        concurrency: Optional[int] = None,
         return_exceptions: bool = True,
     ):
         """
@@ -7312,10 +7319,16 @@ class Router:
             raise RuntimeError(
                 "parallel_acompletions disabled; set LITELLM_ENABLE_PARALLEL_ACOMPLETIONS=1"
             )
+        _concurrency = (
+            concurrency
+            if concurrency is not None
+            else (self.default_max_parallel_requests or 8)
+        )
+
         return _iter_parallel_acompletions(
             self,
             requests,
-            concurrency=concurrency,
+            concurrency=_concurrency,
             return_exceptions=return_exceptions,
         )
 

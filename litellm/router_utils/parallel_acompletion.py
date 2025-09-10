@@ -14,6 +14,7 @@ import asyncio
 from dataclasses import dataclass
 from typing import Any, AsyncIterator, Awaitable, Dict, List, Optional
 import contextlib
+import uuid
 
 
 # Type shape for a router request
@@ -38,13 +39,24 @@ async def _run_one(
     idx: int,
     req: RouterParallelRequest,
     return_exceptions: bool,
+    batch_id: str,
 ) -> RouterParallelResult:
     async with sem:
         try:
+            # Merge/attach observability metadata
+            merged_kwargs = dict(req.kwargs or {})
+            meta_extra = {"parallel_batch_id": batch_id, "parallel_index": idx}
+            existing_meta = merged_kwargs.get("metadata")
+            if isinstance(existing_meta, dict):
+                merged_meta = {**existing_meta, **meta_extra}
+            else:
+                merged_meta = meta_extra
+            merged_kwargs["metadata"] = merged_meta
+
             resp = await router.acompletion(
                 model=req.model,
                 messages=req.messages,
-                **(req.kwargs or {}),
+                **merged_kwargs,
             )
             return RouterParallelResult(index=idx, request=req, response=resp)
         except BaseException as e:
@@ -60,6 +72,7 @@ async def gather_parallel_acompletions(
     concurrency: int = 8,
     return_exceptions: bool = True,
     preserve_order: bool = False,
+    batch_id: Optional[str] = None,
 ) -> List[RouterParallelResult]:
     """
     Launch all acompletion calls with a bounded concurrency semaphore.
@@ -74,10 +87,21 @@ async def gather_parallel_acompletions(
     if concurrency <= 0:
         raise ValueError("concurrency must be >= 1")
     sem = asyncio.Semaphore(concurrency)
-    tasks: List[Awaitable[RouterParallelResult]] = [
-        _run_one(router, sem, i, r, return_exceptions) for i, r in enumerate(requests)
+    batch_id = batch_id or uuid.uuid4().hex
+    # Create real tasks so we can cancel on fail-fast
+    tasks: List[asyncio.Task[RouterParallelResult]] = [
+        asyncio.create_task(_run_one(router, sem, i, r, return_exceptions, batch_id))
+        for i, r in enumerate(requests)
     ]
-    results = await asyncio.gather(*tasks, return_exceptions=False)  # internal handling
+    try:
+        results = await asyncio.gather(*tasks, return_exceptions=False)
+    except BaseException:
+        # Fail-fast semantics: ensure other tasks are cancelled to avoid leaks
+        for t in tasks:
+            t.cancel()
+        with contextlib.suppress(Exception):
+            await asyncio.gather(*tasks, return_exceptions=True)
+        raise
     if preserve_order:
         results.sort(key=lambda r: r.index)
     return results
@@ -91,8 +115,9 @@ async def _iter_worker(
     queue: "asyncio.Queue[Any]",
 ):
     sem = asyncio.Semaphore(concurrency)
+    batch_id = uuid.uuid4().hex
     tasks = [
-        asyncio.create_task(_run_one(router, sem, i, r, return_exceptions))
+        asyncio.create_task(_run_one(router, sem, i, r, return_exceptions, batch_id))
         for i, r in enumerate(requests)
     ]
     try:

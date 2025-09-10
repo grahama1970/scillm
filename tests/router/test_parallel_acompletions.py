@@ -52,6 +52,11 @@ async def test_parallel_acompletions_basic(monkeypatch):
     )
     assert len(results) == 3
     assert all(r.exception is None for r in results)
+    # Verify results map back to original requests
+    for i, r in enumerate(results):
+        assert r.index == i
+        assert r.request.model == requests[i].model
+        assert r.request.messages == requests[i].messages
     payloads = [r.response for r in results]
     assert [p["content"] for p in payloads] == ["A", "B", "C"]
 
@@ -86,10 +91,17 @@ async def test_iter_parallel_acompletions(monkeypatch):
     ]
 
     seen = []
+    idx_seen = []
     async for result in router.iter_parallel_acompletions(requests, concurrency=2):
         assert result.exception is None
+        # Validate mapping via index and attached request
+        assert result.index in (0, 1)
+        expected = {0: "x", 1: "y"}[result.index]
+        assert result.request.messages[0]["content"] == expected
+        idx_seen.append(result.index)
         seen.append(result.response["last"])
     assert set(seen) == {"x", "y"}
+    assert set(idx_seen) == {0, 1}
 
 
 @pytest.mark.asyncio
