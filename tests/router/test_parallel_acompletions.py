@@ -17,15 +17,17 @@ async def test_parallel_acompletions_basic(monkeypatch):
     assert ENABLE_PARALLEL_ACOMPLETIONS is True
 
     # Build a dummy router with a single pseudo deployment (use a harmless model alias)
-    router = Router(model_list=[
-        {
-            "model_name": "dummy",
-            "litellm_params": {
-                "model": "gpt-3.5-turbo",  # replaced at runtime with your own credentials in real use
-                "api_key": "sk-FAKE",
+    router = Router(
+        model_list=[
+            {
+                "model_name": "dummy",
+                "litellm_params": {
+                    "model": "gpt-3.5-turbo",  # replaced at runtime with your own credentials in real use
+                    "api_key": "sk-FAKE",
+                },
             }
-        }
-    ])
+        ]
+    )
 
     # Monkeypatch router.acompletion to avoid real network
     async def fake_acompletion(model, messages, **kwargs):
@@ -34,12 +36,20 @@ async def test_parallel_acompletions_basic(monkeypatch):
     monkeypatch.setattr(router, "acompletion", fake_acompletion)
 
     requests = [
-        RouterParallelRequest(model="dummy", messages=[{"role": "user", "content": "a"}]),
-        RouterParallelRequest(model="dummy", messages=[{"role": "user", "content": "b"}]),
-        RouterParallelRequest(model="dummy", messages=[{"role": "user", "content": "c"}]),
+        RouterParallelRequest(
+            model="dummy", messages=[{"role": "user", "content": "a"}]
+        ),
+        RouterParallelRequest(
+            model="dummy", messages=[{"role": "user", "content": "b"}]
+        ),
+        RouterParallelRequest(
+            model="dummy", messages=[{"role": "user", "content": "c"}]
+        ),
     ]
 
-    results = await router.parallel_acompletions(requests, concurrency=2, preserve_order=True)
+    results = await router.parallel_acompletions(
+        requests, concurrency=2, preserve_order=True
+    )
     assert len(results) == 3
     assert all(r.exception is None for r in results)
     payloads = [r.response for r in results]
@@ -48,15 +58,17 @@ async def test_parallel_acompletions_basic(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_iter_parallel_acompletions(monkeypatch):
-    router = Router(model_list=[
-        {
-            "model_name": "dummy2",
-            "litellm_params": {
-                "model": "gpt-3.5-turbo",
-                "api_key": "sk-FAKE2",
+    router = Router(
+        model_list=[
+            {
+                "model_name": "dummy2",
+                "litellm_params": {
+                    "model": "gpt-3.5-turbo",
+                    "api_key": "sk-FAKE2",
+                },
             }
-        }
-    ])
+        ]
+    )
 
     async def fake_acompletion(model, messages, **kwargs):
         await asyncio.sleep(0.01)
@@ -65,8 +77,12 @@ async def test_iter_parallel_acompletions(monkeypatch):
     monkeypatch.setattr(router, "acompletion", fake_acompletion)
 
     requests = [
-        RouterParallelRequest(model="dummy2", messages=[{"role": "user", "content": "x"}]),
-        RouterParallelRequest(model="dummy2", messages=[{"role": "user", "content": "y"}]),
+        RouterParallelRequest(
+            model="dummy2", messages=[{"role": "user", "content": "x"}]
+        ),
+        RouterParallelRequest(
+            model="dummy2", messages=[{"role": "user", "content": "y"}]
+        ),
     ]
 
     seen = []
@@ -76,19 +92,23 @@ async def test_iter_parallel_acompletions(monkeypatch):
     assert set(seen) == {"x", "y"}
 
 
-def test_flag_disabled_raises(monkeypatch):
+@pytest.mark.asyncio
+async def test_flag_disabled_raises(monkeypatch):
     # Simulate flag off
     monkeypatch.delenv("LITELLM_ENABLE_PARALLEL_ACOMPLETIONS", raising=False)
     # Reload module not strictly needed if we rely on runtime check of env variable before instantiation,
     # but router methods raise based on ENABLE_PARALLEL_ACOMPLETIONS value (import-time).
     from importlib import reload
     import litellm.experimental_flags as flags
+
     reload(flags)
 
+    # Reload router to re-evaluate imported flag at definition time
+    import litellm.router as router_module
+    reload(router_module)
     from litellm import Router
     router = Router(model_list=[])
 
     with pytest.raises(RuntimeError):
         # We pass empty list; early runtime flag check should still raise
-        router.parallel_acompletions([])  # type: ignore
-
+        await router.parallel_acompletions([])  # type: ignore
