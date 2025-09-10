@@ -110,6 +110,10 @@ from litellm.router_utils.router_callbacks.track_deployment_metrics import (
     increment_deployment_failures_for_current_minute,
     increment_deployment_successes_for_current_minute,
 )
+from litellm.router_utils.parallel_acompletion import (
+    execute_parallel_acompletions,
+    parallel_acompletion_fastest_response,
+)
 from litellm.scheduler import FlowItem, Scheduler
 from litellm.types.llms.openai import (
     AllMessageValues,
@@ -7262,6 +7266,60 @@ class Router:
             self,
             "async_get_available_deployment",
             CustomRoutingStrategy.async_get_available_deployment,
+        )
+
+    async def parallel_acompletions(
+        self,
+        models: List[str],
+        messages_list: List[List[AllMessageValues]],
+        max_concurrency: Optional[int] = None,
+        **kwargs
+    ):
+        """
+        Execute multiple async completion requests in parallel.
+        
+        Args:
+            models: List of model names
+            messages_list: List of message lists for each request
+            max_concurrency: Maximum number of concurrent requests
+            **kwargs: Additional arguments passed to each completion
+            
+        Returns:
+            ParallelAcompletionResult containing all responses and statistics
+        """
+        return await execute_parallel_acompletions(
+            router_instance=self,
+            models=models,
+            messages_list=messages_list,
+            max_concurrency=max_concurrency,
+            **kwargs
+        )
+
+    async def parallel_acompletion_fastest(
+        self,
+        models: List[str],
+        messages: List[AllMessageValues],
+        max_concurrency: Optional[int] = None,
+        **kwargs
+    ):
+        """
+        Execute the same request against multiple models and return the fastest response.
+        
+        Args:
+            models: List of model names to try
+            messages: Messages for completion (same for all models)
+            max_concurrency: Maximum number of concurrent requests
+            **kwargs: Additional arguments passed to each completion
+            
+        Returns:
+            The first successful ModelResponse, or the last exception if all fail
+        """
+        return await parallel_acompletion_fastest_response(
+            router_instance=self,
+            models=models,
+            messages=messages,
+            max_concurrency=max_concurrency,
+            **kwargs
         )
 
     def flush_cache(self):
