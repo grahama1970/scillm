@@ -1,17 +1,12 @@
 """
-Central registry for experimental / soft‑launch feature flags.
+Experimental feature flags for LiteLLM.
 
-All flags default to 'off' so new features are inert unless explicitly enabled
-via environment variable. This lets us merge experimental surfaces safely.
-
-Usage elsewhere:
-    from litellm.experimental_flags import ENABLE_PARALLEL_ACOMPLETIONS
-    if ENABLE_PARALLEL_ACOMPLETIONS:
-        ...
+All flags default OFF. Enable by setting the corresponding environment variable.
 """
 
 import os
 
 ENABLE_PARALLEL_ACOMPLETIONS: bool = os.getenv(
     "LITELLM_ENABLE_PARALLEL_ACOMPLETIONS", "0"
-).lower() in ("1", "true", "yes")
+).lower() in ("1", "true", "yes", "on")
+ 
