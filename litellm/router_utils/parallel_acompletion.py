@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass
 from typing import Any, AsyncIterator, Awaitable, Dict, List, Optional
+import contextlib
 
 
 # Type shape for a router request
@@ -87,18 +88,26 @@ async def _iter_worker(
     requests: List[RouterParallelRequest],
     concurrency: int,
     return_exceptions: bool,
-    queue: "asyncio.Queue[RouterParallelResult]",
+    queue: "asyncio.Queue[Any]",
 ):
     sem = asyncio.Semaphore(concurrency)
-
-    async def runner(i: int, r: RouterParallelRequest):
-        try:
-            await queue.put(await _run_one(router, sem, i, r, return_exceptions))
-        finally:
-            pass
-
-    await asyncio.gather(*(runner(i, r) for i, r in enumerate(requests)))
-    await queue.put(None)  # sentinel
+    tasks = [
+        asyncio.create_task(_run_one(router, sem, i, r, return_exceptions))
+        for i, r in enumerate(requests)
+    ]
+    try:
+        for fut in asyncio.as_completed(tasks):
+            try:
+                res = await fut
+                await queue.put(res)
+            except BaseException as e:
+                # cancel remaining tasks and propagate exception to consumer
+                for t in tasks:
+                    t.cancel()
+                await queue.put(e)
+                return
+    finally:
+        await queue.put(None)  # sentinel
 
 
 async def iter_parallel_acompletions(
@@ -113,12 +122,19 @@ async def iter_parallel_acompletions(
     """
     if concurrency <= 0:
         raise ValueError("concurrency must be >= 1")
-    queue: "asyncio.Queue[Optional[RouterParallelResult]]" = asyncio.Queue()
-    asyncio.create_task(
+    queue: "asyncio.Queue[Any]" = asyncio.Queue()
+    worker = asyncio.create_task(
         _iter_worker(router, requests, concurrency, return_exceptions, queue)
     )
-    while True:
-        item = await queue.get()
-        if item is None:
-            break
-        yield item
+    try:
+        while True:
+            item = await queue.get()
+            if item is None:
+                break
+            if isinstance(item, BaseException):
+                raise item
+            yield item
+    finally:
+        worker.cancel()
+        with contextlib.suppress(Exception):
+            await worker

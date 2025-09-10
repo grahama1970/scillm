@@ -93,6 +93,41 @@ async def test_iter_parallel_acompletions(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_iter_parallel_acompletions_fail_fast(monkeypatch):
+    router = Router(
+        model_list=[
+            {
+                "model_name": "dummy3",
+                "litellm_params": {
+                    "model": "gpt-3.5-turbo",
+                    "api_key": "sk-FAKE3",
+                },
+            }
+        ]
+    )
+
+    async def failing_acompletion(model, messages, **kwargs):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(router, "acompletion", failing_acompletion)
+
+    requests = [
+        RouterParallelRequest(
+            model="dummy3", messages=[{"role": "user", "content": "x"}]
+        ),
+        RouterParallelRequest(
+            model="dummy3", messages=[{"role": "user", "content": "y"}]
+        ),
+    ]
+
+    with pytest.raises(RuntimeError):
+        async for _ in router.iter_parallel_acompletions(
+            requests, concurrency=2, return_exceptions=False
+        ):
+            pass
+
+
+@pytest.mark.asyncio
 async def test_flag_disabled_raises(monkeypatch):
     # Simulate flag off
     monkeypatch.delenv("LITELLM_ENABLE_PARALLEL_ACOMPLETIONS", raising=False)
@@ -105,8 +140,10 @@ async def test_flag_disabled_raises(monkeypatch):
 
     # Reload router to re-evaluate imported flag at definition time
     import litellm.router as router_module
+
     reload(router_module)
     from litellm import Router
+
     router = Router(model_list=[])
 
     with pytest.raises(RuntimeError):

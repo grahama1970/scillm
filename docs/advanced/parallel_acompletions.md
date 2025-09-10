@@ -53,6 +53,25 @@ async for result in router.iter_parallel_acompletions(requests, concurrency=4):
     ...
 ```
 
+## Behavior & Error Semantics
+
+- `return_exceptions=True` (default)
+  - Each item in the results has either `response` or `exception` set.
+  - Iterator form yields all results; you handle `result.exception` per item.
+
+- `return_exceptions=False` (fail-fast)
+  - `parallel_acompletions(...)` raises on the first error and cancels remaining tasks.
+  - `iter_parallel_acompletions(...)` raises on the first error and stops iteration; any outstanding tasks are cancelled.
+
+- Concurrency
+  - A bounded semaphore limits in-flight calls at the orchestration layer.
+  - For very large request lists, tasks are scheduled but concurrency limits actual in-flight calls.
+
+## Flag Gating Notes
+
+- The feature is controlled by `LITELLM_ENABLE_PARALLEL_ACOMPLETIONS` and evaluated on import.
+- If toggling the env var at runtime, restart the process (or reload modules) to apply.
+
 ## Arguments
 
 | Param | Description |
@@ -96,4 +115,3 @@ Provide feedback in the GitHub issue / PR.
 - Streaming passthrough merge (aggregate token usage).
 
 ---
-
