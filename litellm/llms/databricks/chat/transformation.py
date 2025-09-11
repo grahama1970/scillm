@@ -7,6 +7,7 @@ from typing import (
     Any,
     AsyncIterator,
     Coroutine,
+    Dict,
     Iterator,
     List,
     Literal,
@@ -169,17 +170,17 @@ class DatabricksConfig(DatabricksBase, OpenAILikeChatConfig, AnthropicConfig):
         if tool is None:
             return None
 
-        kwags = {
-            "name":tool["name"],
-            "parameters":cast(dict, tool.get("input_schema") or {})
+        kwags: Dict[str, Any] = {
+            "name": tool["name"],
+            "parameters": cast(dict, tool.get("input_schema") or {}),
         }
 
         if tool.get("description"):
-            kwags["description"] = tool.get("description")
+            kwags["description"] = cast(Union[dict, str], tool.get("description"))
 
         return DatabricksTool(
             type="function",
-            function=DatabricksFunction(**kwags),
+            function=DatabricksFunction(**kwags),  # type: ignore
         )
 
     def _map_openai_to_dbrx_tool(self, model: str, tools: List) -> List[DatabricksTool]:
