@@ -157,6 +157,13 @@ from litellm.utils import (
     get_utc_datetime,
     is_region_allowed,
 )
+from litellm.experimental_flags import ENABLE_PARALLEL_ACOMPLETIONS
+from litellm.router_utils.parallel_acompletion import (
+    iter_parallel_acompletions as _iter_parallel_acompletions,
+    gather_parallel_acompletions as _gather_parallel_acompletions,
+    RouterParallelRequest,
+    RouterParallelResult,
+)
 
 from .router_utils.pattern_match_deployments import PatternMatchRouter
 
@@ -7276,3 +7283,60 @@ class Router:
         litellm._async_failure_callback = []
         self.retry_policy = None
         self.flush_cache()
+
+    # ===== Experimental Parallel ACompletions ==================================
+    async def parallel_acompletions(  # type: ignore[no-redef]
+        self,
+        requests: List[RouterParallelRequest],
+        *,
+        concurrency: int = 8,
+        return_exceptions: bool = True,
+        preserve_order: bool = False,
+    ) -> List[RouterParallelResult]:
+        """
+        Experimental: run multiple acompletion calls concurrently and collect results.
+
+        Requires environment variable: LITELLM_ENABLE_PARALLEL_ACOMPLETIONS=1
+
+        Args:
+            requests: list of request dicts (each needs at least model + messages)
+            concurrency: max number of in-flight acompletion calls at this orchestrator layer
+            return_exceptions: capture per-request errors instead of failing fast
+            preserve_order: reorder results to match input sequence (adds an extra pass)
+        """
+        if not ENABLE_PARALLEL_ACOMPLETIONS:
+            raise RuntimeError(
+                "parallel_acompletions disabled; set LITELLM_ENABLE_PARALLEL_ACOMPLETIONS=1"
+            )
+        return await _gather_parallel_acompletions(
+            self,
+            requests,
+            concurrency=concurrency,
+            return_exceptions=return_exceptions,
+            preserve_order=preserve_order,
+        )
+
+    def iter_parallel_acompletions(  # type: ignore[no-redef]
+        self,
+        requests: List[RouterParallelRequest],
+        *,
+        concurrency: int = 8,
+        return_exceptions: bool = True,
+    ):
+        """
+        Experimental: async iterator yielding each acompletion result as soon as it finishes
+        (completion order, not input order).
+
+        Requires: LITELLM_ENABLE_PARALLEL_ACOMPLETIONS=1
+        """
+        if not ENABLE_PARALLEL_ACOMPLETIONS:
+            raise RuntimeError(
+                "parallel_acompletions disabled; set LITELLM_ENABLE_PARALLEL_ACOMPLETIONS=1"
+            )
+        return _iter_parallel_acompletions(
+            self,
+            requests,
+            concurrency=concurrency,
+            return_exceptions=return_exceptions,
+        )
+    # ===========================================================================
