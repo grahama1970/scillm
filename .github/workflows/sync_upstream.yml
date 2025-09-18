@@ -1,0 +1,47 @@
+name: Sync Upstream + Rebase Feature Branches
+
+on:
+  workflow_dispatch: {}
+  schedule:
+    - cron: '0 6 * * 1'  # Mondays 06:00 UTC
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout fork
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Add upstream remote
+        run: |
+          git remote add upstream https://github.com/BerriAI/litellm.git || true
+          git fetch upstream --prune
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install smoke deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e .
+          # Optional extras not required; smokes skip optional deps
+          pip install pytest
+
+      - name: Sync upstream + rebase feature branches (dry-run)
+        run: |
+          bash scripts/sync_upstream.sh --no-push
+
+      - name: Push changes (manual gate)
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.push != 'false' }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Re-run without --no-push to push results
+          bash scripts/sync_upstream.sh || true

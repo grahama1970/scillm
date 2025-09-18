@@ -20,7 +20,8 @@ help:
 	@echo "  make lint-black         - Check Black formatting (matches CI)"
 	@echo "  make check-circular-imports - Check for circular imports"
 	@echo "  make check-import-safety - Check import safety"
-	@echo "  make test               - Run all tests"
+	@echo "  make test               - Run all tests
+	@echo "  make test-smokes        - Run offline smoke tests (deterministic)""
 	@echo "  make test-unit          - Run unit tests (tests/test_litellm)"
 	@echo "  make test-integration   - Run integration tests"
 	@echo "  make test-unit-helm     - Run helm unit tests"
@@ -80,11 +81,35 @@ lint: format-check lint-ruff lint-mypy check-circular-imports check-import-safet
 test:
 	poetry run pytest tests/
 
+.PHONY: test-smokes
+test-smokes:
+	PYTHONPATH=$(PWD) pytest tests/smoke -q -r a
+
+.PHONY: sync-upstream
+sync-upstream:
+	bash scripts/sync_upstream.sh --no-push || true
+
 test-unit: install-test-deps
-	poetry run pytest tests/test_litellm -x -vv -n 4
+	poetry run pytest tests/
+
+.PHONY: test-smokes
+test-smokes:
+	PYTHONPATH=$(PWD) pytest tests/smoke -q -r a
+
+.PHONY: sync-upstream
+sync-upstream:
+	bash scripts/sync_upstream.sh --no-push || truetest_litellm -x -vv -n 4
 
 test-integration:
-	poetry run pytest tests/ -k "not test_litellm"
+	poetry run pytest tests/
+
+.PHONY: test-smokes
+test-smokes:
+	PYTHONPATH=$(PWD) pytest tests/smoke -q -r a
+
+.PHONY: sync-upstream
+sync-upstream:
+	bash scripts/sync_upstream.sh --no-push || true -k "not test_litellm"
 
 test-unit-helm: install-helm-unittest
 	helm unittest -f 'tests/*.yaml' deploy/charts/litellm-helm
@@ -98,6 +123,14 @@ test-llm-translation-single: install-test-deps
 	@echo "Running single LLM translation test file..."
 	@if [ -z "$(FILE)" ]; then echo "Usage: make test-llm-translation-single FILE=test_filename.py"; exit 1; fi
 	@mkdir -p test-results
-	poetry run pytest tests/llm_translation/$(FILE) \
+	poetry run pytest tests/
+
+.PHONY: test-smokes
+test-smokes:
+	PYTHONPATH=$(PWD) pytest tests/smoke -q -r a
+
+.PHONY: sync-upstream
+sync-upstream:
+	bash scripts/sync_upstream.sh --no-push || truellm_translation/$(FILE) \
 		--junitxml=test-results/junit.xml \
 		-v --tb=short --maxfail=100 --timeout=300
