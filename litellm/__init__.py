@@ -147,6 +147,7 @@ _custom_logger_compatible_callbacks_literal = Literal[
     "vector_store_pre_call_hook",
     "dotprompt",
     "cloudzero",
+    "posthog",
 ]
 configured_cold_storage_logger: Optional[
     _custom_logger_compatible_callbacks_literal
@@ -241,6 +242,7 @@ gradient_ai_api_key: Optional[str] = None
 nebius_key: Optional[str] = None
 heroku_key: Optional[str] = None
 cometapi_key: Optional[str] = None
+ovhcloud_key: Optional[str] = None
 common_cloud_provider_auth_params: dict = {
     "params": ["project", "region_name", "token"],
     "providers": ["vertex_ai", "bedrock", "watsonx", "azure", "vertex_ai_beta"],
@@ -520,6 +522,8 @@ cometapi_models: Set = set()
 oci_models: Set = set()
 vercel_ai_gateway_models: Set = set()
 volcengine_models: Set = set()
+ovhcloud_models: Set = set()
+ovhcloud_embedding_models: Set = set()
 
 
 def is_bedrock_pricing_only_model(key: str) -> bool:
@@ -734,6 +738,10 @@ def add_known_models():
             oci_models.add(key)
         elif value.get("litellm_provider") == "volcengine":
             volcengine_models.add(key)
+        elif value.get("litellm_provider") == "ovhcloud":
+            ovhcloud_models.add(key)
+        elif value.get("litellm_provider") == "ovhcloud-embedding-models":
+            ovhcloud_embedding_models.add(key)
 
 
 add_known_models()
@@ -828,6 +836,7 @@ model_list = list(
     | heroku_models
     | vercel_ai_gateway_models
     | volcengine_models
+    | ovhcloud_models
 )
 
 model_list_set = set(model_list)
@@ -909,6 +918,7 @@ models_by_provider: dict = {
     "cometapi": cometapi_models,
     "oci": oci_models,
     "volcengine": volcengine_models,
+    "ovhcloud": ovhcloud_models | ovhcloud_embedding_models,
 }
 
 # mapping for those models which have larger equivalents
@@ -943,6 +953,7 @@ all_embedding_models = (
     | fireworks_ai_embedding_models
     | nebius_embedding_models
     | sambanova_embedding_models
+    | ovhcloud_embedding_models
 )
 
 ####### IMAGE GENERATION MODELS ###################
@@ -1013,6 +1024,7 @@ from .llms.openai_like.chat.handler import OpenAILikeChatConfig
 from .llms.aiohttp_openai.chat.transformation import AiohttpOpenAIChatConfig
 from .llms.galadriel.chat.transformation import GaladrielChatConfig
 from .llms.github.chat.transformation import GithubChatConfig
+from .llms.compactifai.chat.transformation import CompactifAIChatConfig
 from .llms.empower.chat.transformation import EmpowerChatConfig
 from .llms.huggingface.chat.transformation import HuggingFaceChatConfig
 from .llms.huggingface.embedding.transformation import HuggingFaceEmbeddingConfig
@@ -1254,6 +1266,8 @@ from .llms.morph.chat.transformation import MorphChatConfig
 from .llms.lambda_ai.chat.transformation import LambdaAIChatConfig
 from .llms.hyperbolic.chat.transformation import HyperbolicChatConfig
 from .llms.vercel_ai_gateway.chat.transformation import VercelAIGatewayConfig
+from .llms.ovhcloud.chat.transformation import OVHCloudChatConfig
+from .llms.ovhcloud.embedding.transformation import OVHCloudEmbeddingConfig
 from .main import *  # type: ignore
 from .integrations import *
 from .llms.custom_httpx.async_client_cleanup import close_litellm_async_clients

@@ -123,6 +123,7 @@ class ModelInfoBase(ProviderSpecificModelInfo, total=False):
     max_output_tokens: Required[Optional[int]]
     input_cost_per_token: Required[float]
     cache_creation_input_token_cost: Optional[float]
+    cache_creation_input_token_cost_above_1hr: Optional[float]
     cache_read_input_token_cost: Optional[float]
     input_cost_per_character: Optional[float]  # only for vertex ai models
     input_cost_per_audio_token: Optional[float]
@@ -162,6 +163,9 @@ class ModelInfoBase(ProviderSpecificModelInfo, total=False):
         SearchContextCostPerQuery
     ]  # Cost for using web search tool
     citation_cost_per_token: Optional[float]  # Cost per citation token for Perplexity
+    tiered_pricing: Optional[
+        List[Dict[str, Any]]
+    ]  # Tiered pricing structure for models like Dashscope
     litellm_provider: Required[str]
     mode: Required[
         Literal[
@@ -1806,6 +1810,9 @@ class AdapterCompletionStreamWrapper:
 class StandardLoggingUserAPIKeyMetadata(TypedDict):
     user_api_key_hash: Optional[str]  # hash of the litellm virtual key used
     user_api_key_alias: Optional[str]
+    user_api_key_spend: Optional[float]
+    user_api_key_max_budget: Optional[float]
+    user_api_key_budget_reset_at: Optional[str]
     user_api_key_org_id: Optional[str]
     user_api_key_team_id: Optional[str]
     user_api_key_user_id: Optional[str]
@@ -1995,7 +2002,7 @@ class StandardLoggingGuardrailInformation(TypedDict, total=False):
     ]
     guardrail_request: Optional[dict]
     guardrail_response: Optional[Union[dict, str, List[dict]]]
-    guardrail_status: Literal["success", "failure","blocked"]
+    guardrail_status: Literal["success", "failure", "blocked"]
     start_time: Optional[float]
     end_time: Optional[float]
     duration: Optional[float]
@@ -2123,6 +2130,7 @@ all_litellm_params = [
     "metadata",
     "litellm_metadata",
     "litellm_trace_id",
+    "litellm_request_debug",
     "guardrails",
     "tags",
     "acompletion",
@@ -2325,6 +2333,7 @@ class LlmProviders(str, Enum):
     DATABRICKS = "databricks"
     EMPOWER = "empower"
     GITHUB = "github"
+    COMPACTIFAI = "compactifai"
     CUSTOM = "custom"
     LITELLM_PROXY = "litellm_proxy"
     HOSTED_VLLM = "hosted_vllm"
@@ -2356,6 +2365,7 @@ class LlmProviders(str, Enum):
     AUTO_ROUTER = "auto_router"
     VERCEL_AI_GATEWAY = "vercel_ai_gateway"
     DOTPROMPT = "dotprompt"
+    OVHCLOUD = "ovhcloud"
 
 
 # Create a set of all provider values for quick lookup
