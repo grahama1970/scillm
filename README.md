@@ -30,6 +30,28 @@
     </a>
 </h4>
 
+
+<div align="center">
+
+<b>About this fork</b>
+
+This fork adds a small set of experimental, opt‑in features while staying close to upstream:
+
+- Mini‑Agent (experimental): a tiny, in‑code agent loop with guardrails, safe local tools, and an optional HTTP tools gateway. Off by default.
+- Parallel ACompletions (flag‑gated): Router helper for bounded concurrent completions.
+- Router Lifecycle: explicit `close()/aclose()` and optional async context‑manager support where available.
+- Ollama Auth Improvements: conditional auth header handling for remote Ollama endpoints (local remains unchanged).
+- Codex‑Agent Provider (env‑gated): optional provider surface for the Codex CLI path; router‑first docs.
+
+Releases: we publish experimental tags (e.g., `v0.1.0-exp`) on branch `fork/stable`. Pin your projects to a tag for reproducibility.
+
+Quick links: 
+- Mini‑Agent docs: `docs/my-website/docs/experimental/mini-agent.md`
+- Maintainers sync guide: `local/docs/MAINTAINERS_SYNC.md`
+- Live checks (manual): `local/scripts/live_checks.py`
+
+</div>
+
 LiteLLM manages:
 
 - Translate inputs to provider's `completion`, `embedding`, and `image_generation` endpoints
@@ -56,6 +78,63 @@ Support for more providers. Missing a provider or LLM Platform, raise a [feature
 
 ```shell
 pip install litellm
+```
+
+
+## Fork Quick Start (Experimental)
+
+Install with extras (optional):
+
+```bash
+pip install -e .[mini_agent]
+```
+
+Use the Mini‑Agent in code:
+
+```python
+from litellm.experimental_mcp_client.mini_agent.litellm_mcp_mini_agent import AgentConfig, LocalMCPInvoker, run_mcp_mini_agent
+cfg = AgentConfig(model="gpt-4o-mini", max_iterations=3, max_wallclock_seconds=30)
+messages = [{"role":"user","content":"Say only: hi"}]
+result = run_mcp_mini_agent(messages, mcp=LocalMCPInvoker(), cfg=cfg)
+print(result.stopped_reason, result.final_answer)
+```
+
+Parallel ACompletions (flag‑gated):
+
+```bash
+export LITELLM_ENABLE_PARALLEL_ACOMPLETIONS=1
+```
+```python
+from litellm import Router
+from litellm.router_utils.parallel_acompletion import RouterParallelRequest
+router = Router(model_list=[{"model_name":"local-oss","litellm_params":{"model":"ollama/gpt-oss:latest","api_base":"http://127.0.0.1:11434"}}])
+reqs=[RouterParallelRequest('local-oss',[{"role":"user","content":"one"}],{}), RouterParallelRequest('local-oss',[{"role":"user","content":"two"}],{})]
+results = await router.parallel_acompletions(reqs, preserve_order=True)
+```
+
+Keep fork current (dry‑run):
+
+```bash
+make sync-upstream
+```
+
+Run offline smokes:
+
+```bash
+make test-smokes
+```
+
+Run live checks (Ollama + optional flags):
+
+```bash
+python local/scripts/live_checks.py
+LITELLM_ENABLE_PARALLEL_ACOMPLETIONS=1 python local/scripts/live_checks.py
+```
+
+Pin projects to a tagged release:
+
+```text
+git+ssh://git@github.com/grahama1970/litellm.git@v0.1.0-exp#egg=litellm
 ```
 
 ```python
