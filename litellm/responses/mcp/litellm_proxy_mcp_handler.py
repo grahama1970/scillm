@@ -6,7 +6,10 @@ from litellm.responses.streaming_iterator import BaseResponsesAPIStreamingIterat
 from litellm.types.llms.openai import ResponsesAPIResponse, ToolParam
 
 if TYPE_CHECKING:
-    from mcp.types import Tool as MCPTool
+try:  # soft-dep
+    from mcp.types import Tool as MCPTool  # type: ignore
+except Exception:  # pragma: no cover
+    MCPTool = None  # type: ignore
 else:
     MCPTool = Any
 

@@ -33,7 +33,10 @@ class HttpToolsInvoker(MCPInvoker):
     async def list_openai_tools(self) -> List[Dict[str, Any]]:
         async with httpx.AsyncClient(timeout=self.timeout, headers=self.headers) as client:  # type: ignore[attr-defined]
             r = await client.get(f"{self.base_url}/tools")
-            r.raise_for_status()
+            if r.status_code >= 400:
+                body = (r.text or "")
+                tail = body[:256]
+                raise Exception(f"HTTP {r.status_code} /tools: {tail}")
             data = r.json()
             if not isinstance(data, list):
                 raise ValueError("Invalid /tools response; expected a list")
@@ -49,7 +52,10 @@ class HttpToolsInvoker(MCPInvoker):
         payload = {"name": name, "arguments": args}
         async with httpx.AsyncClient(timeout=self.timeout, headers=self.headers) as client:  # type: ignore[attr-defined]
             r = await client.post(f"{self.base_url}/invoke", json=payload)
-            r.raise_for_status()
+            if r.status_code >= 400:
+                body = (r.text or "")
+                tail = body[:256]
+                raise Exception(f"HTTP {r.status_code} /invoke: {tail}")
             data = r.json()
             if not isinstance(data, dict):
                 raise ValueError("Invalid /invoke response; expected an object")

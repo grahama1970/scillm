@@ -6,14 +6,25 @@ import base64
 from datetime import timedelta
 from typing import List, Optional
 
-from mcp import ClientSession, StdioServerParameters
-from mcp.client.sse import sse_client
-from mcp.client.stdio import stdio_client
-from mcp.client.streamable_http import streamablehttp_client
-from mcp.types import CallToolRequestParams as MCPCallToolRequestParams
-from mcp.types import CallToolResult as MCPCallToolResult
-from mcp.types import TextContent
-from mcp.types import Tool as MCPTool
+try:  # soft-dep; allow import without MCP installed
+    from mcp import ClientSession, StdioServerParameters  # type: ignore
+    from mcp.client.sse import sse_client  # type: ignore
+    from mcp.client.stdio import stdio_client  # type: ignore
+    from mcp.client.streamable_http import streamablehttp_client  # type: ignore
+    from mcp.types import CallToolRequestParams as MCPCallToolRequestParams  # type: ignore
+    from mcp.types import CallToolResult as MCPCallToolResult  # type: ignore
+    from mcp.types import TextContent  # type: ignore
+    from mcp.types import Tool as MCPTool  # type: ignore
+except Exception:  # pragma: no cover
+    ClientSession = None  # type: ignore
+    StdioServerParameters = None  # type: ignore
+    sse_client = None  # type: ignore
+    stdio_client = None  # type: ignore
+    streamablehttp_client = None  # type: ignore
+    MCPCallToolRequestParams = None  # type: ignore
+    MCPCallToolResult = None  # type: ignore
+    TextContent = None  # type: ignore
+    MCPTool = None  # type: ignore
 
 from litellm._logging import verbose_logger
 from litellm.types.mcp import (

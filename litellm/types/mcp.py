@@ -7,9 +7,14 @@ from typing_extensions import TypedDict
 from litellm.types.llms.base import HiddenParams
 
 if TYPE_CHECKING:
-    from mcp.types import EmbeddedResource as MCPEmbeddedResource
-    from mcp.types import ImageContent as MCPImageContent
-    from mcp.types import TextContent as MCPTextContent
+    try:
+        from mcp.types import EmbeddedResource as MCPEmbeddedResource  # type: ignore
+        from mcp.types import ImageContent as MCPImageContent  # type: ignore
+        from mcp.types import TextContent as MCPTextContent  # type: ignore
+    except Exception:  # pragma: no cover
+        MCPEmbeddedResource = object  # type: ignore
+        MCPImageContent = object  # type: ignore
+        MCPTextContent = object  # type: ignore
 else:
     MCPEmbeddedResource = Any
     MCPImageContent = Any

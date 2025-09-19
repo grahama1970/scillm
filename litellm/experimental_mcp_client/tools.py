@@ -1,10 +1,16 @@
 import json
 from typing import Dict, List, Literal, Union
 
-from mcp import ClientSession
-from mcp.types import CallToolRequestParams as MCPCallToolRequestParams
-from mcp.types import CallToolResult as MCPCallToolResult
-from mcp.types import Tool as MCPTool
+try:  # soft-dep; guard at import time
+    from mcp import ClientSession  # type: ignore
+    from mcp.types import CallToolRequestParams as MCPCallToolRequestParams  # type: ignore
+    from mcp.types import CallToolResult as MCPCallToolResult  # type: ignore
+    from mcp.types import Tool as MCPTool  # type: ignore
+except Exception:  # pragma: no cover
+    ClientSession = None  # type: ignore
+    MCPCallToolRequestParams = None  # type: ignore
+    MCPCallToolResult = None  # type: ignore
+    MCPTool = None  # type: ignore
 from openai.types.chat import ChatCompletionToolParam
 from openai.types.responses.function_tool_param import FunctionToolParam
 from openai.types.shared_params.function_definition import FunctionDefinition
