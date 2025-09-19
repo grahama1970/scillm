@@ -92,6 +92,14 @@ const sidebars = {
 
     {
       type: "category",
+      label: "Experimental",
+      items: [
+        "experimental/mini-agent"
+      ]
+    },
+
+    {
+      type: "category",
       label: "LiteLLM Proxy Server",
       link: {
         type: "generated-index",
