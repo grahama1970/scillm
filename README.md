@@ -588,3 +588,91 @@ All these checks must pass before your PR can be merged.
 1. Navigate to `ui/litellm-dashboard`
 2. Install dependencies `npm install`
 3. Run `npm run dev` to start the dashboard
+
+
+## Mini‑Agent by Example (Observation → Repair)
+
+This short run shows how the agent executes a failing tool step, appends an Observation (rc/stdout/stderr tails), and proposes a fix before continuing.
+
+```python
+from litellm.experimental_mcp_client.mini_agent.litellm_mcp_mini_agent import (
+    AgentConfig, LocalMCPInvoker, run_mcp_mini_agent
+)
+
+messages = [
+    {
+      "role": "user",
+      "content": (
+        "1) Run exec_python with code that throws (ZeroDivisionError).
+"
+        "2) Read the Observation.
+"
+        "3) Propose a corrected next step and run it.
+"
+        "4) Reply only with the final result."
+      )
+    }
+]
+
+cfg = AgentConfig(
+  model="gpt-4o-mini",            # any Router-supported model
+  max_iterations=4,                 # guardrails
+  max_wallclock_seconds=45,
+)
+res = run_mcp_mini_agent(messages, mcp=LocalMCPInvoker(), cfg=cfg)
+print(res.stopped_reason)
+print((res.final_answer or "")[:400])
+```
+
+Expected flow (abridged):
+- Tool run: `exec_python("print(1/0)")` → stderr contains `ZeroDivisionError`
+- Agent appends Observation (rc/stdout/stderr tails) and proposes: `print(1/1)` or `print(1)`
+- Tool run succeeds; agent returns the final result (e.g., `1`)
+
+Notes
+- Observations are concise and truncated to avoid context bloat. The latest `assistant(tool_calls)` → `tool` pair is preserved during pruning.
+- Shell tool is allowlisted and time-bounded.
+
+## HTTP Tools Gateway Contract (Optional)
+
+You can expose tools over a tiny HTTP contract and point the Mini‑Agent to it with `HttpToolsInvoker`. The contract:
+
+```
+GET  /tools
+-> [
+  { "type": "function", "function": { "name": "echo", "parameters": {"type":"object","properties":{"text":{"type":"string"}}, "required":["text"] } } },
+  ...
+]
+
+POST /invoke
+{ "name": "echo", "arguments": { "text": "hi" } }
+-> { "text": "hi" }
+```
+
+Simple ASCII view:
+
+```
+Mini‑Agent  --(GET /tools)-->  Gateway   -- returns JSON tools array -->  Mini‑Agent
+Mini‑Agent  --(POST /invoke {name,arguments})-->  Gateway  -- returns {text|error} --> Mini‑Agent
+```
+
+Security & headers
+- Add bearer auth on the gateway and pass headers via `HttpToolsInvoker(base_url, headers={"Authorization":"Bearer ..."})`.
+- Keep timeouts and per‑tool allowlists on both sides.
+
+## Release / Tag Policy (Fork)
+
+- Integration branch: `fork/stable` aggregates features we actually use.
+- Tags: `v0.1.x-exp` experimental tags published from `fork/stable`.
+- Pin in projects:
+
+```text
+git+ssh://git@github.com/grahama1970/litellm.git@v0.1.0-exp#egg=litellm
+```
+
+- New tag checklist:
+  - `make sync-upstream` (dry-run sync + smokes)
+  - `make test-smokes`
+  - `python local/scripts/live_checks.py` (optionally with flags/keys)
+  - `git tag v0.1.(N+1)-exp && git push origin v0.1.(N+1)-exp`
+```
