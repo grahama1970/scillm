@@ -789,7 +789,10 @@ class CommonBatchFilesUtils:
         Returns:
             Unique job name (≤ 63 characters for Bedrock compatibility)
         """
-        import fastuuid as uuid
+        try:
+            import fastuuid as uuid  # type: ignore
+        except Exception:  # pragma: no cover
+            import uuid  # type: ignore
 
         unique_id = str(uuid.uuid4())[:8]
         # Format: {prefix}-batch-{model}-{uuid}
