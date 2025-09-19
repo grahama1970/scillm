@@ -23,8 +23,9 @@ async def close_litellm_async_clients():
             try:
                 await handler.close()
             except Exception:
-                # Silently ignore errors during cleanup
-                pass
+                # Silently ignore errors during cleanup (log at DEBUG for triage)
+                import logging
+                logging.getLogger("litellm").debug("async_client_cleanup: aiohttp handler close() failed", exc_info=True)
 
         # Handle AsyncHTTPHandler instances (used by Gemini and other providers)
         elif hasattr(handler, "client"):
@@ -34,23 +35,23 @@ async def close_litellm_async_clients():
                 try:
                     await client._transport.aclose()
                 except Exception:
-                    # Silently ignore errors during cleanup
-                    pass
+                    import logging
+                    logging.getLogger("litellm").debug("async_client_cleanup: transport aclose() failed", exc_info=True)
             # Also close the httpx client itself
             if hasattr(client, "aclose") and not client.is_closed:
                 try:
                     await client.aclose()
                 except Exception:
-                    # Silently ignore errors during cleanup
-                    pass
+                    import logging
+                    logging.getLogger("litellm").debug("async_client_cleanup: client aclose() failed", exc_info=True)
 
         # Handle any other objects with aclose method
         elif hasattr(handler, "aclose"):
             try:
                 await handler.aclose()
             except Exception:
-                # Silently ignore errors during cleanup
-                pass
+                import logging
+                logging.getLogger("litellm").debug("async_client_cleanup: generic aclose() failed", exc_info=True)
 
 
 def register_async_client_cleanup():
@@ -77,7 +78,7 @@ def register_async_client_cleanup():
                 loop.run_until_complete(close_litellm_async_clients())
                 loop.close()
             except Exception:
-                # Silently ignore errors during cleanup
-                pass
+                import logging
+                logging.getLogger("litellm").debug("async_client_cleanup: cleanup_wrapper failed", exc_info=True)
 
     atexit.register(cleanup_wrapper)

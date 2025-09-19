@@ -93,10 +93,13 @@ Use the Mini‑Agent in code:
 
 ```python
 from litellm.experimental_mcp_client.mini_agent.litellm_mcp_mini_agent import AgentConfig, LocalMCPInvoker, run_mcp_mini_agent
-cfg = AgentConfig(model="gpt-4o-mini", max_iterations=3, max_wallclock_seconds=30)
+import os
+# Prefer LITELLM_DEFAULT_MODEL from .env; fallback to a known model string
+model = os.getenv("LITELLM_DEFAULT_MODEL", "gemini/gemini-2.0-flash")
+cfg = AgentConfig(model=model, max_iterations=3, max_wallclock_seconds=30)
 messages = [{"role":"user","content":"Say only: hi"}]
 result = run_mcp_mini_agent(messages, mcp=LocalMCPInvoker(), cfg=cfg)
-print(result.stopped_reason, result.final_answer)
+print(result.stopped_reason, (result.final_answer or "")[:200])
 ```
 
 Parallel ACompletions (flag‑gated):
@@ -127,6 +130,7 @@ make test-smokes
 Run live checks (Ollama + optional flags):
 
 ```bash
+# optional: load your .env (LITELLM_DEFAULT_MODEL, GEMINI_API_KEY, etc.)
 python local/scripts/live_checks.py
 LITELLM_ENABLE_PARALLEL_ACOMPLETIONS=1 python local/scripts/live_checks.py
 ```
@@ -142,6 +146,10 @@ LITELLM_ENABLE_PARALLEL_ACOMPLETIONS=1 python local/scripts/live_checks.py
 | Router Lifecycle (close/aclose) | Additive | Use `await router.acompletion(...); await router.aclose()` | README Quick Start |
 | Ollama Auth Improvements | Additive | Set `api_base`, `OLLAMA_API_KEY` for remote | README Quick Start |
 | Codex‑Agent Provider | Env‑gated | `export LITELLM_ENABLE_CODEX_AGENT=1` | docs/my-website/docs/providers/codex_agent.md |
+| Images Helper | Optional | `pip install -e .[images]` then `from litellm.extras.images import compress_image, fetch_remote_image` | README |
+| Response Utils | Optional | `from litellm.extras.response_utils import extract_content, assemble_stream_text` | README |
+| Batch Helper | Optional | `from litellm.extras.batch import acompletion_as_completed` | README |
+| Cache Helper | Optional | `from litellm.extras.cache import configure_cache_redis` | README |
 
 ## Getting Started: Mini‑Agent
 
@@ -191,6 +199,37 @@ Tips
 - Keep features off by default; enable flags/env only where needed.
 - Use `make test-smokes` for fast verification; `local/scripts/live_checks.py` for manual e2e checks.
 - Pin a tag like `v0.1.0-exp` in consuming projects for reproducibility.
+
+## Extras: Reduce Boilerplate (Examples)
+
+Images
+```python
+from litellm.extras.images import compress_image, fetch_remote_image
+data_url_local = compress_image("/path/to/pic.png", max_kb=256, cache_dir=".cache/images")
+# async fetch for remote
+# data_url_remote = await fetch_remote_image("https://example.com/cat.jpg", cache_dir=".cache/images")
+```
+
+Response utils
+```python
+from litellm.extras.response_utils import extract_content, assemble_stream_text, augment_json_with_cost
+text = extract_content(resp)
+# text_stream = await assemble_stream_text(stream_iter)
+out = augment_json_with_cost('{"answer":"ok"}', resp)
+```
+
+Batch helper
+```python
+from litellm.extras.batch import acompletion_as_completed
+async for i, r in acompletion_as_completed(router, [{"model":"m","messages":[{"role":"user","content":"hi"}]}], concurrency=4):
+    print(i, r)
+```
+
+Cache helper
+```python
+from litellm.extras.cache import configure_cache_redis
+configure_cache_redis(host="localhost", port=6379, password=None, ttl=172800)
+```
 Pin projects to a tagged release:
 
 ```text

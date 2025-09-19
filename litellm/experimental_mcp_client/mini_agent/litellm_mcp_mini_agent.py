@@ -295,7 +295,13 @@ async def arun_mcp_mini_agent(
                 temperature=cfg.temperature,
                 **llm_kwargs,
             )
-            msg = resp["choices"][0]["message"]
+            # Support both object and dict responses
+            choices = getattr(resp, "choices", None) or resp.get("choices", [])
+            first = choices[0] if choices else {}
+            msg = getattr(first, "message", None) or first.get("message", {})
+            # Normalize dict message shape if object-like
+            if not isinstance(msg, dict) and hasattr(msg, "role") and hasattr(msg, "content"):
+                msg = {"role": getattr(msg, "role", "assistant"), "content": getattr(msg, "content", "")}
             convo.append(msg)
 
             tool_calls = _get_tool_calls(msg)

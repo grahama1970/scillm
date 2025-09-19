@@ -128,6 +128,7 @@ mini_agent = [
 images = [
     "Pillow",
     "urlextract",
+    "httpx",
 ]
 
 redis_cache = [

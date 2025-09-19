@@ -1,5 +1,5 @@
 import json
-from typing import Dict, List, Literal, Union
+from typing import Dict, List, Literal, Union, Any
 
 try:  # soft-dep; guard at import time
     from mcp import ClientSession  # type: ignore
@@ -119,9 +119,11 @@ async def call_mcp_tool(
     return tool_result
 
 
-def _get_function_arguments(function: FunctionDefinition) -> dict:
+def _get_function_arguments(function: Any) -> dict:
     """Helper to safely get and parse function arguments."""
-    arguments = function.get("arguments", {})
+    arguments = getattr(function, "arguments", None)
+    if arguments is None and isinstance(function, dict):
+        arguments = function.get("arguments", {})
     if isinstance(arguments, str):
         try:
             arguments = json.loads(arguments)
@@ -134,9 +136,12 @@ def transform_openai_tool_call_request_to_mcp_tool_call_request(
     openai_tool: Union[ChatCompletionMessageToolCall, Dict],
 ) -> MCPCallToolRequestParams:
     """Convert an OpenAI ChatCompletionMessageToolCall to an MCP CallToolRequestParams."""
-    function = openai_tool["function"]
+    # Support both object and dict access
+    function = getattr(openai_tool, "function", None)
+    if function is None and isinstance(openai_tool, dict):
+        function = openai_tool.get("function")
     return MCPCallToolRequestParams(
-        name=function["name"],
+        name=(getattr(function, "name", None) or (function.get("name") if isinstance(function, dict) else None)),
         arguments=_get_function_arguments(function),
     )
 
