@@ -131,6 +131,66 @@ python local/scripts/live_checks.py
 LITELLM_ENABLE_PARALLEL_ACOMPLETIONS=1 python local/scripts/live_checks.py
 ```
 
+
+
+## Feature Matrix (Fork Extras)
+
+| Feature | Status | How to Enable | Docs |
+|---|---|---|---|
+| Mini‑Agent (in‑code agent loop) | Experimental (off by default) | `pip install -e .[mini_agent]` | docs/my-website/docs/experimental/mini-agent.md |
+| Parallel ACompletions (Router) | Flag‑gated | `export LITELLM_ENABLE_PARALLEL_ACOMPLETIONS=1` | README Quick Start |
+| Router Lifecycle (close/aclose) | Additive | Use `await router.acompletion(...); await router.aclose()` | README Quick Start |
+| Ollama Auth Improvements | Additive | Set `api_base`, `OLLAMA_API_KEY` for remote | README Quick Start |
+| Codex‑Agent Provider | Env‑gated | `export LITELLM_ENABLE_CODEX_AGENT=1` | docs/my-website/docs/providers/codex_agent.md |
+
+## Getting Started: Mini‑Agent
+
+1) Install extras (optional):
+
+```bash
+pip install -e .[mini_agent]
+```
+
+2) Minimal in‑code run (local tools only):
+
+```python
+from litellm.experimental_mcp_client.mini_agent.litellm_mcp_mini_agent import (
+    AgentConfig, LocalMCPInvoker, run_mcp_mini_agent
+)
+
+cfg = AgentConfig(
+    model="gpt-4o-mini",          # or any Router-supported model
+    max_iterations=3,              # guardrail caps
+    max_wallclock_seconds=30,
+)
+messages = [{"role": "user", "content": "Run python: print('hi') and summarize the result."}]
+res = run_mcp_mini_agent(messages, mcp=LocalMCPInvoker(), cfg=cfg)
+print(res.stopped_reason, (res.final_answer or "")[:200])
+```
+
+3) Safe local tools available to the agent:
+- `exec_python(code, timeout_s?)` — returns JSON `{ok, rc, stdout, stderr}`
+- `exec_shell(cmd, timeout_s?)` — allowlist prefixes; returns JSON `{ok, rc, stdout, stderr}`
+
+The agent appends a compact Observation after tool runs (rc/stdout/stderr tails) and asks the model to repair or proceed. History is pruned and the latest tool_call→tool pair is preserved.
+
+4) Optional: research via Router
+- Set `cfg.model` to a research‑capable model (e.g., `perplexity/sonar-pro`) and prompt the agent to use it when uncertain.
+
+5) Optional: HTTP tools gateway
+- Expose your tools over a tiny HTTP contract (`GET /tools`, `POST /invoke`).
+- Point the agent at it:
+
+```python
+from litellm.experimental_mcp_client.mini_agent.http_tools_invoker import HttpToolsInvoker
+mcp = HttpToolsInvoker("http://127.0.0.1:8787", headers={"Authorization": "Bearer ..."})
+res = run_mcp_mini_agent(messages, mcp=mcp, cfg=cfg)
+```
+
+Tips
+- Keep features off by default; enable flags/env only where needed.
+- Use `make test-smokes` for fast verification; `local/scripts/live_checks.py` for manual e2e checks.
+- Pin a tag like `v0.1.0-exp` in consuming projects for reproducibility.
 Pin projects to a tagged release:
 
 ```text
