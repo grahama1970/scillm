@@ -79,11 +79,12 @@ class CodeWorldLLM(CustomLLM):
             model_response.choices[0].message.role = "assistant"  # type: ignore[attr-defined]
         except Exception:
             model_response.choices[0].message = {"role": "assistant", "content": summary}  # type: ignore[assignment]
-        # Stash extra fields for downstream tools
+        # Expose additional fields via additional_kwargs["codeworld"]
         try:
-            hidden = getattr(model_response, "_hidden_params", {}) or {}
-            hidden["codeworld"] = additional
-            setattr(model_response, "_hidden_params", hidden)
+            if hasattr(model_response, "additional_kwargs") and isinstance(model_response.additional_kwargs, dict):  # type: ignore[attr-defined]
+                model_response.additional_kwargs.setdefault("codeworld", additional)  # type: ignore[attr-defined]
+            else:
+                setattr(model_response, "additional_kwargs", {"codeworld": additional})
         except Exception:
             pass
         return model_response
@@ -129,18 +130,20 @@ class CodeWorldLLM(CustomLLM):
         if status == 200:
             return self._map_response(model_response, data, model)
         if status == 202:
-            # Best-effort poll until done or budget expires
+            # Poll with exponential backoff up to 10s
             result_url = data.get("result_url") or ""
             t_end = time.time() + budget + 30.0
+            backoff = 0.5
             while time.time() < t_end:
                 try:
                     with httpx.Client(timeout=10.0, headers=hdr) as c:
                         rr = c.get(base + result_url) if result_url else None
                         if rr is not None and rr.status_code == 200:
                             return self._map_response(model_response, rr.json(), model)
-                        time.sleep(1.0)
                 except Exception:
-                    time.sleep(1.0)
+                    pass
+                time.sleep(backoff)
+                backoff = min(backoff * 2.0, 10.0)
             raise CustomLLMError(status_code=504, message="CodeWorld job did not complete within budget")
         # Error path
         try:
@@ -193,14 +196,16 @@ class CodeWorldLLM(CustomLLM):
             result_url = data.get("result_url") or ""
             t_end = time.time() + budget + 30.0
             async with httpx.AsyncClient(timeout=10.0, headers=hdr) as c:
+                backoff = 0.5
                 while time.time() < t_end:
                     try:
                         rr = await c.get(base + result_url) if result_url else None
                         if rr is not None and rr.status_code == 200:
                             return self._map_response(model_response, rr.json(), model)
-                        await asyncio.sleep(1.0)  # type: ignore
                     except Exception:
-                        await asyncio.sleep(1.0)  # type: ignore
+                        pass
+                    await asyncio.sleep(backoff)  # type: ignore
+                    backoff = min(backoff * 2.0, 10.0)
             raise CustomLLMError(status_code=504, message="CodeWorld job did not complete within budget")
         try:
             msg = data.get("error") or str(data)[:200]
@@ -214,4 +219,3 @@ try:
     register_custom_provider("codeworld", CodeWorldLLM)
 except Exception:
     pass
-
