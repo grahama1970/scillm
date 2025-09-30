@@ -1,0 +1,91 @@
+# Lean4 Prover — Quickstart
+
+This quickstart mirrors the LiteLLM fork conventions. Scenarios live under
+`scenarios/` and produce human- and machine-friendly JSON that can be embedded
+in readiness reports or review bundles.
+
+## 1) Install
+
+```bash
+uv venv --python=3.10.11 .venv
+source .venv/bin/activate
+uv pip install -e .[dev]
+cp env.example .env  # optional, enables cached Lean/LiteLLM settings
+```
+
+## 2) Run release scenarios (fast confidence)
+
+```bash
+make run-scenarios
+```
+
+This executes `scenarios/run_all.py` which currently runs:
+
+1. `lean4_batch_demo.py` – deterministic `cli_mini batch` on
+   `samples/final_readiness/batch_input.json` with `--deterministic --no-llm`.
+2. `lean4_suggest_demo.py` – single requirement “run” flow with
+   `--disambiguate --best-of 2`.
+
+Each script prints the exact command, proof statistics, and normalized JSON
+summary. Use `SCENARIOS_STOP_ON_FIRST_FAILURE=1 make run-scenarios` to
+short-circuit after the first regression.
+
+## 3) Run scenarios individually
+
+```bash
+# Deterministic batch proof (override input via LEAN4_SCENARIO_BATCH_INPUT)
+python scenarios/lean4_batch_demo.py
+
+# Single requirement (override requirement via LEAN4_SCENARIO_REQUIREMENT)
+python scenarios/lean4_suggest_demo.py
+```
+
+All scripts load `.env` automatically (`python-dotenv`) so cached configuration
+(e.g., `LEAN4_CLI_CMD`, LiteLLM keys) is respected.
+
+## 4) Deterministic tests and readiness
+
+```bash
+# Full test suite (unit + integration)
+uv run pytest -q
+
+# Composite readiness gate (deterministic + offline batch)
+python scripts/mvp_check.py
+
+# Strict/live gate (requires Docker + providers, e.g. Ollama)
+READINESS_LIVE=1 STRICT_READY=1 READINESS_EXPECT=ollama python scripts/mvp_check.py
+```
+
+Legacy pytest smokes (`tests/smoke`, `tests/ndsmoke`) are now archived. They can
+still be run manually (`pytest -q tests/smoke`), but new work should prefer the
+scenario scripts above for parity with LiteLLM projects.
+
+## 5) Optional web viewer + analyzer
+
+The viewer is an operator aid (not required for the CLI contract).
+
+```bash
+cd prototypes/lemma-graph-viewer
+npm ci
+npm run serve:checked
+```
+
+Optional analyzer endpoint:
+
+```bash
+npm run analyzer:serve                       # Terminal A
+npm run serve:checked                        # Terminal B
+# Visit the printed URL with ?lean4_api=http://127.0.0.1:8787
+```
+
+Generate demo graphs:
+
+```bash
+uv run scripts/viewers/make_synthetic_graph.py prototypes/lemma-graph-viewer/public/graph.json
+```
+
+### Need more?
+- `docs/EXTRACTOR_INTEGRATION.md`—Stage 08 batch contract
+- `docs/readiness/FINAL_MANUAL_CHECKLIST.md`—manual gate after `mvp_check`
+- `feature_recipes/`—sample LiteLLM bridge showing how Router calls could invoke
+  Lean4 via the `/bridge` surface
