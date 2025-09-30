@@ -197,3 +197,27 @@ artifacts, metrics, scorecard, winner). See CodeWorld's `docs/guides/BRIDGE_API.
 for exact schemas. In production, wire this as a LiteLLM custom provider so a
 single `router.acompletion(model="codeworld", ...)` call returns both a human
 summary and the machine-friendly metrics.
+
+### CodeWorld Provider (Router)
+
+```python
+import os
+from litellm import Router
+
+router = Router(model_list=[{
+  "model_name": "codeworld",
+  "litellm_params": {
+    "model": "codeworld",
+    "custom_llm_provider": "codeworld",
+    "api_base": os.getenv("CODEWORLD_BASE", "http://127.0.0.1:8000"),
+    "api_key": os.getenv("CODEWORLD_TOKEN"),
+  }
+}])
+
+resp = await router.acompletion(
+  model="codeworld",
+  messages=[{"role":"user","content":"run a short bounded eval"}],
+  request_timeout=45,
+)
+print(resp.choices[0].message["content"])  # summary from CodeWorld Bridge
+```
