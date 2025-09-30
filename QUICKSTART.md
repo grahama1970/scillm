@@ -24,7 +24,7 @@ This executes `scenarios/run_all.py` which currently runs:
 1. `lean4_batch_demo.py` – deterministic `cli_mini batch` on
    `samples/final_readiness/batch_input.json` with `--deterministic --no-llm`.
 2. `lean4_suggest_demo.py` – single requirement “run” flow with
-   `--disambiguate --best-of 2`.
+   `--disambiguate` (deterministic, no LLM).
 
 Each script prints the exact command, proof statistics, and normalized JSON
 summary. Use `SCENARIOS_STOP_ON_FIRST_FAILURE=1 make run-scenarios` to
@@ -42,6 +42,30 @@ python scenarios/lean4_suggest_demo.py
 
 All scripts load `.env` automatically (`python-dotenv`) so cached configuration
 (e.g., `LEAN4_CLI_CMD`, LiteLLM keys) is respected.
+
+## Bridge API (optional)
+
+```bash
+uvicorn lean4_prover.bridge.server:app --reload
+```
+
+POST `/bridge/complete` with:
+
+```json
+{
+  "messages": [{"role": "system", "content": "Analyse the batch"}],
+  "lean4_requirements": [
+    {"requirement_text": "0 + n = n"},
+    {"requirement_text": "The sum of two even numbers is even"}
+  ],
+  "lean4_flags": ["--deterministic", "--no-llm"],
+  "max_seconds": 180
+}
+```
+
+The response mirrors the scenario JSON (summary, statistics, proof_results, stdout, stderr, duration).
+Use `feature_recipes/litellm_bridge.py` as a sketch for wiring this into a LiteLLM Router call.
+
 
 ## 4) Deterministic tests and readiness
 
