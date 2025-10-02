@@ -119,6 +119,15 @@ checks:
       curl -sSf http://127.0.0.1:8787/healthz
     optional: true
 
+  - name: lean4_health_strict
+    description: Lean4/Certainly bridge /healthz (strict when live)
+    run: |
+      curl -sSf http://127.0.0.1:8787/healthz
+    env:
+      READINESS_LIVE: "1"
+      STRICT_READY: "1"
+    optional: false
+
   - name: certainly_health
     description: Certainly (alias) bridge /healthz
     run: |

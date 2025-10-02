@@ -43,7 +43,18 @@
     </a>
 </h4>
 
-<p align="center"><i>This fork remains API‑compatible with LiteLLM while adding optional modules for formal methods (Lean4), code orchestration (CodeWorld), and live agent flows. See QUICKSTART.md and scenarios/ for runnable demos. Use SCILLM_ENABLE_* or LITELLM_ENABLE_* flags to enable modules.</i></p>
+<p align="center"><i>This fork remains API‑compatible with LiteLLM while adding optional modules for formal methods (Lean4, exposed as "Certainly"), code orchestration (CodeWorld), and live agent flows. See QUICKSTART.md and scenarios/ for runnable demos. Use SCILLM_ENABLE_* or LITELLM_ENABLE_* flags to enable modules.</i></p>
+
+## Certainly (Lean4 only, alpha)
+
+Certainly is the umbrella surface for theorem provers; today it routes to Lean4 only.
+
+- Enable provider: `LITELLM_ENABLE_LEAN4=1` (or `LITELLM_ENABLE_CERTAINLY=1`)
+- Bridge: `LEAN4_BRIDGE_BASE` (or `CERTAINLY_BRIDGE_BASE`) defaults to `http://127.0.0.1:8787`
+- Router: use `custom_llm_provider="lean4"` or the alias `"certainly"`
+- Scenarios: `scenarios/lean4_*` and `scenarios/certainly_*` demonstrate both paths
+
+Future backends (e.g., Coq) will plug into the same surface, but are out of scope for this alpha.
 
 <details>
   <summary>Logo variants</summary>
