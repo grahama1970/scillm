@@ -163,4 +163,4 @@ uv run scripts/viewers/make_synthetic_graph.py prototypes/lemma-graph-viewer/pub
 - `docs/readiness/FINAL_MANUAL_CHECKLIST.md`—manual gate after `mvp_check`
 - `feature_recipes/`—sample LiteLLM bridge showing how Router calls could invoke
   Lean4 via the `/bridge` surface
-> Looking for the full SciLLM stack (Lean4/Certainly + CodeWorld + proxy)? See `QUICK_START.md` for Docker bring‑up (`local/docker/compose.scillm.stack.yml`) and scenarios covering both bridges.
+> Looking for the full SciLLM stack (Lean4/Certainly + CodeWorld + proxy)? See `QUICK_START.md` for Docker bring‑up (`deploy/docker/compose.scillm.stack.yml`) and scenarios covering both bridges.

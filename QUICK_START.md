@@ -17,7 +17,7 @@ This fork adds an opt-in Mini-Agent, an env-gated `codex-agent` provider, and a 
 Recommended Docker bring-up (CodeWorld + Lean4 + Redis + ArangoDB + Ollama + proxy):
 
 ```bash
-docker compose -f local/docker/compose.scillm.stack.yml up --build -d
+docker compose -f deploy/docker/compose.scillm.stack.yml up --build -d  # or local/docker/... if not migrated
 ```
 
 Notes:
