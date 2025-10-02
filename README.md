@@ -65,9 +65,9 @@ Future backends (e.g., Coq) will plug into the same surface, but are out of scop
     &nbsp;&nbsp;
     <img src="local/artifacts/logo/SciLLM_icon.svg" alt="SciLLM Icon" height="36" />
     &nbsp;&nbsp;
-    <img src="SciLLM_balanced_dark.svg" alt="SciLLM Balanced Dark" height="36" />
+    <img src="local/artifacts/logo/SciLLM_balanced_dark.svg" alt="SciLLM Balanced Dark" height="36" />
     &nbsp;&nbsp;
-    <img src="SciLLM_balanced_mono.svg" alt="SciLLM Balanced Mono" height="36" />
+    <img src="local/artifacts/logo/SciLLM_balanced_mono.svg" alt="SciLLM Balanced Mono" height="36" />
   </p>
   <p>Use <code>make logo-export</code> to produce outlined SVGs and favicons in <code>local/artifacts/logo/</code>. The generated <code>favicon.ico</code> uses the icon only (no text).</p>
 </details>
@@ -91,7 +91,7 @@ This repository has been renamed to **scillm** and branded as **SciLLM — a sci
 - Core LiteLLM usage remains compatible; Lean4/CodeWorld are optional modules.
 - Preferred env flags: `SCILLM_ENABLE_*` (aliases: `LITELLM_ENABLE_*`).
 - CLI aliases: `scillm`, `scillm-proxy` (equivalent to litellm commands).
-- Deployment profiles: see `SCILLM_DEPLOY.md` and `local/docker/compose.scillm.*.yml`.
+- Deployment profiles: see `docs/deploy/SCILLM_DEPLOY.md` and `local/docker/compose.scillm.*.yml`.
 
 - Translate inputs to provider's `completion`, `embedding`, and `image_generation` endpoints
 - [Consistent output](https://docs.litellm.ai/docs/completion/output), text responses will always be available at `['choices'][0]['message']['content']`
@@ -102,14 +102,14 @@ This repository has been renamed to **scillm** and branded as **SciLLM — a sci
 [**Jump to Supported LLM Providers**](https://github.com/BerriAI/litellm?tab=readme-ov-file#supported-providers-docs)
 
 Fork Status (our fork)
-- See `STATE_OF_PROJECT.md` for a concise, operator‑friendly status of this fork, including the router_core seam (opt‑in), extras, mini‑agent helper, validation steps, CI, and roadmap.
+- See `docs/archive/STATE_OF_PROJECT.md` for a concise, operator‑friendly status of this fork, including the router_core seam (opt‑in), extras, mini‑agent helper, validation steps, CI, and roadmap.
 
 Fork Quick Start
 - Run `make run-scenarios` for the live smoke suite (mini-agent, codex-agent, router fan-out, Chutes, code-agent).
 - Bring up both local agents (mini + codex) with `docker compose -f local/docker/compose.agents.yml up --build -d` if you want HTTP endpoints available.
 - See QUICK_START.md for the per-scenario commands lifted directly from `scenarios/`.
 - Mini-agent usage + troubleshooting: docs/my-website/docs/experimental/mini-agent.md
-- Project status and guardrails: STATE_OF_PROJECT.md
+- Project status and guardrails: docs/archive/STATE_OF_PROJECT.md
 
 
 🚨 **Stable Release:** Use docker images with the `-stable` tag. These have undergone 12 hour load tests, before being published. [More information about the release cycle here](https://docs.litellm.ai/docs/proxy/release_cycle)
