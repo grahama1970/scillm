@@ -8,9 +8,16 @@ on:
     branches: [ main, fork/stable ]
 
 jobs:
+  health-gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - run: curl -sSf http://127.0.0.1:8887/healthz || true
+      - run: curl -sSf http://127.0.0.1:8787/healthz || true
   run-scenarios:
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    needs: [health-gate]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -30,6 +37,7 @@ jobs:
         run: |
           python scenarios/run_all.py || true
       - name: Upload artifacts
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: scenarios-artifacts

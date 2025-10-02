@@ -1,4 +1,4 @@
-# Side‑by‑Side Guide — Lean4 and CodeWorld
+# Side‑by‑Side Guide — Lean4 (package: certainly) and CodeWorld
 
 This short guide shows identical call shapes for both projects via the shared
 canonical bridge schema and via LiteLLM Router providers. Copy/paste the blocks
@@ -13,7 +13,7 @@ Both bridges accept this envelope:
 - `provider`: `{ name, args }` (args are provider‑specific)
 - `options`: `{ max_seconds }`
 
-Lean4 (bridge)
+Lean4 (bridge) — project package is named `certainly`; provider remains `lean4` for API symmetry. Env aliases `CERTAINLY_*` are accepted.
 ```json
 {
   "messages": [{"role": "system", "content": "Batch proof run"}],
@@ -78,6 +78,18 @@ items=[{"requirement_text":"0 + n = n"},{"requirement_text":"m + n = n + m"}]
 out = router.completion(model="lean4-bridge", messages=messages, items=items, options={"max_seconds":180})
 print(out.choices[0].message.content)
 print(getattr(out, "additional_kwargs", {}).get("lean4"))
+```
+
+Certainly (Router; multi‑prover surface)
+```python
+from litellm import Router
+router = Router(model_list=[{"model_name":"certainly-bridge","litellm_params":{"model":"certainly/bridge","custom_llm_provider":"certainly","api_base": "http://127.0.0.1:8787"}}])
+messages=[{"role":"system","content":"Certainly demo"}]
+items=[{"requirement_text":"0 + n = n"},{"requirement_text":"m + n = n + m"}]
+# Placeholder backend selection; defaults to "lean4" today. Future: "coq".
+out = router.completion(model="certainly-bridge", messages=messages, items=items, backend="lean4", options={"max_seconds":180})
+print(out.choices[0].message.content)
+print(getattr(out, "additional_kwargs", {}).get("certainly"))
 ```
 
 CodeWorld (Router)

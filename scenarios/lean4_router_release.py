@@ -18,7 +18,7 @@ if os.getenv("LITELLM_ENABLE_LEAN4") != "1":
     print("Skipping Lean4 Router scenario (set LITELLM_ENABLE_LEAN4=1).")
     sys.exit(0)
 
-BASE = os.getenv("LEAN4_BRIDGE_BASE", "http://127.0.0.1:8787")
+BASE = os.getenv("CERTAINLY_BRIDGE_BASE", os.getenv("LEAN4_BRIDGE_BASE", "http://127.0.0.1:8787"))
 
 # Enable provider by default for local runs if not explicitly disabled
 os.environ.setdefault("LITELLM_ENABLE_LEAN4", "1")

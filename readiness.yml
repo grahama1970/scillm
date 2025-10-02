@@ -114,7 +114,13 @@ checks:
     optional: true
 
   - name: lean4_health
-    description: Lean4 bridge /healthz
+    description: Lean4/Certainly bridge /healthz
+    run: |
+      curl -sSf http://127.0.0.1:8787/healthz
+    optional: true
+
+  - name: certainly_health
+    description: Certainly (alias) bridge /healthz
     run: |
       curl -sSf http://127.0.0.1:8787/healthz
     optional: true
@@ -124,6 +130,27 @@ checks:
     run: |
       curl -sSf http://127.0.0.1:8887/healthz
     optional: true
+
+  - name: bridges_fullstack_health
+    description: Full-stack bridges health (both CodeWorld and Lean4)
+    run: |
+      set -e
+      curl -sSf http://127.0.0.1:8887/healthz >/dev/null
+      curl -sSf http://127.0.0.1:8787/healthz >/dev/null
+      echo "both bridges healthy"
+    optional: true
+
+  - name: bridges_fullstack_health_strict
+    description: Full-stack bridges health (strict gate when live readiness expected)
+    run: |
+      set -e
+      curl -sSf http://127.0.0.1:8887/healthz >/dev/null
+      curl -sSf http://127.0.0.1:8787/healthz >/dev/null
+      echo "both bridges healthy (strict)"
+    env:
+      READINESS_LIVE: "1"
+      STRICT_READY: "1"
+    optional: false
 
   - name: coq_bridge_smoke
     description: Coq bridge reachable and returns shaped summary (live E2E; skip if not running)

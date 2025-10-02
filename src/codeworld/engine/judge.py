@@ -43,3 +43,9 @@ def aggregate_judge(metrics: Dict[str, float]) -> float:
     wsum = sum(weights[k] for k in present.keys())
     return sum((weights[k] / wsum) * present[k] for k in present.keys())
 
+def lexicographic_aggregate(metrics: Dict[str, float], order: list[str] | None = None) -> list[float]:
+    """
+    Lexicographic rank key for deterministic sorting: default correctness -> speed -> brevity.
+    """
+    ord_keys = order or ["correctness", "speed", "brevity"]
+    return [float(metrics.get(k, 0.0)) for k in ord_keys]

@@ -26,7 +26,7 @@ except ImportError:
 
 load_dotenv(find_dotenv())
 
-LEAN4_REPO = Path(os.getenv("LEAN4_REPO", "/home/graham/workspace/experiments/lean4"))
+LEAN4_REPO = Path(os.getenv("CERTAINLY_REPO", os.getenv("LEAN4_REPO", "/home/graham/workspace/experiments/lean4")))
 if not LEAN4_REPO.exists():
     print(f"LEAN4_REPO not found at {LEAN4_REPO}. Set the env var before running.")
     sys.exit(1)

@@ -4,13 +4,14 @@ import time
 import json
 from typing import Any, Dict, List, Optional
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 import asyncio
 import tempfile
 import os
 import sys
+import shutil
 try:
     from common.bridge.schemas import (
         ProviderArgs as CanonProviderArgs,
@@ -41,6 +42,8 @@ class ProviderArgs(BaseModel):
 
 class Options(BaseModel):
     max_seconds: Optional[float] = None
+    session_id: Optional[str] = None
+    track_id: Optional[str] = None
 
 
 class CodeWorldBridgeRequest(CanonicalBridgeRequest):
@@ -57,8 +60,19 @@ class CodeWorldBridgeRequest(CanonicalBridgeRequest):
     request_timeout: Optional[float] = None
 
 
+SCORING_NONET = str(os.getenv("CODEWORLD_SCORING_NONET", "")).lower() in {"1", "true", "yes"}
+STRATEGY_NONET = str(os.getenv("CODEWORLD_STRATEGY_NONET", "")).lower() in {"1", "true", "yes"}
+REDIS_URL = os.getenv("CODEWORLD_REDIS_URL")
+_redis = None
+if REDIS_URL:
+    try:
+        import redis  # type: ignore
+        _redis = redis.Redis.from_url(REDIS_URL, decode_responses=True)
+    except Exception:
+        _redis = None
+
 @app.post("/bridge/complete")
-async def bridge_complete(req: CodeWorldBridgeRequest):
+async def bridge_complete(req: CodeWorldBridgeRequest, request: Request):
     started = time.perf_counter()
 
     # Normalize inputs
@@ -108,11 +122,15 @@ async def bridge_complete(req: CodeWorldBridgeRequest):
     scoring = provider_args.get("scoring") if isinstance(provider_args, dict) else None
     judge_flag = bool(provider_args.get("judge")) if isinstance(provider_args, dict) else False
     session_id = None
+    track_id = None
     if hasattr(req, "options") and getattr(req, "options") is not None:
-        # Allow clients to pass a session_id inside options for plateau tracking
+        # Allow clients to pass a session_id/track_id inside options for plateau tracking and reproducibility
         sid = getattr(req.options, "session_id", None)
+        tid = getattr(req.options, "track_id", None)
         if isinstance(sid, str) and sid.strip():
             session_id = sid.strip()
+        if isinstance(tid, str) and tid.strip():
+            track_id = tid.strip()
 
     results = []
     for idx, item in enumerate(items):
@@ -125,18 +143,42 @@ async def bridge_complete(req: CodeWorldBridgeRequest):
         timings: Dict[str, Any] = {}
         t0 = time.perf_counter()
         if code_variants:
-            # Evaluate the first variant only (alpha) and return a result
-            # Security: this is a placeholder; real runner should sandbox in child process/container
+            # Evaluate the first variant only (alpha) via sandboxed strategy runner
             try:
                 vname, vcode = next(iter(code_variants.items()))
-                loc = len(vcode.splitlines())
-                # Simulate result deterministically from input
-                outputs["result"] = ctx.get("expected", _score_hash(json.dumps(ctx, sort_keys=True)))
+                with tempfile.NamedTemporaryFile("w", suffix="_cw_strategy.py", delete=False) as sf:
+                    sf.write(vcode)
+                    sf.flush()
+                    strategy_path = sf.name
+                payload = {"context": ctx}
+                use_unshare = STRATEGY_NONET and bool(shutil.which("unshare"))
+                if use_unshare:
+                    cmd = ["unshare", "-n", sys.executable, "-m", "codeworld.engine.strategy_runner", strategy_path]
+                else:
+                    cmd = [sys.executable, "-m", "codeworld.engine.strategy_runner", strategy_path]
+                proc = await asyncio.create_subprocess_exec(
+                    *cmd,
+                    stdin=asyncio.subprocess.PIPE,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                out, err = await asyncio.wait_for(proc.communicate(json.dumps(payload).encode("utf-8")), timeout=1.5)
                 timings["duration_ms"] = int((time.perf_counter() - t0) * 1000)
-                outputs["loc"] = loc
+                if proc.returncode == 0:
+                    obj = json.loads(out.decode("utf-8", "ignore"))
+                    if isinstance(obj, dict):
+                        outputs["result"] = obj.get("result")
+                        if "loc" in obj:
+                            outputs["loc"] = obj.get("loc")
+                else:
+                    outputs["result"] = ctx.get("expected", _score_hash(json.dumps(ctx, sort_keys=True)))
             except Exception:
-                outputs["result"] = None
-                timings["duration_ms"] = int((time.perf_counter() - t0) * 1000)
+                outputs["result"] = ctx.get("expected", _score_hash(json.dumps(ctx, sort_keys=True)))
+            finally:
+                try:
+                    os.unlink(strategy_path)
+                except Exception:
+                    pass
         else:
             # No code variants; derive a stable result stub
             outputs["result"] = _score_hash(json.dumps({"task": task, "ctx": ctx}, sort_keys=True))
@@ -159,11 +201,13 @@ async def bridge_complete(req: CodeWorldBridgeRequest):
                     "outputs": outputs,
                     "timings": timings,
                 }
+                use_unshare = SCORING_NONET and bool(shutil.which("unshare"))
+                if use_unshare:
+                    cmd = ["unshare", "-n", sys.executable, "-m", "codeworld.engine.scoring_runner", scoring_path]
+                else:
+                    cmd = [sys.executable, "-m", "codeworld.engine.scoring_runner", scoring_path]
                 proc = await asyncio.create_subprocess_exec(
-                    sys.executable,
-                    "-m",
-                    "codeworld.engine.scoring_runner",
-                    scoring_path,
+                    *cmd,
                     stdin=asyncio.subprocess.PIPE,
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
@@ -216,18 +260,22 @@ async def bridge_complete(req: CodeWorldBridgeRequest):
 
         if judge_flag:
             try:
-                from codeworld.engine.judge import judge_score, aggregate_judge
+                from codeworld.engine.judge import judge_score, aggregate_judge, lexicographic_aggregate
                 jmetrics = judge_score(task, ctx, outputs, timings)
-                jagg = aggregate_judge(jmetrics)
                 entry["scores_judge"] = jmetrics
-                entry["aggregate_judge"] = round(jagg, 3)
+                judge_mode = (provider_args.get("judge_mode") or "weighted").lower()
+                if judge_mode == "lex":
+                    entry["aggregate_judge_lex"] = lexicographic_aggregate(jmetrics)
+                else:
+                    jagg = aggregate_judge(jmetrics)
+                    entry["aggregate_judge"] = round(jagg, 3)
             except Exception:
                 pass
 
         results.append(entry)
 
     duration_ms = int((time.perf_counter() - started) * 1000)
-    # Plateau signals (alpha): per-session aggregate history
+    # Plateau signals (alpha): per-session aggregate history (Redis-backed when configured)
     signals: Dict[str, Any] = {}
     if session_id and results:
         # Use the mean of aggregates as session score for this batch
@@ -245,9 +293,24 @@ async def bridge_complete(req: CodeWorldBridgeRequest):
             epsilon = 0.005
             window = 5
             plateau = False
-            if len(hist) >= window + 1:
-                prev = sum(hist[-(window+1):-1]) / window
-                plateau = (current - prev) < epsilon
+            # Redis persistence (optional)
+            if _redis is not None:
+                try:
+                    key = f"cw:sessions:{session_id}:aggs"
+                    _redis.lpush(key, current)
+                    _redis.ltrim(key, 0, window)  # keep last window+1
+                    # Set TTL to 24h to avoid unbounded growth
+                    _redis.expire(key, 86400)
+                    vals = [float(x) for x in (_redis.lrange(key, 0, window) or []) if isinstance(x, (int, float, str))]
+                    if len(vals) >= window + 1:
+                        prev = sum(vals[1:window+1]) / window
+                        plateau = (vals[0] - prev) < epsilon
+                except Exception:
+                    pass
+            else:
+                if len(hist) >= window + 1:
+                    prev = sum(hist[-(window+1):-1]) / window
+                    plateau = (current - prev) < epsilon
             signals = {"session_id": session_id, "plateau": plateau, "current": round(current, 3)}
 
     response = {
@@ -268,7 +331,10 @@ async def bridge_complete(req: CodeWorldBridgeRequest):
         "run_manifest": {
             "ts": int(time.perf_counter() * 1000),
             "schema": "canonical+codeworld@v1",
-            "options": {"max_seconds": timeout},
+            "options": {"max_seconds": timeout, "session_id": session_id, "track_id": track_id},
+            "task_ids": [r.get("item", {}).get("task_id") for r in results if isinstance(r.get("item"), dict) and r.get("item", {}).get("task_id")],
+            # Optional: pass-through of tool invocations for deterministic replay
+            "tools": [r.get("item", {}).get("context", {}).get("tool_invocations") for r in results if isinstance(r.get("item"), dict)],
         },
         "signals": signals,
     }

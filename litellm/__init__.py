@@ -1365,14 +1365,24 @@ except Exception:
 
 from .router import Router
 
-# --- Experimental provider: lean4 (env-gated) --------------------------------
+# --- Experimental provider: lean4 / certainly (env-gated) --------------------
 try:
     import os as _os_lean4
-    if _os_lean4.getenv("LITELLM_ENABLE_LEAN4", "") == "1" or _os_lean4.getenv("SCILLM_ENABLE_LEAN4", "") == "1":
+    if (
+        _os_lean4.getenv("LITELLM_ENABLE_LEAN4", "") == "1"
+        or _os_lean4.getenv("SCILLM_ENABLE_LEAN4", "") == "1"
+        or _os_lean4.getenv("LITELLM_ENABLE_CERTAINLY", "") == "1"
+        or _os_lean4.getenv("SCILLM_ENABLE_CERTAINLY", "") == "1"
+    ):
         from .llms.lean4 import Lean4LLM as _Lean4LLM
         from .llms.custom_llm import register_custom_provider as _register_custom_provider_lean4
 
         _register_custom_provider_lean4("lean4", _Lean4LLM)
+        # Alias: 'certainly' routes to the same handler for multi-prover surface
+        try:
+            _register_custom_provider_lean4("certainly", _Lean4LLM)
+        except Exception:
+            pass
 except Exception:
     # Keep base imports resilient
     pass

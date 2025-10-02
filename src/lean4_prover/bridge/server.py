@@ -25,13 +25,15 @@ except Exception:  # pragma: no cover - fallback for non-src runs
 import contextlib
 
 ROOT = Path(__file__).resolve().parents[2]
-LEAN4_REPO = Path(os.getenv("LEAN4_REPO", "/home/graham/workspace/experiments/lean4")).resolve()
+# Accept CERTAINLY_REPO as an alias for LEAN4_REPO (project package is named 'certainly')
+_repo_env = os.getenv("CERTAINLY_REPO") or os.getenv("LEAN4_REPO") or "/home/graham/workspace/experiments/lean4"
+LEAN4_REPO = Path(_repo_env).resolve()
 DEFAULT_FLAGS = ["--deterministic", "--no-llm"]
 DEFAULT_TIMEOUT = float(os.getenv("LEAN4_BRIDGE_TIMEOUT_SECONDS", "300"))
 
 app = FastAPI(
-    title="Lean4 Bridge",
-    description="Minimal Lean4 batch endpoint compatible with LiteLLM bridge calls.",
+    title="Lean4/Certainly Bridge",
+    description="Minimal Lean4 (package: 'certainly') batch endpoint compatible with LiteLLM bridge calls.",
     version="0.1.0",
 )
 
@@ -43,6 +45,8 @@ class ProviderArgs(BaseModel):
 
 class Options(BaseModel):
     max_seconds: float | None = None
+    session_id: str | None = None
+    track_id: str | None = None
 
 
 class Lean4BridgeRequest(CanonicalBridgeRequest):
@@ -112,6 +116,8 @@ async def bridge_complete(req: Lean4BridgeRequest):
             prov_args = getattr(prov, "args")  # type: ignore
     flags = req.lean4_flags or prov_args.get("flags") or DEFAULT_FLAGS
     timeout = DEFAULT_TIMEOUT
+    session_id = None
+    track_id = None
     if hasattr(req, "options") and getattr(req, "options") is not None:
         opts = getattr(req, "options")
         if hasattr(opts, "max_seconds") and getattr(opts, "max_seconds") is not None:
@@ -119,6 +125,13 @@ async def bridge_complete(req: Lean4BridgeRequest):
                 timeout = float(getattr(opts, "max_seconds"))
             except Exception:
                 timeout = DEFAULT_TIMEOUT
+        # Echo session/track for parity with CodeWorld
+        sid = getattr(opts, "session_id", None)
+        tid = getattr(opts, "track_id", None)
+        if isinstance(sid, str) and sid.strip():
+            session_id = sid.strip()
+        if isinstance(tid, str) and tid.strip():
+            track_id = tid.strip()
     if hasattr(req, "max_seconds") and getattr(req, "max_seconds") is not None:
         try:
             timeout = float(getattr(req, "max_seconds"))
@@ -191,6 +204,7 @@ async def bridge_complete(req: Lean4BridgeRequest):
             "flags": flags,
             "lean4_repo": str(LEAN4_REPO),
             "schema": "canonical+lean4@v1",
+            "options": {"max_seconds": timeout, "session_id": session_id, "track_id": track_id},
         },
     }
     try:

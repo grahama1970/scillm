@@ -11,6 +11,21 @@ This fork adds an opt-in Mini-Agent, an env-gated `codex-agent` provider, and a 
 ## 2) Install
 - Local editable install for iteration: `pip install -e .`
 
+
+## 2.1) Bring up the local stack (alpha)
+
+Recommended Docker bring-up (CodeWorld + Lean4 + Redis + ArangoDB + Ollama + proxy):
+
+```bash
+docker compose -f local/docker/compose.scillm.stack.yml up --build -d
+```
+
+Notes:
+- `codeworld-bridge` runs on `:8887` with `CODEWORLD_SCORING_NONET=1`, `CODEWORLD_STRATEGY_NONET=1`, and `CODEWORLD_REDIS_URL` pre-wired.
+- `lean4-bridge` runs on `:8787`.
+- For reproducibility, pass `options.session_id` and `options.track_id` in scenario/provider calls.
+- For strict deploy readiness: `READINESS_LIVE=1 STRICT_READY=1 make project-ready-live`.
+
 ## 3) One-command smoke run
 
 ```bash
