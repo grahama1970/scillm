@@ -1,6 +1,13 @@
+<p align="center">
+  <!-- Use outlined balanced logo for pixel-consistent rendering across systems -->
+  <img src="local/artifacts/logo/SciLLM_balanced_outlined.svg" alt="SciLLM" width="100" />
+  <br/>
+  <img src="SciLLM_icon.svg" alt="SciLLM Icon" width="32" />
+</p>
+
 # Lean4 Prover — Quickstart
 
-This quickstart mirrors the LiteLLM fork conventions. Scenarios live under
+This quickstart mirrors the SciLLM (LiteLLM scientific fork) conventions. Scenarios live under
 `scenarios/` and produce human- and machine-friendly JSON that can be embedded
 in readiness reports or review bundles.
 
@@ -21,10 +28,8 @@ make run-scenarios
 
 This executes `scenarios/run_all.py` which currently runs:
 
-1. `lean4_batch_demo.py` – deterministic `cli_mini batch` on
-   `samples/final_readiness/batch_input.json` with `--deterministic --no-llm`.
-2. `lean4_suggest_demo.py` – single requirement “run” flow with
-   `--disambiguate` (deterministic, no LLM).
+1. `lean4_batch_demo.py` – live E2E `cli_mini batch` using your configured Lean4 env (LLM/Docker).
+2. `lean4_suggest_demo.py` – live single requirement “run” flow.
 
 Each script prints the exact command, proof statistics, and normalized JSON
 summary. Use `SCENARIOS_STOP_ON_FIRST_FAILURE=1 make run-scenarios` to
@@ -43,6 +48,11 @@ python scenarios/lean4_suggest_demo.py
 All scripts load `.env` automatically (`python-dotenv`) so cached configuration
 (e.g., `LEAN4_CLI_CMD`, LiteLLM keys) is respected.
 
+Environment flags (preferred)
+- SCILLM_ENABLE_LEAN4=1 (alias: LITELLM_ENABLE_LEAN4=1)
+- SCILLM_ENABLE_CODEWORLD=1 (alias: LITELLM_ENABLE_CODEWORLD=1)
+- SCILLM_ENABLE_MINI_AGENT=1 (alias: LITELLM_ENABLE_MINI_AGENT=1)
+
 ## Bridge API (optional)
 
 ```bash
@@ -58,13 +68,41 @@ POST `/bridge/complete` with:
     {"requirement_text": "0 + n = n"},
     {"requirement_text": "The sum of two even numbers is even"}
   ],
-  "lean4_flags": ["--deterministic", "--no-llm"],
+  "lean4_flags": [],
   "max_seconds": 180
 }
 ```
 
 The response mirrors the scenario JSON (summary, statistics, proof_results, stdout, stderr, duration).
-Use `feature_recipes/litellm_bridge.py` as a sketch for wiring this into a LiteLLM Router call.
+Use `feature_recipes/lean4_bridge_client.py` to call the bridge directly.
+For Router-style usage:
+
+```bash
+export LITELLM_ENABLE_LEAN4=1
+export LEAN4_BRIDGE_BASE=http://127.0.0.1:8787
+python scenarios/lean4_router_release.py
+```
+
+This mirrors the CodeWorld Router pattern for a consistent developer experience.
+
+Canonical bridge schema
+- Both bridges accept a canonical envelope alongside provider-specific aliases:
+  - Request: { messages, items, provider: {name, args}, options: {max_seconds} }
+  - Lean4 aliases still supported: lean4_requirements, lean4_flags, max_seconds
+  - CodeWorld aliases still supported: codeworld_metrics, codeworld_iterations, codeworld_allowed_languages, request_timeout
+
+CodeWorld quickstart (bridge vs Router)
+
+Bridge
+```bash
+PYTHONPATH=src uvicorn codeworld.bridge.server:app --port 8887
+CODEWORLD_BASE=http://127.0.0.1:8887 python scenarios/codeworld_bridge_release.py
+```
+
+Router
+```bash
+CODEWORLD_BASE=http://127.0.0.1:8887 python scenarios/codeworld_router_release.py
+```
 
 
 ## 4) Deterministic tests and readiness
@@ -73,7 +111,7 @@ Use `feature_recipes/litellm_bridge.py` as a sketch for wiring this into a LiteL
 # Full test suite (unit + integration)
 uv run pytest -q
 
-# Composite readiness gate (deterministic + offline batch)
+# Composite readiness gate
 python scripts/mvp_check.py
 
 # Strict/live gate (requires Docker + providers, e.g. Ollama)

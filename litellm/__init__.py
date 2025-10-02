@@ -1354,7 +1354,7 @@ except Exception:
 # --- Experimental provider: mini-agent (env-gated) ---------------------------
 try:
     import os as _os_mini
-    if _os_mini.getenv("LITELLM_ENABLE_MINI_AGENT", "") == "1":
+    if _os_mini.getenv("LITELLM_ENABLE_MINI_AGENT", "") == "1" or _os_mini.getenv("SCILLM_ENABLE_MINI_AGENT", "") == "1":
         from .llms.mini_agent import MiniAgentLLM as _MiniAgentLLM
         from .llms.custom_llm import register_custom_provider as _register_custom_provider
 
@@ -1364,3 +1364,27 @@ except Exception:
     pass
 
 from .router import Router
+
+# --- Experimental provider: lean4 (env-gated) --------------------------------
+try:
+    import os as _os_lean4
+    if _os_lean4.getenv("LITELLM_ENABLE_LEAN4", "") == "1" or _os_lean4.getenv("SCILLM_ENABLE_LEAN4", "") == "1":
+        from .llms.lean4 import Lean4LLM as _Lean4LLM
+        from .llms.custom_llm import register_custom_provider as _register_custom_provider_lean4
+
+        _register_custom_provider_lean4("lean4", _Lean4LLM)
+except Exception:
+    # Keep base imports resilient
+    pass
+
+# --- Experimental provider: codeworld (env-gated) ----------------------------
+try:
+    import os as _os_codeworld
+    if _os_codeworld.getenv("LITELLM_ENABLE_CODEWORLD", "") == "1" or _os_codeworld.getenv("SCILLM_ENABLE_CODEWORLD", "") == "1":
+        from .llms.codeworld import CodeWorldLLM as _CodeWorldLLM
+        from .llms.custom_llm import register_custom_provider as _register_custom_provider_codeworld
+
+        _register_custom_provider_codeworld("codeworld", _CodeWorldLLM)
+except Exception:
+    # Keep base imports resilient
+    pass

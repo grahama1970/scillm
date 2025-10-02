@@ -1,7 +1,7 @@
 # LiteLLM Scenarios
 
-These scripts exercise the fork’s three headline integrations (mini-agent,
-codex-agent, parallel `acompletion`). They are **live** checks, so run them
+These scripts exercise working live versions of the fork’s features: Lean4,
+CodeWorld, mini-agent, codex-agent, and parallel `acompletion`. They are **live** checks, so run them
 manually once the necessary providers or local services are available.
 
 ## How to Run
@@ -11,13 +11,48 @@ manually once the necessary providers or local services are available.
    script will print a clear skip message if something is missing.
 3. Execute the scenario with `python scenarios/<script>.py`.
 
-A convenience target keeps the deterministic order:
+Docker setups (SciLLM examples)
+- Core proxy only: `docker compose -f local/docker/compose.scillm.core.yml up --build -d`
+- Bridges only: `docker compose -f local/docker/compose.scillm.modules.yml up --build -d`
+- Full stack (proxy + bridges): `docker compose -f local/docker/compose.scillm.full.yml up --build -d`
+
+A convenience target runs the live scenarios in a stable order:
 
 ```
 make run-scenarios
 ```
 
 ## Scenario Index
+
+### `lean4_batch_demo.py`
+
+- Live E2E: proves two sample requirements via `cli_mini batch` using your configured Lean4 env (LLM/Docker).
+- Env: set `LEAN4_REPO` to your Lean4 repo path (defaults to `/home/graham/workspace/experiments/lean4`).
+
+### `lean4_suggest_demo.py`
+
+- Live E2E: runs a single suggestion (`cli_mini run`) using your configured Lean4 env.
+- For deterministic, offline checks use the pytest tests under `tests/lean4/`.
+
+### `lean4_bridge_release.py`
+
+- Live E2E: calls the Lean4 bridge endpoint via a provider client identical in shape to CodeWorld’s provider.
+- Env: `LEAN4_BRIDGE_BASE` (default `http://127.0.0.1:8787`). Start bridge with `PYTHONPATH=src uvicorn lean4_prover.bridge.server:app --port 8787`.
+
+### `lean4_router_release.py`
+
+- Live E2E: calls Lean4 through LiteLLM Router using a custom provider (`LITELLM_ENABLE_LEAN4=1`).
+- Env: `LEAN4_BRIDGE_BASE` (bridge URL). Usage mirrors CodeWorld’s Router pattern.
+
+### `codeworld_bridge_release.py`
+
+- Live E2E: calls the CodeWorld bridge endpoint via a provider client (mirrors Lean4).
+- Env: `CODEWORLD_BASE` (default `http://127.0.0.1:8887`). Start bridge with `PYTHONPATH=src uvicorn codeworld.bridge.server:app --port 8887`.
+
+### `codeworld_router_release.py`
+
+- Live E2E: calls CodeWorld through LiteLLM Router using a custom provider (`LITELLM_ENABLE_CODEWORLD=1`).
+- Env: `CODEWORLD_BASE` (bridge URL). Usage mirrors Lean4’s Router pattern.
 
 ### `mini_agent_live.py`
 
@@ -145,6 +180,7 @@ ensure the relevant providers are reachable before executing the stress suite.
 ### Notes on the scenario orchestrator
 
 `make run-scenarios` uses `scenarios/run_all.py`, which sets
-`LITELLM_ENABLE_MINI_AGENT=1` and `LITELLM_ENABLE_CODEX_AGENT=1` when launching
-child processes. For production deployments, configure these flags in your
-environment instead of relying on the orchestrator.
+`LITELLM_ENABLE_MINI_AGENT=1`, `LITELLM_ENABLE_CODEX_AGENT=1`,
+`LITELLM_ENABLE_LEAN4=1`, and `LITELLM_ENABLE_CODEWORLD=1` when launching child
+processes. For production deployments, configure these flags in your environment
+instead of relying on the orchestrator.

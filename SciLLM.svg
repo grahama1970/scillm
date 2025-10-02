@@ -1,0 +1,61 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- SciLLM Logo — optimized for scientists and engineers
+     - Accessible colors and contrast
+     - Scales cleanly (vector-only, no external assets)
+     - Font stack uses common sans-serif fallbacks (render may vary slightly across systems)
+-->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 420 100" role="img" aria-labelledby="title desc">
+  <title id="title">SciLLM Logo</title>
+  <desc id="desc">Wordmark SciLLM with an orbital science mark, suitable for scientific and engineering contexts.</desc>
+
+  <!-- Colors -->
+  <defs>
+    <style>
+      .brand-dark { fill: #0B1220; }      /* deep neutral for readability */
+      .brand-accent { fill: #0A5BD3; }    /* engineering blue */
+      .brand-teal { fill: #0E8A8A; }       /* scientific teal */
+      .stroke-accent { stroke: #0A5BD3; }
+      .stroke-teal { stroke: #0E8A8A; }
+      .text {
+        /* Prefer the original friendly geometric sans if available */
+        font-family: Garet, Poppins, Nunito Sans, Segoe UI, Roboto, Helvetica Neue, Arial, sans-serif;
+        letter-spacing: 0.15px;
+      }
+      .w400 { font-weight: 400; }
+      .w500 { font-weight: 500; }
+      .w600 { font-weight: 600; }
+    </style>
+  </defs>
+
+  <!-- Left logomark: atomic orbit with nodes -->
+  <g transform="translate(20,18)">
+    <!-- nucleus -->
+    <circle cx="22" cy="32" r="5" class="brand-accent"/>
+    <!-- orbit ring -->
+    <ellipse cx="22" cy="32" rx="22" ry="12" fill="none" class="stroke-teal" stroke-width="2.0" stroke-linecap="round" stroke-linejoin="round"/>
+    <!-- 45° ring -->
+    <g transform="rotate(35 22 32)">
+      <ellipse cx="22" cy="32" rx="22" ry="12" fill="none" class="stroke-accent" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>
+    </g>
+    <!-- nodes on orbit -->
+    <circle cx="44" cy="32" r="3.2" class="brand-teal"/>
+    <circle cx="9" cy="24" r="3.2" class="brand-accent"/>
+  </g>
+
+  <!-- Wordmark -->
+  <g class="text" font-size="46">
+    <!-- Dial back to Medium (friendlier, less heavy) -->
+    <!-- Split 'Sci' so the dot aligns with the glyph, not guessed -->
+    <text x="80" y="60" class="brand-dark w500">Sc</text>
+    <!-- Geometric i: font-agnostic stem + dot perfectly aligned -->
+    <g id="i-mark" transform="translate(146,60)">
+      <!-- stem (rounded) -->
+      <rect x="-1.6" y="-26" width="3.2" height="26" rx="1.2" class="brand-dark"/>
+      <!-- dot exactly centered above the stem -->
+      <circle cx="0" cy="-31.5" r="3" class="brand-accent"/>
+    </g>
+    <!-- LLM also at Medium; color carries emphasis without bulk -->
+    <text x="160" y="60" class="brand-accent w500" letter-spacing="0.06px">LLM</text>
+  </g>
+
+</svg>

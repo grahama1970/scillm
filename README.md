@@ -1,6 +1,12 @@
-<h1 align="center">
-        🚅 LiteLLM
-    </h1>
+<p align="center">
+  <!-- Use outlined balanced logo for pixel-consistent rendering across systems -->
+  <img src="local/artifacts/logo/SciLLM_balanced_outlined.svg" alt="SciLLM" width="140" />
+  <br/>
+  <img src="SciLLM_icon.svg" alt="SciLLM Icon" width="44" />
+  <br/>
+  <em>Balanced wordmark (default) + icon (logo‑only). The favicon (.ico) should use the icon only, no text.</em>
+ </p>
+<h1 align="center">🔬 SciLLM — Scientific/Engineering fork of LiteLLM</h1>
     <p align="center">
         <p align="center">
         <a href="https://render.com/deploy?repo=https://github.com/BerriAI/litellm" target="_blank" rel="nofollow"><img src="https://render.com/images/deploy-to-render-button.svg" alt="Deploy to Render"></a>
@@ -11,12 +17,12 @@
         <p align="center">Call all LLM APIs using the OpenAI format [Bedrock, Huggingface, VertexAI, TogetherAI, Azure, OpenAI, Groq etc.]
         <br>
     </p>
-<h4 align="center"><a href="https://docs.litellm.ai/docs/simple_proxy" target="_blank">LiteLLM Proxy Server (LLM Gateway)</a> | <a href="https://docs.litellm.ai/docs/hosted" target="_blank"> Hosted Proxy (Preview)</a> | <a href="https://docs.litellm.ai/docs/enterprise"target="_blank">Enterprise Tier</a></h4>
+<h4 align="center"><a href="https://docs.litellm.ai/docs/simple_proxy" target="_blank">Proxy Server (LLM Gateway)</a> | <a href="https://docs.litellm.ai/docs/hosted" target="_blank"> Hosted Proxy (Preview)</a> | <a href="https://docs.litellm.ai/docs/enterprise"target="_blank">Enterprise Tier</a></h4>
 
 <p align="center">
-  <a href="https://github.com/grahama1970/litellm/actions/workflows/nightly-parity-stress.yml"><img src="https://github.com/grahama1970/litellm/actions/workflows/nightly-parity-stress.yml/badge.svg" alt="Nightly Parity & Stress"></a>
-  <a href="https://github.com/grahama1970/litellm/actions/workflows/weekly-streaming-stress.yml"><img src="https://github.com/grahama1970/litellm/actions/workflows/weekly-streaming-stress.yml/badge.svg" alt="Weekly Streaming Stress"></a>
-  <a href="https://github.com/grahama1970/litellm/actions/workflows/manual-stress.yml"><img src="https://img.shields.io/badge/Manual%20Stress-%E2%86%92-blue" alt="Manual Stress"></a>
+  <a href="https://github.com/grahama1970/scillm/actions/workflows/nightly-parity-stress.yml"><img src="https://github.com/grahama1970/scillm/actions/workflows/nightly-parity-stress.yml/badge.svg" alt="SciLLM: Nightly Parity & Stress"></a>
+  <a href="https://github.com/grahama1970/scillm/actions/workflows/weekly-streaming-stress.yml"><img src="https://github.com/grahama1970/scillm/actions/workflows/weekly-streaming-stress.yml/badge.svg" alt="SciLLM: Weekly Streaming Stress"></a>
+  <a href="https://github.com/grahama1970/scillm/actions/workflows/manual-stress.yml"><img src="https://img.shields.io/badge/SciLLM%20Manual%20Stress-%E2%86%92-blue" alt="SciLLM: Manual Stress"></a>
 </p>
 
 <h4 align="center">
@@ -37,7 +43,44 @@
     </a>
 </h4>
 
+<p align="center"><i>This fork remains API‑compatible with LiteLLM while adding optional modules for formal methods (Lean4), code orchestration (CodeWorld), and live agent flows. See QUICKSTART.md and scenarios/ for runnable demos. Use SCILLM_ENABLE_* or LITELLM_ENABLE_* flags to enable modules.</i></p>
+
+<details>
+  <summary>Logo variants</summary>
+  <p>
+    <img src="local/artifacts/logo/SciLLM_balanced_outlined.svg" alt="SciLLM Balanced (default, outlined)" height="36" />
+    &nbsp;&nbsp;
+    <img src="SciLLM_friendly.svg" alt="SciLLM Friendly" height="36" />
+    &nbsp;&nbsp;
+    <img src="SciLLM_icon.svg" alt="SciLLM Icon" height="36" />
+    &nbsp;&nbsp;
+    <img src="SciLLM_balanced_dark.svg" alt="SciLLM Balanced Dark" height="36" />
+    &nbsp;&nbsp;
+    <img src="SciLLM_balanced_mono.svg" alt="SciLLM Balanced Mono" height="36" />
+  </p>
+  <p>Use <code>make logo-export</code> to produce outlined SVGs and favicons in <code>local/artifacts/logo/</code>. The generated <code>favicon.ico</code> uses the icon only (no text).</p>
+</details>
+
+## Scenarios vs Tests
+
+- `tests/` are strictly deterministic and offline (no network). Example: Lean4 CLI contract tests in `tests/lean4/`.
+- `scenarios/` are live end-to-end demos that may call HTTP bridges or external services. They are skip-friendly when deps aren’t running.
+
+Lean4 examples:
+- Deterministic tests: `tests/lean4/test_cli_batch.py`, `tests/lean4/test_cli_run.py`.
+- Live scenarios: `scenarios/lean4_bridge_release.py`, `scenarios/lean4_bridge_eval_live.py`.
+- Optional health test (env-guarded): `tests/lean4/test_bridge_health_optional.py` (runs only if `LEAN4_BRIDGE_BASE` is set).
+
 LiteLLM manages:
+
+## Rename & Compatibility Notice
+
+This repository has been renamed to **scillm** and branded as **SciLLM — a scientific/engineering-focused fork of LiteLLM**.
+
+- Core LiteLLM usage remains compatible; Lean4/CodeWorld are optional modules.
+- Preferred env flags: `SCILLM_ENABLE_*` (aliases: `LITELLM_ENABLE_*`).
+- CLI aliases: `scillm`, `scillm-proxy` (equivalent to litellm commands).
+- Deployment profiles: see `SCILLM_DEPLOY.md` and `local/docker/compose.scillm.*.yml`.
 
 - Translate inputs to provider's `completion`, `embedding`, and `image_generation` endpoints
 - [Consistent output](https://docs.litellm.ai/docs/completion/output), text responses will always be available at `['choices'][0]['message']['content']`

@@ -14,6 +14,13 @@ SCENARIO_DIR = Path(__file__).parent
 PYTHON = sys.executable
 
 SCENARIOS: List[Tuple[str, List[str]]] = [
+    ("lean4_batch_demo.py", [PYTHON, str(SCENARIO_DIR / "lean4_batch_demo.py")]),
+    ("lean4_suggest_demo.py", [PYTHON, str(SCENARIO_DIR / "lean4_suggest_demo.py")]),
+    ("lean4_bridge_release.py", [PYTHON, str(SCENARIO_DIR / "lean4_bridge_release.py")]),
+    ("lean4_router_release.py", [PYTHON, str(SCENARIO_DIR / "lean4_router_release.py")]),
+    ("codeworld_bridge_release.py", [PYTHON, str(SCENARIO_DIR / "codeworld_bridge_release.py")]),
+    ("codeworld_router_release.py", [PYTHON, str(SCENARIO_DIR / "codeworld_router_release.py")]),
+    ("coq_bridge_release.py", [PYTHON, str(SCENARIO_DIR / "coq_bridge_release.py")]),
     ("mini_agent_live.py", [PYTHON, str(SCENARIO_DIR / "mini_agent_live.py")]),
     (
         "mini_agent_docker_release.py",
@@ -69,6 +76,8 @@ def main() -> None:
     env = os.environ.copy()
     env.setdefault("LITELLM_ENABLE_MINI_AGENT", "1")
     env.setdefault("LITELLM_ENABLE_CODEX_AGENT", "1")
+    env.setdefault("LITELLM_ENABLE_LEAN4", "1")
+    env.setdefault("LITELLM_ENABLE_CODEWORLD", "1")
 
     print(
         f"{YELLOW}Note: enabling env flags for local run: "

@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" role="img" aria-labelledby="title desc">
+  <title id="title">SciLLM Icon</title>
+  <desc id="desc">Orbital logomark for SciLLM.</desc>
+  <defs>
+    <style>
+      .accent { stroke: #0D4EA3; }   /* engineered blue */
+      .teal { stroke: #5FD3D3; }     /* lighter scientific teal */
+      .nodeA { fill: #0D4EA3; }      /* blue node */
+      .nodeB { fill: #5FD3D3; }      /* teal node */
+    </style>
+  </defs>
+  <g transform="translate(50,50)">
+    <ellipse cx="0" cy="0" rx="30" ry="16" fill="none" class="teal" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+    <g transform="rotate(35)">
+      <ellipse cx="0" cy="0" rx="30" ry="16" fill="none" class="accent" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>
+    </g>
+    <!-- Tangent-aligned, gently elongated nodes for subtle motion cue -->
+    <ellipse cx="24.6" cy="17.2" rx="3.8" ry="3.4" class="nodeB" transform="rotate(60 24.6 17.2)"/>
+    <ellipse cx="-23" cy="10" rx="3.8" ry="3.4" class="nodeA" transform="rotate(60 -23 10)"/>
+  </g>
+</svg>

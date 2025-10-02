@@ -12,8 +12,20 @@ from typing import Any, Dict, List
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
+try:
+    from common.bridge.schemas import (
+        ProviderArgs as CanonProviderArgs,
+        Options as CanonOptions,
+        CanonicalBridgeRequest,
+    )
+except Exception:  # pragma: no cover - fallback for non-src runs
+    CanonProviderArgs = None  # type: ignore
+    CanonOptions = None  # type: ignore
+    CanonicalBridgeRequest = BaseModel  # type: ignore
+import contextlib
 
 ROOT = Path(__file__).resolve().parents[2]
+LEAN4_REPO = Path(os.getenv("LEAN4_REPO", "/home/graham/workspace/experiments/lean4")).resolve()
 DEFAULT_FLAGS = ["--deterministic", "--no-llm"]
 DEFAULT_TIMEOUT = float(os.getenv("LEAN4_BRIDGE_TIMEOUT_SECONDS", "300"))
 
@@ -24,14 +36,25 @@ app = FastAPI(
 )
 
 
-class Lean4BridgeRequest(BaseModel):
+class ProviderArgs(BaseModel):
+    name: str = Field("lean4")
+    args: Dict[str, Any] = Field(default_factory=dict)
+
+
+class Options(BaseModel):
+    max_seconds: float | None = None
+
+
+class Lean4BridgeRequest(CanonicalBridgeRequest):
+    # Canonical
     messages: List[Dict[str, Any]] = Field(..., description="Conversation context driving the request")
-    lean4_requirements: List[Dict[str, Any]] = Field(..., description="Batch of requirements to prove")
+    items: List[Dict[str, Any]] | None = Field(None, description="Batch of requirements (canonical key)")
+    provider: ProviderArgs | None = None
+    options: Options | None = None
+    # Back-compat aliases
+    lean4_requirements: List[Dict[str, Any]] | None = Field(None, description="Batch of requirements to prove")
     lean4_flags: List[str] | None = Field(None, description="Additional CLI flags")
-    max_seconds: float | None = Field(
-        None,
-        description="Optional wall-clock limit (seconds) for the Lean4 batch run.",
-    )
+    max_seconds: float | None = Field(None, description="Optional wall-clock limit (seconds)")
 
 
 def _normalise_requirements(requirements: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -55,11 +78,15 @@ def _normalise_requirements(requirements: List[Dict[str, Any]]) -> List[Dict[str
 
 
 async def _run_cli(command: List[str], timeout: float) -> tuple[int, str, str]:
+    env = os.environ.copy()
+    # Ensure Lean4 CLI (`lean4_prover.cli_mini`) is importable in the child
+    env["PYTHONPATH"] = f"{LEAN4_REPO / 'src'}:{env.get('PYTHONPATH','')}"
     proc = await asyncio.create_subprocess_exec(
         *command,
-        cwd=str(ROOT),
+        cwd=str(LEAN4_REPO),
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
+        env=env,
     )
     try:
         stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
@@ -73,9 +100,30 @@ async def _run_cli(command: List[str], timeout: float) -> tuple[int, str, str]:
 
 @app.post("/bridge/complete")
 async def bridge_complete(req: Lean4BridgeRequest):
-    requirements = _normalise_requirements(req.lean4_requirements)
-    flags = req.lean4_flags or DEFAULT_FLAGS
-    timeout = req.max_seconds or DEFAULT_TIMEOUT
+    raw_items = req.items or req.lean4_requirements or []
+    requirements = _normalise_requirements(raw_items) if raw_items else []
+    if not requirements:
+        raise HTTPException(status_code=400, detail="items/lean4_requirements must contain at least one item")
+    prov_args = {}
+    if hasattr(req, "provider") and getattr(req, "provider") is not None:
+        prov = getattr(req, "provider")
+        # Accept either canonical or local ProviderArgs
+        if hasattr(prov, "args") and isinstance(getattr(prov, "args"), dict):
+            prov_args = getattr(prov, "args")  # type: ignore
+    flags = req.lean4_flags or prov_args.get("flags") or DEFAULT_FLAGS
+    timeout = DEFAULT_TIMEOUT
+    if hasattr(req, "options") and getattr(req, "options") is not None:
+        opts = getattr(req, "options")
+        if hasattr(opts, "max_seconds") and getattr(opts, "max_seconds") is not None:
+            try:
+                timeout = float(getattr(opts, "max_seconds"))
+            except Exception:
+                timeout = DEFAULT_TIMEOUT
+    if hasattr(req, "max_seconds") and getattr(req, "max_seconds") is not None:
+        try:
+            timeout = float(getattr(req, "max_seconds"))
+        except Exception:
+            pass
 
     with tempfile.NamedTemporaryFile("w", suffix="_lean4_in.json", delete=False) as fin:
         input_path = Path(fin.name)
@@ -134,8 +182,36 @@ async def bridge_complete(req: Lean4BridgeRequest):
         },
         "statistics": stats,
         "proof_results": proof_results,
+        "results": proof_results,
         "stdout": stdout.strip(),
         "stderr": stderr.strip(),
         "duration_ms": duration_ms,
+        "run_manifest": {
+            "ts": int(time.time()),
+            "flags": flags,
+            "lean4_repo": str(LEAN4_REPO),
+            "schema": "canonical+lean4@v1",
+        },
     }
+    try:
+        out_dir = ROOT / "local" / "artifacts" / "runs"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        # Use wall-clock seconds as suffix
+        stamp = str(int(time.time()))
+        (out_dir / f"lean4_run_{stamp}.json").write_text(json.dumps(response, indent=2))
+    except Exception:
+        pass
     return JSONResponse(response)
+
+
+@app.get("/healthz")
+async def healthz():
+    ok = True
+    details: Dict[str, Any] = {
+        "repo": str(LEAN4_REPO),
+        "repo_exists": LEAN4_REPO.exists(),
+        "default_timeout": DEFAULT_TIMEOUT,
+    }
+    if not details["repo_exists"]:
+        ok = False
+    return JSONResponse({"ok": ok, "details": details})

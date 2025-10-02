@@ -53,15 +53,22 @@ class CodeWorldLLM(CustomLLM):
         return h
 
     def _build_payload(self, _model: str, _messages: list, optional_params: dict) -> Dict[str, Any]:
-        p: Dict[str, Any] = {
-            "messages": _messages,
-            "codeworld_metrics": optional_params.get(
-                "codeworld_metrics", ["correctness", "robustness", "speed", "brevity"]
-            ),
-            "codeworld_iterations": int(optional_params.get("codeworld_iterations", 3)),
-            "codeworld_allowed_languages": optional_params.get("codeworld_allowed_languages", []),
-            "request_timeout": float(optional_params.get("request_timeout", 60.0)),
-        }
+        p: Dict[str, Any] = {"messages": _messages}
+        # Canonical envelope (if provided)
+        if optional_params.get("items"):
+            p["items"] = optional_params.get("items")
+        if optional_params.get("provider"):
+            p["provider"] = optional_params.get("provider")
+        if optional_params.get("options"):
+            p["options"] = optional_params.get("options")
+        # Back-compat CodeWorld aliases
+        p.setdefault(
+            "codeworld_metrics",
+            optional_params.get("codeworld_metrics", ["correctness", "robustness", "speed", "brevity"]),
+        )
+        p.setdefault("codeworld_iterations", int(optional_params.get("codeworld_iterations", 3)))
+        p.setdefault("codeworld_allowed_languages", optional_params.get("codeworld_allowed_languages", []))
+        p.setdefault("request_timeout", float(optional_params.get("request_timeout", 60.0)))
         if optional_params.get("temperature") is not None:
             p["temperature"] = float(optional_params["temperature"])
         if optional_params.get("seed") is not None:
@@ -71,20 +78,29 @@ class CodeWorldLLM(CustomLLM):
         return p
 
     def _map_response(self, model_response: ModelResponse, data: Dict[str, Any], model: str) -> ModelResponse:
-        summary = data.get("summary") or ""
-        additional = data.get("additional") or {}
+        # Build a concise message content while attaching full payload
+        msg_text = ""
+        try:
+            s = data.get("summary") or {}
+            if isinstance(s, dict):
+                items = s.get("items")
+                succ = s.get("succeeded")
+                fail = s.get("failed")
+                msg_text = f"CodeWorld: items={items}, succeeded={succ}, failed={fail}"
+            else:
+                msg_text = str(s)
+        except Exception:
+            msg_text = "CodeWorld: completed (see additional_kwargs.codeworld)"
         model_response.model = model
         try:
-            model_response.choices[0].message.content = summary  # type: ignore[attr-defined]
+            model_response.choices[0].message.content = msg_text  # type: ignore[attr-defined]
             model_response.choices[0].message.role = "assistant"  # type: ignore[attr-defined]
         except Exception:
-            model_response.choices[0].message = {"role": "assistant", "content": summary}  # type: ignore[assignment]
-        # Expose additional fields via additional_kwargs["codeworld"]
+            model_response.choices[0].message = {"role": "assistant", "content": msg_text}  # type: ignore[assignment]
+        # Attach full payload
         try:
-            if hasattr(model_response, "additional_kwargs") and isinstance(model_response.additional_kwargs, dict):  # type: ignore[attr-defined]
-                model_response.additional_kwargs.setdefault("codeworld", additional)  # type: ignore[attr-defined]
-            else:
-                setattr(model_response, "additional_kwargs", {"codeworld": additional})
+            model_response.additional_kwargs = getattr(model_response, "additional_kwargs", {}) or {}
+            model_response.additional_kwargs["codeworld"] = data
         except Exception:
             pass
         return model_response

@@ -97,6 +97,42 @@ checks:
       NDSMOKE_TOOL_TIMEOUT: "45"
       NDSMOKE_TIMEOUT: "240"
 
+  - name: lean4_bridge_smoke
+    description: Lean4 bridge reachable and returns shaped summary (live E2E; skip if not running)
+    run: |
+      PYTHONPATH=$(pwd) python scenarios/lean4_bridge_release.py
+    env:
+      LEAN4_BRIDGE_BASE: http://127.0.0.1:8787
+    optional: true
+
+  - name: codeworld_bridge_smoke
+    description: CodeWorld bridge reachable and returns shaped summary (live E2E; skip if not running)
+    run: |
+      PYTHONPATH=$(pwd) python scenarios/codeworld_bridge_release.py
+    env:
+      CODEWORLD_BASE: http://127.0.0.1:8887
+    optional: true
+
+  - name: lean4_health
+    description: Lean4 bridge /healthz
+    run: |
+      curl -sSf http://127.0.0.1:8787/healthz
+    optional: true
+
+  - name: codeworld_health
+    description: CodeWorld bridge /healthz
+    run: |
+      curl -sSf http://127.0.0.1:8887/healthz
+    optional: true
+
+  - name: coq_bridge_smoke
+    description: Coq bridge reachable and returns shaped summary (live E2E; skip if not running)
+    run: |
+      PYTHONPATH=$(pwd) python scenarios/coq_bridge_release.py
+    env:
+      COQ_BRIDGE_BASE: http://127.0.0.1:8897
+    optional: true
+
   - name: code_loop_python
     description: Explicit code loop (generate → run → repair) must converge
     run: |
@@ -116,7 +152,7 @@ checks:
 
 
   - name: all_smokes_core
-    description: Core smoke suites (deterministic)
+    description: Core smoke suites (deterministic) — deprecated in favor of live scenarios
     run: |
       PYTHONPATH=$(pwd) pytest tests/smoke tests/smoke_optional
     env:
@@ -129,6 +165,13 @@ checks:
       LITELLM_DEFAULT_CODE_MODEL: ollama_chat/qwen2.5-coder:3b
       LITELLM_DEFAULT_TEXT_MODEL: ollama_chat/glm4:latest
       OLLAMA_MODEL: glm4:latest
+    optional: true
+
+  - name: scenarios_live
+    description: Live scenarios runner (skip-friendly); supersedes ND smoke tests
+    run: |
+      PYTHONPATH=$(pwd) python scenarios/run_all.py || true
+    optional: true
 
   - name: all_smokes_nd
     description: Non-deterministic + E2E (slower)

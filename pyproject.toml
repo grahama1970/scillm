@@ -123,6 +123,8 @@ profile = "black"
 [tool.poetry.scripts]
 litellm = 'litellm:run_server'
 litellm-proxy = 'litellm.proxy.client.cli:cli'
+scillm = 'litellm:run_server'
+scillm-proxy = 'litellm.proxy.client.cli:cli'
 
 [tool.poetry.group.dev.dependencies]
 flake8 = "^6.1.0"

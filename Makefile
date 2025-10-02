@@ -16,6 +16,10 @@ help:
 	@echo "  make format-check       - Check Black code formatting (matches CI)"
 	@echo "  make lint               - Run all linting (Ruff, MyPy, Black check, circular imports, import safety)"
 	@echo "  make run-scenarios      - Run live scenarios (mini-agent, router demos, chutes, code-agent)"
+	@echo "  make lean4-bridge       - Start Lean4 bridge on :8787"
+		@echo "  make lean4-bridge-smoke - Probe Lean4 bridge (live scenario)"
+	@echo "  make codeworld-bridge   - Start CodeWorld bridge on :8887"
+		@echo "  make codeworld-bridge-smoke - Probe CodeWorld bridge (live scenario)"
 	@echo "  make run-stress-tests   - Run live stress scenarios (throughput, bursts, codex, mini-agent)"
 	@echo "  make lint-ruff          - Run Ruff linting only"
 	@echo "  make lint-mypy          - Run MyPy type checking only"
@@ -29,6 +33,26 @@ help:
 	@echo "  make review-bundle      - Create standard code review bundle (Markdown)"
 	@echo "  make review-bundle-custom - Create custom ==== FILE style review bundle"
 	@echo "  make review-bundle-gist FILE=... - Upload a file as a private GitHub Gist (requires GITHUB_TOKEN)"
+
+# --- Logo exports -------------------------------------------------------------
+.PHONY: logo-export
+logo-export:
+	@echo "Exporting outlined SVG variants (requires Inkscape >= 1.0)"
+	@which inkscape >/dev/null 2>&1 || (echo "Inkscape not found. Install it to outline text." && exit 1)
+	@mkdir -p local/artifacts/logo
+	inkscape SciLLM_friendly.svg --export-plain-svg=local/artifacts/logo/SciLLM_friendly_outlined.svg --export-text-to-path
+	inkscape SciLLM_balanced.svg --export-plain-svg=local/artifacts/logo/SciLLM_balanced_outlined.svg --export-text-to-path
+	@echo "Exporting PNG favicons"
+	inkscape SciLLM_icon.svg --export-filename=local/artifacts/logo/favicon-32.png -w 32 -h 32
+	inkscape SciLLM_icon.svg --export-filename=local/artifacts/logo/favicon-180.png -w 180 -h 180
+	@echo "Attempting to export ICO favicon (requires ImageMagick 'convert')"
+	@if command -v convert >/dev/null 2>&1; then \
+	  convert local/artifacts/logo/favicon-32.png local/artifacts/logo/favicon-180.png local/artifacts/logo/favicon.ico; \
+	  echo "Wrote local/artifacts/logo/favicon.ico"; \
+	else \
+	  echo "ImageMagick not found. To make favicon.ico: convert favicon-32.png favicon-180.png favicon.ico"; \
+	fi
+	@echo "Done. See local/artifacts/logo/."
 
 # Installation targets
 install-dev:
@@ -74,6 +98,18 @@ lint-black: format-check
 
 run-scenarios:
 	@. .venv/bin/activate && python scenarios/run_all.py
+
+lean4-bridge:
+	PYTHONPATH=src uvicorn lean4_prover.bridge.server:app --port 8787 --log-level warning
+
+lean4-bridge-smoke:
+	PYTHONPATH=$(PWD) python scenarios/lean4_bridge_release.py
+
+codeworld-bridge:
+	PYTHONPATH=src uvicorn codeworld.bridge.server:app --port 8887 --log-level warning
+
+codeworld-bridge-smoke:
+	PYTHONPATH=$(PWD) python scenarios/codeworld_bridge_release.py
 
 run-stress-tests:
 	@echo "Running throughput benchmark"

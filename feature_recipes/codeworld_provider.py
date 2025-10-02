@@ -17,14 +17,36 @@ class CodeWorldProvider:
             h["Authorization"] = f"Bearer {self.token}"
         return h
 
-    async def acomplete(self, *, messages, metrics, iterations, allowed_languages, request_timeout: float, temperature: float | None = None, seed: int | None = None) -> Dict[str, Any]:
-        payload = {
-            "messages": messages,
-            "codeworld_metrics": metrics,
-            "codeworld_iterations": iterations,
-            "codeworld_allowed_languages": allowed_languages,
-            "request_timeout": float(request_timeout),
-        }
+    async def acomplete(
+        self,
+        *,
+        messages,
+        metrics,
+        iterations,
+        allowed_languages,
+        request_timeout: float,
+        temperature: float | None = None,
+        seed: int | None = None,
+        items: list | None = None,
+        provider: dict | None = None,
+        options: dict | None = None,
+    ) -> Dict[str, Any]:
+        payload = {"messages": messages}
+        if items is not None:
+            payload["items"] = items
+        if provider is not None:
+            payload["provider"] = provider
+        if options is not None:
+            payload["options"] = options
+        # Back-compat aliases
+        payload.update(
+            {
+                "codeworld_metrics": metrics,
+                "codeworld_iterations": iterations,
+                "codeworld_allowed_languages": allowed_languages,
+                "request_timeout": float(request_timeout),
+            }
+        )
         if temperature is not None:
             payload["temperature"] = float(temperature)
         if seed is not None:
@@ -37,4 +59,3 @@ class CodeWorldProvider:
                 return {"error": True, "status": r.status_code, "body": r.json()}
             except Exception:
                 return {"error": True, "status": r.status_code, "body": r.text}
-
