@@ -216,6 +216,7 @@ async def bridge_complete(req: Lean4BridgeRequest):
             "lean4_repo": str(LEAN4_REPO),
             "schema": "canonical+lean4@v1",
             "options": {"max_seconds": timeout, "session_id": session_id, "track_id": track_id},
+            "provider": {"name": "certainly", "backend": "lean4"},
         },
     }
     try:
