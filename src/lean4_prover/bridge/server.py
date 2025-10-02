@@ -23,6 +23,7 @@ except Exception:  # pragma: no cover - fallback for non-src runs
     CanonOptions = None  # type: ignore
     CanonicalBridgeRequest = BaseModel  # type: ignore
 import contextlib
+import uuid
 
 ROOT = Path(__file__).resolve().parents[2]
 # Accept CERTAINLY_REPO as an alias for LEAN4_REPO (project package is named 'certainly')
@@ -186,6 +187,15 @@ async def bridge_complete(req: Lean4BridgeRequest):
     stats = payload.get("statistics", {}) if isinstance(payload, dict) else {}
     proof_results = payload.get("proof_results", []) if isinstance(payload, dict) else []
 
+    # Attach stable per-item ids to proof results when available
+    if isinstance(proof_results, list):
+        for i, pr in enumerate(proof_results):
+            try:
+                if isinstance(pr, dict):
+                    pr.setdefault("item_id", pr.get("id") or pr.get("task_id") or f"item-{i+1}")
+            except Exception:
+                pass
+
     response = {
         "summary": {
             "items": len(proof_results) if isinstance(proof_results, list) else None,
@@ -201,6 +211,7 @@ async def bridge_complete(req: Lean4BridgeRequest):
         "duration_ms": duration_ms,
         "run_manifest": {
             "ts": int(time.time()),
+            "run_id": uuid.uuid4().hex,
             "flags": flags,
             "lean4_repo": str(LEAN4_REPO),
             "schema": "canonical+lean4@v1",
