@@ -25,6 +25,7 @@ import json
 import sys
 from types import SimpleNamespace
 import ast
+import math
 
 
 def _limit_resources() -> None:  # best-effort on Unix
@@ -67,43 +68,32 @@ def main() -> int:
         with open(scoring_path, "r", encoding="utf-8") as f:
             code = f.read()
 
-        # AST validation: allow a single FunctionDef 'score' and safe expressions only
+        # AST validation with denylist/allowlist
+        _DISALLOWED_CALLS = {"__import__", "eval", "exec", "open", "compile", "breakpoint", "input", "globals", "locals", "vars"}
+        _DISALLOWED_NODES = {ast.Import, ast.ImportFrom, ast.With, ast.AsyncWith, ast.Try, ast.Raise, ast.ClassDef, ast.Lambda, ast.Global, ast.Nonlocal, ast.Await, ast.Yield, ast.YieldFrom}
+        _ALLOWED_TOPLEVEL = {ast.FunctionDef, ast.Assign, ast.AnnAssign, ast.Expr, ast.If}
+
         tree = ast.parse(code, filename=scoring_path)
+        for node in ast.walk(tree):
+            if type(node) in _DISALLOWED_NODES:
+                raise ValueError(f"node_forbidden:{type(node).__name__}")
+            if isinstance(node, ast.Call):
+                fn = node.func
+                if isinstance(fn, ast.Name) and fn.id in _DISALLOWED_CALLS:
+                    raise ValueError(f"call_forbidden:{fn.id}")
+            if isinstance(node, ast.Attribute) and isinstance(node.attr, str) and node.attr.startswith("__"):
+                raise ValueError("dunder_attribute_forbidden")
+        for stmt in tree.body:
+            if type(stmt) not in _ALLOWED_TOPLEVEL:
+                raise ValueError(f"toplevel_forbidden:{type(stmt).__name__}")
 
-        allowed_nodes = (
-            ast.Module, ast.FunctionDef, ast.arguments, ast.arg,
-            ast.Return, ast.Assign, ast.AnnAssign, ast.If,
-            ast.Expr, ast.Name, ast.Load, ast.Store,
-            ast.Constant, ast.Num, ast.Str, ast.Dict, ast.List, ast.Tuple,
-            ast.BinOp, ast.BoolOp, ast.UnaryOp, ast.Compare,
-            ast.Subscript, ast.Slice, ast.Index,
-            ast.And, ast.Or, ast.Add, ast.Sub, ast.Mult, ast.Div, ast.Mod, ast.Pow,
-            ast.Eq, ast.NotEq, ast.Lt, ast.LtE, ast.Gt, ast.GtE, ast.Not,
-        )
-        forbidden = (ast.Import, ast.ImportFrom, ast.Global, ast.Nonlocal, ast.ClassDef, ast.With,
-                     ast.AsyncFunctionDef, ast.Await, ast.Try, ast.Raise, ast.While, ast.For, ast.Lambda,
-                     ast.Call, ast.Attribute, ast.ListComp, ast.DictComp, ast.SetComp, ast.GeneratorExp,
-                     ast.Yield, ast.YieldFrom)
-
-        # Allow module docstring as first Expr(Constant)
-        def _check(node: ast.AST) -> None:
-            if isinstance(node, forbidden):
-                raise ValueError(f"forbidden syntax: {node.__class__.__name__}")
-            if not isinstance(node, allowed_nodes):
-                # permit docstring Expr(Constant)
-                if isinstance(node, ast.Expr) and isinstance(getattr(node, 'value', None), ast.Constant):
-                    return
-                # allow type ignores
-                if isinstance(node, ast.Load) or isinstance(node, ast.Store):
-                    return
-                raise ValueError(f"unsupported syntax: {node.__class__.__name__}")
-            for child in ast.iter_child_nodes(node):
-                _check(child)
-
-        _check(tree)
-
-        # Restrict builtins and globals; provide no imports by default
-        safe_globals = {"__builtins__": {}}
+        # Restrict builtins and globals; allow math only
+        SAFE_BUILTINS = {
+            "abs": abs, "min": min, "max": max, "sum": sum, "len": len,
+            "float": float, "int": int, "bool": bool, "round": round, "range": range,
+            "enumerate": enumerate, "zip": zip, "map": map, "filter": filter,
+        }
+        safe_globals = {"__builtins__": SAFE_BUILTINS, "math": math}
         exec(compile(tree, scoring_path, "exec"), safe_globals, ns)
         fn = ns.get("score")
         if not callable(fn):
