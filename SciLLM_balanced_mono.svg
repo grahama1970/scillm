@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Balanced Geometric mono variant (single color) -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 460 110" role="img" aria-labelledby="title desc">
+  <title id="title">SciLLM Logo — Balanced (Mono)</title>
+  <desc id="desc">Single-color wordmark with orbital mark for printing/embossing.</desc>
+  <defs>
+    <style>
+      .monoFill { fill: #0B1220; }
+      .monoStroke { stroke: #0B1220; }
+      .text { font-family: Poppins, "Nunito Sans", Segoe UI, Roboto, Helvetica Neue, Arial, sans-serif; font-weight: 500; }
+    </style>
+  </defs>
+  <g transform="translate(26,22)">
+    <circle cx="22" cy="32" r="5.5" class="monoFill"/>
+    <ellipse cx="22" cy="32" rx="24" ry="13" fill="none" class="monoStroke" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>
+    <g transform="rotate(35 22 32)">
+      <ellipse cx="22" cy="32" rx="24" ry="13" fill="none" class="monoStroke" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+    </g>
+    <circle cx="45" cy="32" r="3.6" class="monoFill"/>
+    <circle cx="8" cy="22" r="3.6" class="monoFill"/>
+  </g>
+  <g class="text" font-size="47" letter-spacing="0.06px">
+    <text x="92" y="66" class="monoFill">Sc</text>
+    <g transform="translate(159,66)">
+      <rect x="-1.5" y="-27" width="3" height="27" rx="1.2" class="monoFill"/>
+      <circle cx="0" cy="-32.8" r="2.6" class="monoFill"/>
+    </g>
+    <text x="173" y="66" class="monoFill" letter-spacing="0.04px">LLM</text>
+  </g>
+</svg>

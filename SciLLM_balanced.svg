@@ -1,0 +1,55 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Balanced Geometric variant (prefers Poppins). Text-based; see Makefile logo-export to outline. -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 460 110" role="img" aria-labelledby="title desc">
+  <title id="title">SciLLM Logo — Balanced</title>
+  <desc id="desc">Balanced, geometric wordmark with orbital mark. Prefers Poppins.</desc>
+  <defs>
+    <style>
+      .brand-dark { fill: #0A2343; }  /* updated industrial neutral */
+      .brand-blue { fill: #0D4EA3; }  /* updated engineered blue */
+      .brand-teal { fill: #5FD3D3; }  /* lighter teal tint for better balance */
+      .stroke-blue { stroke: #0D4EA3; }
+      .stroke-teal { stroke: #5FD3D3; }  /* match lighter teal on orbit */
+      .text {
+        font-family: Poppins, "Nunito Sans", Segoe UI, Roboto, Helvetica Neue, Arial, sans-serif;
+        font-weight: 500;
+      }
+      /* Optical thickening for the 'S' spine at small sizes */
+      .thicken { stroke: currentColor; stroke-width: 0.4; paint-order: stroke fill; }
+    </style>
+    <!-- Subtle directional shading for i-dot (suggesting tilt toward LLM on the right) -->
+    <!-- Option A: biased radial fill to suggest a top-right specular tilt -->
+    <radialGradient id="dotGrad" cx="50%" cy="50%" r="75%" fx="80%" fy="25%">
+      <stop offset="0%" stop-color="#2A6EC6"/>
+      <stop offset="55%" stop-color="#0D4EA3"/>
+      <stop offset="100%" stop-color="#0B3E85"/>
+    </radialGradient>
+  </defs>
+  <!-- Orbit scaled ≈8% around its own center (22,32) to keep position true -->
+  <g transform="translate(24,21) translate(22 32) scale(0.92) translate(-22 -32)">
+    <!-- No nucleus for cleaner small-size rendering -->
+    <ellipse cx="22" cy="32" rx="24" ry="13" fill="none" class="stroke-teal" stroke-width="2.2"
+             stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke"/>
+    <g transform="rotate(35 22 32)">
+      <ellipse cx="22" cy="32" rx="24" ry="13" fill="none" class="stroke-blue" stroke-width="1.5"
+               stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke"/>
+    </g>
+    <!-- Place teal node on rotated (blue) orbit at t≈0 (around rightmost before rotation) -->
+    <!-- Tangent-aligned, gently elongated nodes for subtle motion cue -->
+    <ellipse cx="41.7" cy="45.8" rx="3.8" ry="3.4" class="brand-teal" transform="rotate(60 41.7 45.8)"/>
+    <!-- Place blue node on unrotated (teal) orbit at t≈140°; align long axis with local tangent -->
+    <ellipse cx="3.6" cy="40.4" rx="3.8" ry="3.4" class="brand-blue" transform="rotate(60 3.6 40.4)"/>
+  </g>
+  <g class="text" font-size="47">
+    <!-- Preserve natural kerning by keeping 'Sc' together; small tracking for openness -->
+    <text x="92" y="66" class="brand-dark" letter-spacing="0.02em">Sc</text>
+    <!-- Geometric i placed after 'Sc' with an even optical gap (moved right) -->
+    <g transform="translate(156,66)">
+      <!-- match stem to Poppins 500 verticals -->
+      <rect x="-1.6" y="-27" width="3.2" height="27" rx="1.2" class="brand-dark"/>
+      <!-- slightly larger dot for balance; raised 0.5px for optical x-height centering at small sizes -->
+      <circle cx="0" cy="-33.5" r="2.8" class="brand-blue" fill="url(#dotGrad)"/>
+    </g>
+    <text x="162" y="66" class="brand-blue" letter-spacing="0.04em">LLM</text>
+  </g>
+</svg>

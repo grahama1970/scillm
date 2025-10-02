@@ -1,0 +1,38 @@
+name: Scenarios Live
+
+on:
+  workflow_dispatch: {}
+  push:
+    branches: [ main, fork/stable ]
+  pull_request:
+    branches: [ main, fork/stable ]
+
+jobs:
+  run-scenarios:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install
+        run: |
+          python -m pip install -U pip
+          pip install -e .
+          pip install python-dotenv httpx
+      - name: Run scenarios
+        env:
+          LITELLM_ENABLE_MINI_AGENT: "1"
+          LITELLM_ENABLE_CODEX_AGENT: "1"
+          LITELLM_ENABLE_LEAN4: "1"
+          LITELLM_ENABLE_CODEWORLD: "1"
+        run: |
+          python scenarios/run_all.py || true
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: scenarios-artifacts
+          path: |
+            PROJECT_READY.md
+            local/artifacts/**
