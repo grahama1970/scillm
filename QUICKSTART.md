@@ -85,6 +85,18 @@ python scenarios/lean4_router_release.py
 
 This mirrors the CodeWorld Router pattern for a consistent developer experience.
 
+### Certainly alias (Lean4 umbrella)
+
+To call Lean4 via the umbrella provider:
+
+```bash
+export LITELLM_ENABLE_CERTAINLY=1
+export CERTAINLY_BRIDGE_BASE=http://127.0.0.1:8787
+python scenarios/certainly_adapter_demo.py
+```
+
+Results attach under `additional_kwargs['certainly']` (optionally mirrored to `['lean4']` while migrating).
+
 Canonical bridge schema
 - Both bridges accept a canonical envelope alongside provider-specific aliases:
   - Request: { messages, items, provider: {name, args}, options: {max_seconds} }
@@ -151,3 +163,4 @@ uv run scripts/viewers/make_synthetic_graph.py prototypes/lemma-graph-viewer/pub
 - `docs/readiness/FINAL_MANUAL_CHECKLIST.md`—manual gate after `mvp_check`
 - `feature_recipes/`—sample LiteLLM bridge showing how Router calls could invoke
   Lean4 via the `/bridge` surface
+> Looking for the full SciLLM stack (Lean4/Certainly + CodeWorld + proxy)? See `QUICK_START.md` for Docker bring‑up (`local/docker/compose.scillm.stack.yml`) and scenarios covering both bridges.

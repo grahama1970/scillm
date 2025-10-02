@@ -1,3 +1,5 @@
+Review branch: https://github.com/grahama1970/scillm/tree/feat/codeworld-provider
+
 # Code Review Request — SciLLM (LiteLLM fork) with CodeWorld + Certainly (Lean4)
 
 This review covers the integrated stack: providers, bridges, scenarios, readiness, and docs. Please propose unified diffs to improve correctness, safety, and developer ergonomics.
@@ -73,4 +75,3 @@ LITELLM_ENABLE_CERTAINLY=1 CERTAINLY_BRIDGE_BASE=http://127.0.0.1:8787 \
 ## Please Reply With
 - Unified diffs against the files listed above.
 - If changing provider routing, include a tiny scenario demonstrating the new flow.
-

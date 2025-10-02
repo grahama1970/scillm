@@ -2,7 +2,7 @@
   <!-- Use outlined balanced logo for pixel-consistent rendering across systems -->
   <img src="local/artifacts/logo/SciLLM_balanced_outlined.svg" alt="SciLLM" width="140" />
   <br/>
-  <img src="SciLLM_icon.svg" alt="SciLLM Icon" width="44" />
+  <img src="local/artifacts/logo/SciLLM_icon.svg" alt="SciLLM Icon" width="44" />
   <br/>
   <em>Balanced wordmark (default) + icon (logo‑only). The favicon (.ico) should use the icon only, no text.</em>
  </p>
@@ -63,7 +63,7 @@ Future backends (e.g., Coq) will plug into the same surface, but are out of scop
     &nbsp;&nbsp;
     <img src="SciLLM_friendly.svg" alt="SciLLM Friendly" height="36" />
     &nbsp;&nbsp;
-    <img src="SciLLM_icon.svg" alt="SciLLM Icon" height="36" />
+    <img src="local/artifacts/logo/SciLLM_icon.svg" alt="SciLLM Icon" height="36" />
     &nbsp;&nbsp;
     <img src="SciLLM_balanced_dark.svg" alt="SciLLM Balanced Dark" height="36" />
     &nbsp;&nbsp;
@@ -528,3 +528,8 @@ All these checks must pass before your PR can be merged.
 - Stress testing: local/docs/02_operational/STRESS_TESTING.md
 - Parity scripts: local/scripts/router_core_parity.py, local/scripts/parity_summarize.py (use `uv run`)
 - CI (live, secrets-gated): Nightly Parity & Stress, Weekly Streaming Stress, and Manual Stress workflows (see badges above).
+## Reviews
+
+See docs/reviews/ for current review briefs:
+- docs/reviews/REVIEW_REQUEST_SCILLM.md
+- docs/reviews/REVIEW_REQUEST_CERTAINLY.md
