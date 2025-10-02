@@ -91,7 +91,7 @@ This repository has been renamed to **scillm** and branded as **SciLLM — a sci
 - Core LiteLLM usage remains compatible; Lean4/CodeWorld are optional modules.
 - Preferred env flags: `SCILLM_ENABLE_*` (aliases: `LITELLM_ENABLE_*`).
 - CLI aliases: `scillm`, `scillm-proxy` (equivalent to litellm commands).
-- Deployment profiles: see `docs/deploy/SCILLM_DEPLOY.md` and `local/docker/compose.scillm.*.yml`.
+- Deployment profiles: see `docs/deploy/SCILLM_DEPLOY.md` and `deploy/docker/compose.scillm.*.yml`.
 
 - Translate inputs to provider's `completion`, `embedding`, and `image_generation` endpoints
 - [Consistent output](https://docs.litellm.ai/docs/completion/output), text responses will always be available at `['choices'][0]['message']['content']`

@@ -63,7 +63,7 @@ This review covers the integrated stack: providers, bridges, scenarios, readines
 
 ## Repro
 ```bash
-docker compose -f local/docker/compose.scillm.stack.yml up --build -d
+docker compose -f deploy/docker/compose.scillm.stack.yml up --build -d
 python scenarios/run_all.py  # skip‑friendly
 
 # Lean4/Certainly bridge

@@ -12,9 +12,9 @@ manually once the necessary providers or local services are available.
 3. Execute the scenario with `python scenarios/<script>.py`.
 
 Docker setups (SciLLM examples)
-- Core proxy only: `docker compose -f local/docker/compose.scillm.core.yml up --build -d`
-- Bridges only: `docker compose -f local/docker/compose.scillm.modules.yml up --build -d`
-- Full stack (proxy + bridges): `docker compose -f local/docker/compose.scillm.full.yml up --build -d`
+- Core proxy only: `docker compose -f deploy/docker/compose.scillm.core.yml up --build -d`
+- Bridges only: `docker compose -f deploy/docker/compose.scillm.modules.yml up --build -d`
+- Full stack (proxy + bridges): `docker compose -f deploy/docker/compose.scillm.full.yml up --build -d`
 
 A convenience target runs the live scenarios in a stable order:
 
