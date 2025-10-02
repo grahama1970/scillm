@@ -1375,12 +1375,21 @@ try:
         or _os_lean4.getenv("SCILLM_ENABLE_CERTAINLY", "") == "1"
     ):
         from .llms.lean4 import Lean4LLM as _Lean4LLM
+        # Optional adapter centralizing umbrella behavior
+        try:
+            from .llms.certainly import CertainlyLLM as _CertainlyLLM  # type: ignore
+        except Exception:
+            _CertainlyLLM = None  # type: ignore
         from .llms.custom_llm import register_custom_provider as _register_custom_provider_lean4
 
+        # Always register lean4 backend explicitly
         _register_custom_provider_lean4("lean4", _Lean4LLM)
-        # Alias: 'certainly' routes to the same handler for multi-prover surface
+        # Register 'certainly' to adapter if present else fallback to lean4 handler
         try:
-            _register_custom_provider_lean4("certainly", _Lean4LLM)
+            if _CertainlyLLM is not None:
+                _register_custom_provider_lean4("certainly", _CertainlyLLM)  # type: ignore
+            else:
+                _register_custom_provider_lean4("certainly", _Lean4LLM)
         except Exception:
             pass
 except Exception:
