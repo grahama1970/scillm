@@ -1,0 +1,74 @@
+services:
+  arangodb:
+    image: arangodb:3.11
+    environment:
+      - ARANGO_ROOT_PASSWORD=root
+    ports:
+      - "8529:8529"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://127.0.0.1:8529/_api/version"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+
+  ollama:
+    image: ollama/ollama:latest
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_models:/root/.ollama
+
+  codeworld-bridge:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile.scillm
+    command: ["sh","-lc","PYTHONPATH=src uvicorn codeworld.bridge.server:app --host 0.0.0.0 --port 8887"]
+    environment:
+      - CODEWORLD_BASE=http://0.0.0.0:8887
+      - CODEWORLD_SCORING_NONET=1
+      - CODEWORLD_STRATEGY_NONET=1
+      - CODEWORLD_REDIS_URL=redis://redis:6379/0
+    ports:
+      - "8887:8887"
+    depends_on:
+      - redis
+    security_opt:
+      - no-new-privileges:true
+
+  lean4-bridge:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile.scillm
+    command: ["sh","-lc","PYTHONPATH=src uvicorn lean4_prover.bridge.server:app --host 0.0.0.0 --port 8787"]
+    environment:
+      - LEAN4_BRIDGE_TIMEOUT_SECONDS=300
+    ports:
+      - "8787:8787"
+    volumes:
+      []
+
+  scillm-proxy:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile.scillm
+    command: ["sh","-lc","scillm-proxy start --host 0.0.0.0 --port 4000"]
+    environment:
+      - LITELLM_MODE=PRODUCTION
+      - LITELLM_ENABLE_CODEWORLD=1
+      - LITELLM_ENABLE_LEAN4=1
+    ports:
+      - "4000:4000"
+    depends_on:
+      - arangodb
+      - redis
+      - codeworld-bridge
+      - lean4-bridge
+
+volumes:
+  ollama_models: {}
+
