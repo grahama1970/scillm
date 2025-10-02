@@ -14,10 +14,22 @@ jobs:
     steps:
       - run: curl -sSf http://127.0.0.1:8887/healthz || true
       - run: curl -sSf http://127.0.0.1:8787/healthz || true
+  health-gate-strict:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      READINESS_LIVE: ${{ env.READINESS_LIVE }}
+      STRICT_READY: ${{ env.STRICT_READY }}
+    steps:
+      - name: Lean4/Certainly strict health
+        if: env.READINESS_LIVE == '1' && env.STRICT_READY == '1'
+        run: |
+          set -e
+          curl -sSf http://127.0.0.1:8787/healthz
   run-scenarios:
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    needs: [health-gate]
+    needs: [health-gate, health-gate-strict]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5

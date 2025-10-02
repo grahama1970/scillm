@@ -150,12 +150,23 @@ class CodeWorldLLM(CustomLLM):
             result_url = data.get("result_url") or ""
             t_end = time.time() + budget + 30.0
             backoff = 0.5
+            if not result_url:
+                raise CustomLLMError(status_code=500, message="bridge did not return result_url")
             while time.time() < t_end:
                 try:
                     with httpx.Client(timeout=10.0, headers=hdr) as c:
                         rr = c.get(base + result_url) if result_url else None
-                        if rr is not None and rr.status_code == 200:
+                        if rr is None:
+                            raise CustomLLMError(status_code=500, message="bridge result_url is invalid")
+                        if rr.status_code == 200:
                             return self._map_response(model_response, rr.json(), model)
+                        if rr.status_code != 202:
+                            try:
+                                payload = rr.json()
+                                msg = payload.get("error") if isinstance(payload, dict) else payload
+                            except Exception:
+                                msg = rr.text
+                            raise CustomLLMError(status_code=rr.status_code, message=str(msg)[:400])
                 except Exception:
                     pass
                 time.sleep(backoff)
@@ -211,13 +222,22 @@ class CodeWorldLLM(CustomLLM):
         if status == 202:
             result_url = data.get("result_url") or ""
             t_end = time.time() + budget + 30.0
+            if not result_url:
+                raise CustomLLMError(status_code=500, message="bridge did not return result_url")
             async with httpx.AsyncClient(timeout=10.0, headers=hdr) as c:
                 backoff = 0.5
                 while time.time() < t_end:
                     try:
-                        rr = await c.get(base + result_url) if result_url else None
-                        if rr is not None and rr.status_code == 200:
+                        rr = await c.get(base + result_url)
+                        if rr.status_code == 200:
                             return self._map_response(model_response, rr.json(), model)
+                        if rr.status_code != 202:
+                            try:
+                                payload = rr.json()
+                                msg = payload.get("error") if isinstance(payload, dict) else payload
+                            except Exception:
+                                msg = rr.text
+                            raise CustomLLMError(status_code=rr.status_code, message=str(msg)[:400])
                     except Exception:
                         pass
                     await asyncio.sleep(backoff)  # type: ignore
