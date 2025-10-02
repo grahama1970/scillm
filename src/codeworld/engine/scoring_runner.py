@@ -24,6 +24,7 @@ Safety (alpha):
 import json
 import sys
 from types import SimpleNamespace
+import ast
 
 
 def _limit_resources() -> None:  # best-effort on Unix
@@ -60,14 +61,50 @@ def main() -> int:
 
     _limit_resources()
 
-    # Load scoring code
+    # Load and validate scoring code
     ns: dict[str, object] = {}
     try:
         with open(scoring_path, "r", encoding="utf-8") as f:
             code = f.read()
+
+        # AST validation: allow a single FunctionDef 'score' and safe expressions only
+        tree = ast.parse(code, filename=scoring_path)
+
+        allowed_nodes = (
+            ast.Module, ast.FunctionDef, ast.arguments, ast.arg,
+            ast.Return, ast.Assign, ast.AnnAssign, ast.If,
+            ast.Expr, ast.Name, ast.Load, ast.Store,
+            ast.Constant, ast.Num, ast.Str, ast.Dict, ast.List, ast.Tuple,
+            ast.BinOp, ast.BoolOp, ast.UnaryOp, ast.Compare,
+            ast.Subscript, ast.Slice, ast.Index,
+            ast.And, ast.Or, ast.Add, ast.Sub, ast.Mult, ast.Div, ast.Mod, ast.Pow,
+            ast.Eq, ast.NotEq, ast.Lt, ast.LtE, ast.Gt, ast.GtE, ast.Not,
+        )
+        forbidden = (ast.Import, ast.ImportFrom, ast.Global, ast.Nonlocal, ast.ClassDef, ast.With,
+                     ast.AsyncFunctionDef, ast.Await, ast.Try, ast.Raise, ast.While, ast.For, ast.Lambda,
+                     ast.Call, ast.Attribute, ast.ListComp, ast.DictComp, ast.SetComp, ast.GeneratorExp,
+                     ast.Yield, ast.YieldFrom)
+
+        # Allow module docstring as first Expr(Constant)
+        def _check(node: ast.AST) -> None:
+            if isinstance(node, forbidden):
+                raise ValueError(f"forbidden syntax: {node.__class__.__name__}")
+            if not isinstance(node, allowed_nodes):
+                # permit docstring Expr(Constant)
+                if isinstance(node, ast.Expr) and isinstance(getattr(node, 'value', None), ast.Constant):
+                    return
+                # allow type ignores
+                if isinstance(node, ast.Load) or isinstance(node, ast.Store):
+                    return
+                raise ValueError(f"unsupported syntax: {node.__class__.__name__}")
+            for child in ast.iter_child_nodes(node):
+                _check(child)
+
+        _check(tree)
+
         # Restrict builtins and globals; provide no imports by default
         safe_globals = {"__builtins__": {}}
-        exec(code, safe_globals, ns)
+        exec(compile(tree, scoring_path, "exec"), safe_globals, ns)
         fn = ns.get("score")
         if not callable(fn):
             raise RuntimeError("scoring file must define callable 'score' function")
@@ -86,4 +123,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
