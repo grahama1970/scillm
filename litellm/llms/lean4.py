@@ -22,18 +22,25 @@ from litellm.utils import ModelResponse
 
 
 def _resolve_base(api_base: Optional[str]) -> str:
-    base = api_base or os.getenv("LEAN4_BRIDGE_BASE") or "http://127.0.0.1:8787"
+    base = (
+        api_base
+        or os.getenv("CERTAINLY_BRIDGE_BASE")
+        or os.getenv("LEAN4_BRIDGE_BASE")
+        or "http://127.0.0.1:8787"
+    )
     return base.rstrip("/")
 
 
 def _shape_payload(messages: list, optional_params: dict | None) -> Dict[str, Any]:
     opt = dict(optional_params or {})
+    # Optional multi-prover hint (placeholder): backend = "lean4" | "coq"
+    backend = (opt.pop("backend", None) or os.getenv("CERTAINLY_BACKEND") or "lean4").lower()
     # Accept either 'lean4_requirements' or generic 'items'
     requirements = opt.pop("lean4_requirements", None) or opt.pop("items", None)
     if not isinstance(requirements, list) or not requirements:
         raise CustomLLMError(status_code=400, message="lean4 provider requires 'lean4_requirements' or 'items' list")
     flags = opt.pop("lean4_flags", None) or opt.pop("flags", None)
-    payload: Dict[str, Any] = {"messages": messages, "lean4_requirements": requirements}
+    payload: Dict[str, Any] = {"messages": messages, "lean4_requirements": requirements, "backend": backend}
     if isinstance(flags, list) and flags:
         payload["lean4_flags"] = flags
     # Pass through max_seconds if provided
@@ -104,7 +111,9 @@ class Lean4LLM(CustomLLM):
         # Attach full payload
         try:
             model_response.additional_kwargs = getattr(model_response, "additional_kwargs", {}) or {}
+            # Attach under both keys for compatibility with alias
             model_response.additional_kwargs["lean4"] = data
+            model_response.additional_kwargs["certainly"] = data
         except Exception:
             pass
         return model_response
@@ -155,6 +164,7 @@ class Lean4LLM(CustomLLM):
         try:
             model_response.additional_kwargs = getattr(model_response, "additional_kwargs", {}) or {}
             model_response.additional_kwargs["lean4"] = data
+            model_response.additional_kwargs["certainly"] = data
         except Exception:
             pass
         return model_response
@@ -166,12 +176,13 @@ try:
         try:
             from litellm.llms import PROVIDER_REGISTRY  # type: ignore
             PROVIDER_REGISTRY["lean4"] = Lean4LLM
+            PROVIDER_REGISTRY["certainly"] = Lean4LLM
         except Exception:
             try:
                 from litellm.llms.custom_llm import register_custom_provider  # type: ignore
                 register_custom_provider("lean4", Lean4LLM)
+                register_custom_provider("certainly", Lean4LLM)
             except Exception:
                 pass
 except Exception:
     pass
-

@@ -17,8 +17,9 @@ The payload must be a JSON object with keys: task, context, outputs, timings.
 
 Safety (alpha):
   - Sets CPU and address space limits where available (Linux/Unix).
-  - No imports are provided to scoring code by default; only the provided args.
-  - Network is not disabled at OS level here; callers must ensure no-net where required.
+  - Strict AST validation: no imports, no with/try/raise/class/lambda/global/nonlocal.
+  - Builtins restricted to numeric-safe helpers; math module allowed.
+  - Network not disabled here; callers may run this under a no-net namespace.
 """
 
 import json
@@ -31,8 +32,7 @@ import math
 def _limit_resources() -> None:  # best-effort on Unix
     try:
         import resource
-
-        # CPU time: 0.5s
+        # CPU time: 1s (integer granularity)
         resource.setrlimit(resource.RLIMIT_CPU, (1, 1))
         # Address space: ~256MB
         resource.setrlimit(resource.RLIMIT_AS, (256 * 1024 * 1024, 256 * 1024 * 1024))
@@ -40,6 +40,15 @@ def _limit_resources() -> None:  # best-effort on Unix
         resource.setrlimit(resource.RLIMIT_FSIZE, (0, 0))
         # Processes: 0 new
         resource.setrlimit(resource.RLIMIT_NPROC, (0, 0))
+        # Limit open fds to stdio + one extra for reading the scoring file
+        resource.setrlimit(resource.RLIMIT_NOFILE, (4, 4))
+        # No core dumps
+        resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
+    except Exception:
+        pass
+    try:
+        import sys as _sys
+        _sys.setrecursionlimit(1000)
     except Exception:
         pass
 

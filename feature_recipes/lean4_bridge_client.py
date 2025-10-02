@@ -18,7 +18,7 @@ from dotenv import find_dotenv, load_dotenv
 
 load_dotenv(find_dotenv())
 
-BASE = os.getenv("LEAN4_BRIDGE_BASE", "http://127.0.0.1:8787")
+BASE = os.getenv("CERTAINLY_BRIDGE_BASE", os.getenv("LEAN4_BRIDGE_BASE", "http://127.0.0.1:8787"))
 
 
 async def main() -> None:

@@ -16,7 +16,8 @@ from dotenv import find_dotenv, load_dotenv
 
 load_dotenv(find_dotenv())
 
-BRIDGE_BASE = os.getenv("LEAN4_BRIDGE_BASE", "http://127.0.0.1:8787")
+# Accept CERTAINLY_BRIDGE_BASE alias
+BRIDGE_BASE = os.getenv("CERTAINLY_BRIDGE_BASE", os.getenv("LEAN4_BRIDGE_BASE", "http://127.0.0.1:8787"))
 
 # Defer import so running this script doesn't require httpx unless used
 from feature_recipes.lean4_provider import Lean4Provider  # noqa: E402
@@ -83,4 +84,3 @@ async def main() -> None:
 
 if __name__ == "__main__":
     asyncio.run(main())
-

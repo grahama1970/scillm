@@ -13,7 +13,7 @@ for common setups.
 
 - Modules only (bridges for development)
   - File: `local/docker/compose.scillm.modules.yml`
-  - Services: `codeworld-bridge` (8887), `lean4-bridge` (8787)
+  - Services: `codeworld-bridge` (8887), `lean4-bridge` (8787) — project package is named `certainly`; env aliases `CERTAINLY_*` are accepted.
   - Start bridges locally to exercise scenarios without running the proxy.
   - Lean4 bridge expects a Lean4 repo inside the container if you want real proofs.
 

@@ -23,7 +23,7 @@ from dotenv import find_dotenv, load_dotenv
 
 load_dotenv(find_dotenv())
 
-LEAN4_REPO = Path(os.getenv("LEAN4_REPO", "/home/graham/workspace/experiments/lean4")).resolve()
+LEAN4_REPO = Path(os.getenv("CERTAINLY_REPO", os.getenv("LEAN4_REPO", "/home/graham/workspace/experiments/lean4"))).resolve()
 if not LEAN4_REPO.exists():
     print("Skipping Lean4 batch scenario (set LEAN4_REPO to your Lean4 repo).")
     sys.exit(0)

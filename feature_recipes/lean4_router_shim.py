@@ -39,7 +39,7 @@ class Lean4Router:
 
 
 async def main() -> None:
-    base = os.getenv("LEAN4_BRIDGE_BASE", "http://127.0.0.1:8787")
+    base = os.getenv("CERTAINLY_BRIDGE_BASE", os.getenv("LEAN4_BRIDGE_BASE", "http://127.0.0.1:8787"))
     router = Lean4Router(base)
     messages = [
         {"role": "system", "content": "Lean4 Router shim demo"},
@@ -55,4 +55,3 @@ async def main() -> None:
 
 if __name__ == "__main__":
     asyncio.run(main())
-

@@ -41,8 +41,8 @@ def score(task, context, outputs, timings):
             {"task": "strategy_compare", "context": {"section_id": "CW2", "expected": 10, "code_variants": {"v1": "def solve(xs): return sum(xs)"}}},
             {"task": "strategy_compare", "context": {"section_id": "CW3", "expected": 10, "code_variants": {"v1": "def solve(xs): return sum(xs)"}}},
         ],
-        "provider": {"name": "codeworld", "args": {"metrics": ["correctness", "speed", "brevity"], "iterations": 1, "scoring": {"lang": "py", "entry": "score", "code": scoring_py}, "judge": True}},
-        "options": {"max_seconds": 30},
+        "provider": {"name": "codeworld", "args": {"metrics": ["correctness", "speed", "brevity"], "iterations": 1, "scoring": {"lang": "py", "entry": "score", "code": scoring_py}, "judge": True, "judge_mode": "weighted"}},
+        "options": {"max_seconds": 30, "session_id": "smoke-session", "track_id": "alpha-track"},
     }
     try:
         rr = httpx.post(f"{BASE}/bridge/complete", json=body, timeout=60.0)

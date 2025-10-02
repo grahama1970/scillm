@@ -27,7 +27,7 @@ make run-scenarios
 ### `lean4_batch_demo.py`
 
 - Live E2E: proves two sample requirements via `cli_mini batch` using your configured Lean4 env (LLM/Docker).
-- Env: set `LEAN4_REPO` to your Lean4 repo path (defaults to `/home/graham/workspace/experiments/lean4`).
+- Env: set `CERTAINLY_REPO` (or `LEAN4_REPO`) to your Lean4 repo path (defaults to `/home/graham/workspace/experiments/lean4`).
 
 ### `lean4_suggest_demo.py`
 
@@ -37,7 +37,7 @@ make run-scenarios
 ### `lean4_bridge_release.py`
 
 - Live E2E: calls the Lean4 bridge endpoint via a provider client identical in shape to CodeWorld’s provider.
-- Env: `LEAN4_BRIDGE_BASE` (default `http://127.0.0.1:8787`). Start bridge with `PYTHONPATH=src uvicorn lean4_prover.bridge.server:app --port 8787`.
+- Env: `CERTAINLY_BRIDGE_BASE` (alias) or `LEAN4_BRIDGE_BASE` (default `http://127.0.0.1:8787`). Start bridge with `PYTHONPATH=src uvicorn lean4_prover.bridge.server:app --port 8787`.
 
 ### `lean4_router_release.py`
 
