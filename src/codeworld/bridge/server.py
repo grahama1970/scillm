@@ -12,6 +12,7 @@ import tempfile
 import os
 import sys
 import shutil
+import uuid
 try:
     from common.bridge.schemas import (
         ProviderArgs as CanonProviderArgs,
@@ -136,6 +137,8 @@ async def bridge_complete(req: CodeWorldBridgeRequest, request: Request):
     for idx, item in enumerate(items):
         task = (item.get("task") or item.get("spec") or "").strip()
         ctx = item.get("context") or {}
+        # Stable per-item id for replay
+        item_id = item.get("task_id") or item.get("id") or f"item-{idx+1}"
 
         # Alpha runner: Python strategy variants (optional), else simulate an output
         code_variants = (ctx.get("code_variants") or {}) if isinstance(ctx, dict) else {}
@@ -256,7 +259,7 @@ async def bridge_complete(req: CodeWorldBridgeRequest, request: Request):
                 agg = sum((weights[k] / wsum) * float(present[k]) for k in present.keys())
                 scores["aggregate"] = round(agg, 3)
 
-        entry = {"index": idx, "status": "ok", "scores": scores, "item": item, "outputs": {"result": outputs.get("result")}, "timings": timings}
+        entry = {"index": idx, "item_id": item_id, "status": "ok", "scores": scores, "item": item, "outputs": {"result": outputs.get("result")}, "timings": timings}
 
         if judge_flag:
             try:
@@ -330,9 +333,11 @@ async def bridge_complete(req: CodeWorldBridgeRequest, request: Request):
         "stderr": "",
         "run_manifest": {
             "ts": int(time.perf_counter() * 1000),
+            "run_id": uuid.uuid4().hex,
             "schema": "canonical+codeworld@v1",
             "options": {"max_seconds": timeout, "session_id": session_id, "track_id": track_id},
             "task_ids": [r.get("item", {}).get("task_id") for r in results if isinstance(r.get("item"), dict) and r.get("item", {}).get("task_id")],
+            "item_ids": [r.get("item_id") for r in results],
             # Optional: pass-through of tool invocations for deterministic replay
             "tools": [r.get("item", {}).get("context", {}).get("tool_invocations") for r in results if isinstance(r.get("item"), dict)],
         },
