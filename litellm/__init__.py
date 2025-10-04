@@ -1409,7 +1409,12 @@ try:
             class _CodeWorldMCTSLLM(_CodeWorldLLM):  # type: ignore
                 def _build_payload(self, _model, _messages, optional_params):  # type: ignore[override]
                     optional_params = dict(optional_params or {})
-                    optional_params.setdefault("strategy", "mcts")
+                    # Force consistent explicit structure so bridge logic is uniform
+                    if "strategy" not in optional_params and "strategy_config" not in optional_params:
+                        optional_params["strategy"] = "mcts"
+                        optional_params["strategy_config"] = {"name": "mcts"}
+                    elif optional_params.get("strategy") == "mcts" and "strategy_config" not in optional_params:
+                        optional_params["strategy_config"] = {"name": "mcts"}
                     return super()._build_payload(_model, _messages, optional_params)
 
             _register_custom_provider_codeworld("codeworld/mcts", _CodeWorldMCTSLLM)
