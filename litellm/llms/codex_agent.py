@@ -118,7 +118,7 @@ class CodexAgentLLM(CustomLLM):
             import random as _r
             rng = _r.Random(int(det_seed))
         metrics_enabled = os.getenv("CODEX_AGENT_ENABLE_METRICS", "0") == "1"
-        retry_stats = {"attempts": 0, "failures": 0, "total_sleep_ms": 0}
+        retry_stats = {"attempts": 0, "failures": 0, "total_sleep_ms": 0, "final_status": None}
         attempt = 0
         while True:
             try:
@@ -153,6 +153,11 @@ class CodexAgentLLM(CustomLLM):
                 if r.status_code < 200 or r.status_code >= 300:
                     raise CustomLLMError(status_code=r.status_code, message=r.text[:400])
                 data = r.json()
+                if metrics_enabled:
+                    try:
+                        retry_stats["final_status"] = r.status_code
+                    except Exception:
+                        pass
                 break
             except CustomLLMError:
                 raise
@@ -256,7 +261,7 @@ class CodexAgentLLM(CustomLLM):
             import random as _r
             rng = _r.Random(int(det_seed))
         metrics_enabled = os.getenv("CODEX_AGENT_ENABLE_METRICS", "0") == "1"
-        retry_stats = {"attempts": 0, "failures": 0, "total_sleep_ms": 0}
+        retry_stats = {"attempts": 0, "failures": 0, "total_sleep_ms": 0, "final_status": None}
         attempt = 0
         while True:
             try:
@@ -291,6 +296,11 @@ class CodexAgentLLM(CustomLLM):
                 if r.status_code < 200 or r.status_code >= 300:
                     raise CustomLLMError(status_code=r.status_code, message=r.text[:400])
                 data = r.json()
+                if metrics_enabled:
+                    try:
+                        retry_stats["final_status"] = r.status_code
+                    except Exception:
+                        pass
                 break
             except CustomLLMError:
                 raise

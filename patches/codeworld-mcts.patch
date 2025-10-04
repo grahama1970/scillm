@@ -176,6 +176,9 @@ index 2222222..3333333 100644
      "strategy_params": (
         {"rollouts": mcts_out.get("rollouts"), "depth": mcts_out.get("depth"), "uct_c": mcts_out.get("uct_c")} if strategy_name == "mcts" else None
      ),
-     "mcts_stats": (results[0].get("mcts") if strategy_name == "mcts" and results else None),
+     "mcts_stats": (
+        ({**results[0].get("mcts"), "note": "deprecated: use strategy_name/strategy_seed/strategy_params"}
+         if results and results[0].get("mcts") else None)
+     ),
          },
      }
