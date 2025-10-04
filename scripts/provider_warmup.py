@@ -14,6 +14,7 @@ Usage examples:
   python scripts/provider_warmup.py --provider chutes
   python scripts/provider_warmup.py --provider runpod --models my-model-1,my-model-2
   python scripts/provider_warmup.py --provider chutes --dry-run
+  python scripts/provider_warmup.py --provider chutes --force   # bypass once-per-day skip
 
 Notes:
   - Minimal tokens (max_tokens=8) and temperature=0.
@@ -97,6 +98,7 @@ async def main() -> None:
     p.add_argument("--api-key", help="Override API key; defaults come from provider env")
     p.add_argument("--models", help="Comma-separated model list; falls back to LITELLM_*_MODEL envs")
     p.add_argument("--dry-run", action="store_true")
+    p.add_argument("--force", action="store_true")
     args = p.parse_args()
 
     api_base_env, api_key_env = _provider_conf(args.provider)
@@ -109,6 +111,22 @@ async def main() -> None:
     if not api_base:
         print(f"provider-warmup[{args.provider}]: no API base present; skipping (exit 0)")
         return
+
+    # Once-per-day TTL (UTC day) — env can override via PROVIDER_WARMUP_TTL_HOURS or {PROVIDER}_WARMUP_TTL_HOURS
+    ttl_env = os.getenv("PROVIDER_WARMUP_TTL_HOURS") or os.getenv(f"{args.provider.upper()}_WARMUP_TTL_HOURS")
+    ttl_hours = float(ttl_env or "24")
+    try:
+        stamp_dir = os.path.join("local", ".warmup")
+        os.makedirs(stamp_dir, exist_ok=True)
+        day_tag = time.strftime("%Y%m%d", time.gmtime())
+        stamp_file = os.path.join(stamp_dir, f"{args.provider.lower()}_{day_tag}.stamp")
+        if not args.force and os.path.exists(stamp_file):
+            age_h = (time.time() - os.path.getmtime(stamp_file)) / 3600.0
+            if age_h < ttl_hours:
+                print(f"provider-warmup[{args.provider}]: already warmed today (age={age_h:.1f}h < ttl={ttl_hours}h); skipping")
+                return
+    except Exception:
+        pass
 
     if args.models:
         models = [m.strip() for m in args.models.split(",") if m.strip()]
@@ -128,7 +146,13 @@ async def main() -> None:
         s = "OK" if ok else "FAIL"
         print(f"  {m:60s} {s:4s} {dt*1000:6.1f} ms  {msg}")
 
+    # write stamp (best-effort)
+    try:
+        with open(stamp_file, "a", encoding="utf-8") as f:  # type: ignore[name-defined]
+            f.write("")
+    except Exception:
+        pass
+
 
 if __name__ == "__main__":
     asyncio.run(main())
-
