@@ -186,6 +186,12 @@ checks:
     run: |
       PYTHONPATH=$(pwd) python scripts/run_all_smokes.py
 
+  - name: chutes_warmup
+    description: Warm up Chutes.ai models configured via LITELLM_*_MODEL envs (skip if CHUTES_API_KEY unset)
+    run: |
+      PYTHONPATH=$(pwd) python scripts/chutes_warmup.py
+    optional: true
+
 
   - name: all_smokes_core
     description: Core smoke suites (deterministic) — deprecated in favor of live scenarios
