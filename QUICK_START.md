@@ -26,6 +26,8 @@ Notes:
 - For reproducibility, pass `options.session_id` and `options.track_id` in scenario/provider calls.
 - For strict deploy readiness: `READINESS_LIVE=1 STRICT_READY=1 make project-ready-live`.
 
+> Verification mindset: LLMs are fallible. In SciLLM, you collaborate with LLMs but demand determinism—CodeWorld executes and scores code under limits; Certainly compiles and proves Lean4 obligations; manifests capture every run for replay.
+
 ## 3) One-command smoke run
 
 ```bash
@@ -39,6 +41,21 @@ This wraps `scenarios/run_all.py`, which:
 - Prints a colour summary and exits non-zero if any scenario fails
 
 Set `SCENARIOS_STOP_ON_FIRST_FAILURE=1` to short-circuit on the first failure.
+
+## 3.1) TL;DR module demos
+
+```bash
+# CodeWorld judge demo (shows speed effect)
+python scenarios/codeworld_judge_live.py
+
+# Certainly (Lean4) via Router alias
+LITELLM_ENABLE_CERTAINLY=1 CERTAINLY_BRIDGE_BASE=http://127.0.0.1:8787 \
+  python scenarios/certainly_router_release.py
+
+# codex‑agent quick check (OpenAI-compatible)
+export LITELLM_ENABLE_CODEX_AGENT=1
+python scenarios/codex_agent_router.py
+```
 
 ## 4) Mini-Agent (local shim)
 
@@ -185,7 +202,16 @@ print(truncate_large_value(data, max_chars=512))
 
 All helpers accept environment overrides and respect `LITELLM_DISABLE_CACHE` / `LITELLM_LOG_SENSITIVE_FIELDS` where applicable.
 
-## 16) When something fails
+## 16) More Use Cases
+
+- Automated curriculum generation for agents
+  - Use proof outcomes (proved/failed/unproved) to synthesize targeted tasks for the next training/evaluation round.
+- Failure analysis pipelines
+  - Extract unproved goals + diagnostics from Certainly (Lean4) and feed them into repair loops or prompt templates.
+- Headless local loop in CI
+  - Run prover and CodeWorld strategy checks in CI on each PR; gate on % proved and judge thresholds; publish artifacts for reproducible reviews.
+
+## 17) When something fails
 
 - Inspect the individual scenario script to see the exact `Router` or agent call that failed.
 - Ensure `.env` is loaded (every script calls `load_dotenv(find_dotenv())`, but missing keys still surface as explicit errors).
@@ -193,7 +219,7 @@ All helpers accept environment overrides and respect `LITELLM_DISABLE_CACHE` / `
 
 Once you can run `make run-scenarios` and `make project-ready-live` without skips, you have the same coverage we use for release readiness.
 
-## 17) CodeWorld Bridge (provider demo)
+## 18) CodeWorld Bridge (provider demo)
 
 Script: `feature_recipes/codeworld_bridge.py`
 
@@ -235,4 +261,55 @@ resp = await router.acompletion(
   request_timeout=45,
 )
 print(resp.choices[0].message["content"])  # summary from CodeWorld Bridge
+```
+# 11) CodeWorld — Evaluate Strategies with Your Metrics
+
+When to use:
+- Compare code strategies under a domain‑specific scoring function.
+- Rank results with a deterministic judge and capture a reproducible manifest.
+
+Quick start (live, skip‑friendly):
+```bash
+CODEWORLD_BASE=http://127.0.0.1:8887 python scenarios/codeworld_bridge_release.py
+python scenarios/codeworld_judge_live.py  # slow variant sleeps ~200ms to show speed impact
+```
+
+Key concepts:
+- Strategy runner (alpha): runs Python code under RLIMITs + AST allow/deny; optional Linux no‑net.
+- Dynamic scoring: provide a `score(task, context, outputs, timings)` function; judge modes weighted/lex.
+- Provenance: include `options.session_id` and `options.track_id`; CodeWorld adds `run_id`, `item_id`, `request_id`.
+
+Minimal payload example (bridge):
+```jsonc
+{
+  "messages": [{"role": "system", "content": "Score strategies"}],
+  "items": [{"task": "foo", "context": {"code_variants": {"v1": "def solve(ctx): return 1"}}}],
+  "provider": {"name": "codeworld", "args": {"judge": true}},
+  "options": {"max_seconds": 10, "session_id": "exp1", "track_id": "trialA"}
+}
+```
+
+# 12) Certainly (Lean4) — Bridge Prover into Agent Workflows
+
+When to use:
+- Batch‑check obligations from an agent or pipeline via a stable bridge.
+- Keep per‑run provenance for replay and review.
+
+Quick start (live, skip‑friendly):
+```bash
+LEAN4_BRIDGE_BASE=http://127.0.0.1:8787 python scenarios/lean4_bridge_release.py
+LITELLM_ENABLE_CERTAINLY=1 CERTAINLY_BRIDGE_BASE=http://127.0.0.1:8787 \
+  python scenarios/certainly_router_release.py
+```
+
+Minimal payload example (bridge):
+```jsonc
+{
+  "messages": [{"role": "system", "content": "Batch proof run"}],
+  "lean4_requirements": [
+    {"requirement_text": "0 + n = n"},
+    {"requirement_text": "m + n = n + m"}
+  ],
+  "options": {"max_seconds": 180, "session_id": "exp2", "track_id": "batch1"}
+}
 ```
