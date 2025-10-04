@@ -34,16 +34,13 @@ def main() -> None:
 
     resp = completion(
         model="codeworld",
-        messages=[{"role": "user", "content": "Run adaptive search"}],
         custom_llm_provider="codeworld",
+        messages=[{"role": "user", "content": "Adaptive variant search"}],
         items=items,
-        provider={
-            "name": "codeworld",
-            "args": {
-                "strategy": "mcts",
-                "strategy_config": {"name": "mcts", "rollouts": 40, "depth": 6, "uct_c": 1.25},
-            },
-        },
+        strategy="mcts",
+        rollouts=40,
+        depth=6,
+        uct_c=1.25,
         options={"session_id": "mcts-demo", "track_id": "t1", "max_seconds": 10},
         api_base=base,
     )
@@ -55,4 +52,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
