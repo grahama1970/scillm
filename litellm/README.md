@@ -86,6 +86,26 @@ See the root quick start: <a href="../QUICK_START.md">QUICK_START.md</a>
 
 ---
 
+## Strategy Search: MCTS (Experimental)
+
+Add decision-time stochastic search for CodeWorld variants.
+
+- Enable (bridge side): `CODEWORLD_ENABLE_MCTS=1` (default)
+- Deterministic runs: set `SCILLM_DETERMINISTIC_SEED=42`
+- Example:
+
+```bash
+CODEWORLD_BASE=http://127.0.0.1:8887 python ../scenarios/mcts_codeworld_demo.py
+```
+
+Response extras:
+- `results[i].mcts`: `{best_variant, best_value, visits, explored, rollouts, depth, uct_c, seed}`
+- `run_manifest.mcts_stats`: summary at the run level
+
+Security posture: Phase‑1 MCTS uses a hash‑based pseudo value for rollouts (no extra code execution) to avoid expanding the attack surface. Future extensions may enable partial evaluation per rollout behind a separate flag.
+
+---
+
 <details>
   <summary>Logo variants</summary>
   <p>

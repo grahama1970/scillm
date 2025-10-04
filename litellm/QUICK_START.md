@@ -50,3 +50,19 @@ python ../scenarios/codex_agent_router.py
 
 For more details, see the root <a href="../QUICK_START.md">QUICK_START.md</a>.
 
+## 5) MCTS Demo (CodeWorld, experimental)
+
+Run adaptive variant selection using CodeWorld's MCTS strategy policy (bridge must be running):
+
+```bash
+CODEWORLD_BASE=http://127.0.0.1:8887 python ../scenarios/mcts_codeworld_demo.py
+```
+
+Deterministic run:
+
+```bash
+export SCILLM_DETERMINISTIC_SEED=7
+python ../scenarios/mcts_codeworld_demo.py
+```
+
+Inspect `additional_kwargs["codeworld"]["results"][0]["mcts"]` for visit distribution and the selected `best_variant`.

@@ -89,24 +89,40 @@ class CodexAgentLLM(CustomLLM):
         if api_key and not any(k.lower() == "authorization" for k in _hdr.keys()):
             _hdr["Authorization"] = f"Bearer {api_key}"
         request_timeout: Optional[Union[float, httpx.Timeout]] = timeout or 30.0
-        try:
-            if isinstance(client, HTTPHandler):
-                r = client.post(
-                    f"{base}/v1/chat/completions",
-                    json=payload,
-                    headers=_hdr or None,
-                    timeout=request_timeout,
-                )
-            else:
-                with httpx.Client(timeout=request_timeout, headers=_hdr) as c:
-                    r = c.post(f"{base}/v1/chat/completions", json=payload)
-                    if r.status_code < 200 or r.status_code >= 300:
-                        raise CustomLLMError(status_code=r.status_code, message=r.text[:400])
-            data = r.json()
-        except CustomLLMError:
-            raise
-        except Exception as e:
-            raise CustomLLMError(status_code=500, message=str(e)[:400])
+        max_retries = int(os.getenv("CODEX_AGENT_MAX_RETRIES", "2"))
+        backoff_ms = int(os.getenv("CODEX_AGENT_RETRY_BASE_MS", "120"))
+        attempt = 0
+        while True:
+            try:
+                if isinstance(client, HTTPHandler):
+                    r = client.post(
+                        f"{base}/v1/chat/completions",
+                        json=payload,
+                        headers=_hdr or None,
+                        timeout=request_timeout,
+                    )
+                else:
+                    with httpx.Client(timeout=request_timeout, headers=_hdr) as c:
+                        r = c.post(f"{base}/v1/chat/completions", json=payload)
+                # Retry on transient 5xx
+                if 500 <= getattr(r, "status_code", 0) < 600 and attempt < max_retries:
+                    attempt += 1
+                    import time as _t
+                    _t.sleep((backoff_ms / 1000.0) * (2 ** (attempt - 1)))
+                    continue
+                if r.status_code < 200 or r.status_code >= 300:
+                    raise CustomLLMError(status_code=r.status_code, message=r.text[:400])
+                data = r.json()
+                break
+            except CustomLLMError:
+                raise
+            except Exception as e:
+                if attempt < max_retries:
+                    attempt += 1
+                    import time as _t
+                    _t.sleep((backoff_ms / 1000.0) * (2 ** (attempt - 1)))
+                    continue
+                raise CustomLLMError(status_code=500, message=str(e)[:400])
 
         content = ""
         try:
@@ -154,24 +170,40 @@ class CodexAgentLLM(CustomLLM):
         if api_key and not any(k.lower() == "authorization" for k in _hdr.keys()):
             _hdr["Authorization"] = f"Bearer {api_key}"
         request_timeout: Optional[Union[float, httpx.Timeout]] = timeout or 30.0
-        try:
-            if isinstance(client, AsyncHTTPHandler):
-                r = await client.post(
-                    f"{base}/v1/chat/completions",
-                    json=payload,
-                    headers=_hdr or None,
-                    timeout=request_timeout,
-                )
-            else:
-                async with httpx.AsyncClient(timeout=request_timeout, headers=_hdr) as c:
-                    r = await c.post(f"{base}/v1/chat/completions", json=payload)
-                    if r.status_code < 200 or r.status_code >= 300:
-                        raise CustomLLMError(status_code=r.status_code, message=r.text[:400])
-            data = r.json()
-        except CustomLLMError:
-            raise
-        except Exception as e:
-            raise CustomLLMError(status_code=500, message=str(e)[:400])
+        max_retries = int(os.getenv("CODEX_AGENT_MAX_RETRIES", "2"))
+        backoff_ms = int(os.getenv("CODEX_AGENT_RETRY_BASE_MS", "120"))
+        attempt = 0
+        while True:
+            try:
+                if isinstance(client, AsyncHTTPHandler):
+                    r = await client.post(
+                        f"{base}/v1/chat/completions",
+                        json=payload,
+                        headers=_hdr or None,
+                        timeout=request_timeout,
+                    )
+                else:
+                    async with httpx.AsyncClient(timeout=request_timeout, headers=_hdr) as c:
+                        r = await c.post(f"{base}/v1/chat/completions", json=payload)
+                # Retry on transient 5xx
+                if 500 <= getattr(r, "status_code", 0) < 600 and attempt < max_retries:
+                    attempt += 1
+                    import asyncio as _a
+                    await _a.sleep((backoff_ms / 1000.0) * (2 ** (attempt - 1)))
+                    continue
+                if r.status_code < 200 or r.status_code >= 300:
+                    raise CustomLLMError(status_code=r.status_code, message=r.text[:400])
+                data = r.json()
+                break
+            except CustomLLMError:
+                raise
+            except Exception as e:
+                if attempt < max_retries:
+                    attempt += 1
+                    import asyncio as _a
+                    await _a.sleep((backoff_ms / 1000.0) * (2 ** (attempt - 1)))
+                    continue
+                raise CustomLLMError(status_code=500, message=str(e)[:400])
 
         content = ""
         try:
