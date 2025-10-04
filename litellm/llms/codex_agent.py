@@ -106,6 +106,11 @@ class CodexAgentLLM(CustomLLM):
                         r = c.post(f"{base}/v1/chat/completions", json=payload)
                 # Retry on transient 5xx
                 if 500 <= getattr(r, "status_code", 0) < 600 and attempt < max_retries:
+                    if os.getenv("CODEX_AGENT_LOG_RETRIES", "0") == "1":
+                        try:
+                            print_verbose(f"codex-agent retry: attempt={attempt+1} status={getattr(r,'status_code',0)}")
+                        except Exception:
+                            pass
                     attempt += 1
                     import time as _t
                     _t.sleep((backoff_ms / 1000.0) * (2 ** (attempt - 1)))
@@ -118,6 +123,11 @@ class CodexAgentLLM(CustomLLM):
                 raise
             except Exception as e:
                 if attempt < max_retries:
+                    if os.getenv("CODEX_AGENT_LOG_RETRIES", "0") == "1":
+                        try:
+                            print_verbose(f"codex-agent retry: exception on attempt={attempt+1}: {str(e)[:120]}")
+                        except Exception:
+                            pass
                     attempt += 1
                     import time as _t
                     _t.sleep((backoff_ms / 1000.0) * (2 ** (attempt - 1)))
@@ -187,6 +197,11 @@ class CodexAgentLLM(CustomLLM):
                         r = await c.post(f"{base}/v1/chat/completions", json=payload)
                 # Retry on transient 5xx
                 if 500 <= getattr(r, "status_code", 0) < 600 and attempt < max_retries:
+                    if os.getenv("CODEX_AGENT_LOG_RETRIES", "0") == "1":
+                        try:
+                            print_verbose(f"codex-agent retry: attempt={attempt+1} status={getattr(r,'status_code',0)}")
+                        except Exception:
+                            pass
                     attempt += 1
                     import asyncio as _a
                     await _a.sleep((backoff_ms / 1000.0) * (2 ** (attempt - 1)))
@@ -199,6 +214,11 @@ class CodexAgentLLM(CustomLLM):
                 raise
             except Exception as e:
                 if attempt < max_retries:
+                    if os.getenv("CODEX_AGENT_LOG_RETRIES", "0") == "1":
+                        try:
+                            print_verbose(f"codex-agent retry: exception on attempt={attempt+1}: {str(e)[:120]}")
+                        except Exception:
+                            pass
                     attempt += 1
                     import asyncio as _a
                     await _a.sleep((backoff_ms / 1000.0) * (2 ** (attempt - 1)))

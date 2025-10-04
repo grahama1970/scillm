@@ -1,0 +1,178 @@
+diff --git a/src/codeworld/engine/mcts.py b/src/codeworld/engine/mcts.py
+new file mode 100644
+index 0000000..1111111
+--- /dev/null
++++ b/src/codeworld/engine/mcts.py
+@@
++from __future__ import annotations
++"""
++Minimal root-bandit MCTS for CodeWorld variant selection (Phase 1).
++
++Security: Does NOT execute variant code during rollouts; uses a deterministic
++hash-based pseudo reward so attack surface does not expand.
++
++Determinism:
++ - Use provided `seed` param if present
++ - Else fallback to env SCILLM_DETERMINISTIC_SEED
++ - Record seed in returned stats
++
++Return dict:
++  {
++    best_variant, best_value, rollouts, depth, uct_c,
++    visits: {variant: visit_count},
++    explored_nodes, seed, error
++  }
++"""
++import hashlib, math, os, random
++from typing import Dict, Any
++
++def _pseudo_value(task: str, variant: str, depth_step: int) -> float:
++    h = hashlib.sha256(f"{task}::{variant}::{depth_step}".encode("utf-8")).hexdigest()[:12]
++    return int(h, 16) / 0xFFFFFFFFFFFFF
++
++def run_mcts(
++    task: str,
++    context: Dict[str, Any],
++    code_variants: Dict[str, str],
++    rollouts: int = 64,
++    depth: int = 8,
++    uct_c: float = 1.4,
++    seed: int | None = None,
++    timeout_ms: int = 50,
++) -> Dict[str, Any]:
++    if seed is not None:
++        random.seed(seed)
++    elif os.getenv("SCILLM_DETERMINISTIC_SEED"):
++        try:
++            seed = int(os.getenv("SCILLM_DETERMINISTIC_SEED"))
++            random.seed(seed)
++        except Exception:
++            pass
++
++    variants = list(code_variants.keys())
++    if not variants:
++        return {"best_variant": None, "best_value": None, "rollouts": rollouts, "depth": depth, "uct_c": uct_c, "visits": {}, "explored_nodes": 0, "seed": seed, "error": "no_variants"}
++
++    visits = {v: 0 for v in variants}
++    qvals = {v: 0.0 for v in variants}
++
++    for _ in range(rollouts):
++        total = sum(visits.values()) + 1
++        def uct(v: str) -> float:
++            if visits[v] == 0:
++                return float("inf")
++            exploitation = qvals[v] / visits[v]
++            exploration = uct_c * math.sqrt(math.log(total) / visits[v])
++            return exploitation + exploration
++        chosen = max(variants, key=uct)
++        acc = 0.0
++        for d in range(1, depth + 1):
++            acc += _pseudo_value(task, chosen, d)
++        reward = acc / depth
++        visits[chosen] += 1
++        qvals[chosen] += reward
++
++    def avg(v: str) -> float:
++        return qvals[v] / visits[v] if visits[v] else -1.0
++
++    best_variant = max(variants, key=lambda v: avg(v))
++    best_value = round(avg(best_variant), 5)
++    return {"best_variant": best_variant, "best_value": best_value, "rollouts": rollouts, "depth": depth, "uct_c": uct_c, "visits": visits, "explored_nodes": len(variants), "seed": seed, "timeout_ms": timeout_ms, "error": None}
+
+diff --git a/src/codeworld/bridge/server.py b/src/codeworld/bridge/server.py
+index 2222222..3333333 100644
+--- a/src/codeworld/bridge/server.py
++++ b/src/codeworld/bridge/server.py
+@@
+@@
+ from fastapi import FastAPI, HTTPException, Request
+@@
+ import uuid
+@@
++import os, random
+@@
+     provider_args = {}
+@@
++    strategy_name = (provider_args.get("strategy") or "").lower()
++    strategy_cfg = provider_args.get("strategy_config")
++    if isinstance(strategy_cfg, dict) and not strategy_name:
++        strategy_name = (strategy_cfg.get("name") or "").lower()
++
++    if os.getenv("SCILLM_DETERMINISTIC_SEED"):
++        try:
++            random.seed(int(os.getenv("SCILLM_DETERMINISTIC_SEED")))
++        except Exception:
++            pass
+@@
+-        if code_variants:
++        if code_variants and strategy_name != "mcts":
+             # existing path …
+             pass
+         else:
+             # No code variants …
+             pass
+@@
++        elif strategy_name == "mcts" and code_variants:
++            if os.getenv("CODEWORLD_ENABLE_MCTS", "1") != "1":
++                raise HTTPException(status_code=400, detail="MCTS disabled (CODEWORLD_ENABLE_MCTS!=1)")
++            try:
++                from codeworld.engine.mcts import run_mcts
++                cfg = strategy_cfg if isinstance(strategy_cfg, dict) else {}
++                mparams = {
++                    "rollouts": int(cfg.get("rollouts", provider_args.get("rollouts", 64))),
++                    "depth": int(cfg.get("depth", provider_args.get("depth", 8))),
++                    "uct_c": float(cfg.get("uct_c", provider_args.get("uct_c", 1.4))),
++                    "seed": cfg.get("seed", provider_args.get("seed")),
++                    "timeout_ms": int(cfg.get("timeout_ms", provider_args.get("timeout_ms", 50))),
++                }
++                mcts_out = run_mcts(task, ctx, code_variants, **mparams)
++                chosen = mcts_out.get("best_variant")
++                outputs["result"] = mcts_out.get("best_value")
++                try:
++                    src = code_variants.get(chosen, "")
++                    outputs["loc"] = len(src.splitlines())
++                except Exception:
++                    pass
++                timings["duration_ms"] = int((time.perf_counter() - t0) * 1000)
++            except HTTPException:
++                raise
++            except Exception as e:
++                mcts_out = {"error": str(e)[:200]}
++                outputs["result"] = 0.0
++                timings["duration_ms"] = int((time.perf_counter() - t0) * 1000)
+@@
+         entry = {
+             "index": idx,
+@@
+             "timings": timings,
+         }
+         # … existing fields …
++
++        if strategy_name == "mcts" and code_variants:
++            entry["mcts"] = {
++                "best_variant": mcts_out.get("best_variant"),
++                "best_value": mcts_out.get("best_value"),
++                "rollouts": mcts_out.get("rollouts"),
++                "depth": mcts_out.get("depth"),
++                "uct_c": mcts_out.get("uct_c"),
++                "visits": mcts_out.get("visits"),
++                "explored": mcts_out.get("explored_nodes"),
++                "seed": mcts_out.get("seed"),
++                "error": mcts_out.get("error"),
++            }
+@@
+     response = {
+         # … existing fields …
+         "run_manifest": {
+             "ts": int(time.perf_counter() * 1000),
+             "run_id": uuid.uuid4().hex,
+             "schema": "canonical+codeworld@v1",
+             "options": {"max_seconds": timeout, "session_id": session_id, "track_id": track_id},
+             "task_ids": [r.get("item", {}).get("task_id") for r in results if isinstance(r.get("item"), dict) and r.get("item", {}).get("task_id")],
+             "item_ids": [r.get("item_id") for r in results],
+             "tools": [r.get("item", {}).get("context", {}).get("tool_invocations") for r in results if isinstance(r.get("item"), dict)],
+             "strategy": strategy_name or None,
+             "mcts_stats": (results[0].get("mcts") if strategy_name == "mcts" and results else None),
+         },
+     }
+
