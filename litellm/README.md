@@ -106,6 +106,11 @@ Security posture: Phase‑1 MCTS uses a hash‑based pseudo value for rollouts (
 
 ---
 
+## Determinism & Reproducibility
+
+SciLLM uses a single cross‑provider seed with clear precedence. See `docs/policies/DETERMINISM.md`.
+
+
 <details>
   <summary>Logo variants</summary>
   <p>

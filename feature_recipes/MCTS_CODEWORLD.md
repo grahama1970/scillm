@@ -37,7 +37,7 @@ resp = completion(
   strategy="mcts",
   rollouts=48,
   depth=6,
-  uct_c=1.25,
+  uct_c=1.25,  # exploration_constant (UCT C)
   options={"session_id":"mcts-session","track_id":"trial-1","max_seconds":10},
   api_base=os.getenv("CODEWORLD_BASE")
 )
