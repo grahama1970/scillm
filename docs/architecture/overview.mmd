@@ -1,0 +1,15 @@
+```mermaid
+flowchart LR
+    A[Router (OpenAI-compatible)] --> B{Provider}
+    B -->|codeworld| C[CodeWorld Bridge]
+    B -->|certainly (lean4)| D[Certainly/Lean4 Bridge]
+    C --> E[Strategy Runner (RLIMITs + AST)]
+    C --> F[Dynamic Scoring (score())]
+    E --> G[Judge (weighted/lex)]
+    F --> G
+    D --> H[Lean4 Prover]
+    G --> I[Run Manifest + Artifacts]
+    H --> I
+    I --> J[/metrics + /healthz]
+```
+

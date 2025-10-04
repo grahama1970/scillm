@@ -7,16 +7,6 @@
   <em>Balanced wordmark (default) + icon (logo‑only). The favicon (.ico) should use the icon only, no text.</em>
  </p>
 <h1 align="center">🔬 SciLLM — Scientific/Engineering fork of LiteLLM</h1>
-    <p align="center">
-        <p align="center">
-        <a href="https://render.com/deploy?repo=https://github.com/BerriAI/litellm" target="_blank" rel="nofollow"><img src="https://render.com/images/deploy-to-render-button.svg" alt="Deploy to Render"></a>
-        <a href="https://railway.app/template/HLP0Ub?referralCode=jch2ME">
-          <img src="https://railway.app/button.svg" alt="Deploy on Railway">
-        </a>
-        </p>
-        <p align="center">Call all LLM APIs using the OpenAI format [Bedrock, Huggingface, VertexAI, TogetherAI, Azure, OpenAI, Groq etc.]
-        <br>
-    </p>
 <h4 align="center"><a href="https://docs.litellm.ai/docs/simple_proxy" target="_blank">Proxy Server (LLM Gateway)</a> | <a href="https://docs.litellm.ai/docs/hosted" target="_blank"> Hosted Proxy (Preview)</a> | <a href="https://docs.litellm.ai/docs/enterprise"target="_blank">Enterprise Tier</a></h4>
 
 <p align="center">
@@ -45,14 +35,75 @@
 
 <p align="center"><i>This fork remains API‑compatible with LiteLLM while adding optional modules for formal methods (Lean4, exposed as "Certainly"), code orchestration (CodeWorld), and live agent flows. See QUICKSTART.md and scenarios/ for runnable demos. Use SCILLM_ENABLE_* or LITELLM_ENABLE_* flags to enable modules.</i></p>
 
-## Certainly (Lean4 only, alpha)
+<p><b>Why SciLLM vs generic LLM stacks?</b> SciLLM provides specialized infrastructure for theorem proving, formal code automation, and experiment tracking—ideal for benchmarking proof‑aware agents, integrating with formal math libraries, and prototyping prove‑aware research tools efficiently.</p>
+
+## TL;DR (30 seconds)
+
+```bash
+# Bring up bridges + proxy + deps
+docker compose -f deploy/docker/compose.scillm.stack.yml up --build -d
+
+# Two live scenarios (skip‑friendly)
+python scenarios/codeworld_judge_live.py
+LITELLM_ENABLE_CERTAINLY=1 CERTAINLY_BRIDGE_BASE=http://127.0.0.1:8787 \
+  python scenarios/certainly_router_release.py
+```
+
+## Why SciLLM
+
+SciLLM exists as an experimental playground for scientists, mathematicians, and engineers who need a reproducible, inspectable way to combine LLMs, program synthesis/evaluation, and theorem proving.
+
+- Who it’s for
+  - Researchers building proof‑of‑concepts around formal methods (Lean4 today), code scoring/ranking, and agent loops.
+  - Engineers who want an OpenAI‑compatible surface with a local/free stack (Docker) and strong “one way to green” readiness gates.
+  - Educators and tinkerers who prefer runnable scenarios over slideware.
+
+- What it gives you
+  - Any LLM model that LiteLLM supports: keep your familiar OpenAI‑style interface and plug in local/cloud models as needed.
+  - Certainly (Lean4 umbrella, beta): take natural language + structured requirements and verify them under Lean4; returns proofs or structured guidance/diagnostics when a requirement doesn’t compile/prove.
+  - CodeWorld: run multiple concurrent algorithmic approaches safely; apply custom, dynamic scoring; rank winners with a built‑in judge.
+  - codex‑agent: code‑centric agent surface (OpenAI‑compatible) that can run multi‑iteration plans and call MCP tools via your own sidecar/gateway.
+  - mini‑agent: a small, deterministic local agent for quick tool‑use experiments (Python/Rust/Go/JS profiles).
+  - Reproducibility by design: deterministic tests (offline) vs live scenarios (skip‑friendly), strict readiness gates, per‑run artifacts (run_id, request_id, item_ids, session/track).
+  - Observability basics: per‑request IDs, minimal `/metrics`, machine‑readable manifests for replay.
+
+- What it is not (yet)
+  - A hardened production prover/execution sandbox. CodeWorld uses process‑level isolation (RLIMITs + optional `unshare -n`) on Linux; containerized workers are recommended for GA.
+  - A drop‑in replacement for fully featured theorem proving platforms—this is a lightweight bridge for experiments.
+
+Design philosophy
+- One way to green: a single readiness flow with strict/live gates for deploy checks.
+- Deterministic vs live separation: everything in `tests/` is offline; everything in `scenarios/` can touch the world.
+- Local‑first: the whole stack can run on your laptop with Docker; cloud providers are optional.
+
+## TL;DR (30 seconds)
+
+```bash
+# 1) Bring up the full stack (bridges + proxy + redis + ollama)
+docker compose -f deploy/docker/compose.scillm.stack.yml up --build -d
+
+# 2) Run two live scenarios (skip‑friendly when deps aren’t running)
+python scenarios/codeworld_judge_live.py      # compare strategies; slow path shows speed impact
+LITELLM_ENABLE_CERTAINLY=1 CERTAINLY_BRIDGE_BASE=http://127.0.0.1:8787 \
+  python scenarios/certainly_router_release.py  # Lean4 via the 'certainly' alias
+
+# 3) Everything else (mini‑agent, codex‑agent, Router demos)
+python scenarios/run_all.py
+```
+
+### What you can do in 5 minutes
+- Prove‑aware pipelines: send natural language + structured requirements to **Certainly (Lean4)**; get proofs + diagnostics and a manifest you can replay.
+- Strategy benchmarking: run multiple concurrent algorithms with **CodeWorld**, add a domain‑specific `score()`, and rank winners with a judge.
+- Local agent loops: try **mini‑agent** (deterministic tools) or **codex‑agent** (OpenAI‑compatible sidecar with MCP tools) via the same Router calls.
+
+## Certainly (Lean4 umbrella, beta)
 
 Certainly is the umbrella surface for theorem provers; today it routes to Lean4 only.
 
 - Enable provider: `LITELLM_ENABLE_LEAN4=1` (or `LITELLM_ENABLE_CERTAINLY=1`)
 - Bridge: `LEAN4_BRIDGE_BASE` (or `CERTAINLY_BRIDGE_BASE`) defaults to `http://127.0.0.1:8787`
-- Router: use `custom_llm_provider="lean4"` or the alias `"certainly"`
-- Scenarios: `scenarios/lean4_*` and `scenarios/certainly_*` demonstrate both paths
+  - Router: use `custom_llm_provider="lean4"` or the alias `"certainly"`
+  - Scenarios: `scenarios/lean4_*` and `scenarios/certainly_*` demonstrate both paths
 
 Future backends (e.g., Coq) will plug into the same surface, but are out of scope for this alpha.
 
@@ -76,6 +127,44 @@ Future backends (e.g., Coq) will plug into the same surface, but are out of scop
 
 - `tests/` are strictly deterministic and offline (no network). Example: Lean4 CLI contract tests in `tests/lean4/`.
 - `scenarios/` are live end-to-end demos that may call HTTP bridges or external services. They are skip-friendly when deps aren’t running.
+
+## mini‑agent and codex‑agent (one‑liners)
+
+- mini‑agent (local tools, deterministic): fast, reproducible tool‑use loop for experiments. Expect final answer + metrics + parsed tool calls.
+- codex‑agent (code‑centric provider): OpenAI‑compatible sidecar with MCP tools and multi‑iteration plans; health‑checkable and Router‑native.
+
+## When To Use CodeWorld
+
+Use CodeWorld when you want to evaluate and rank code strategies under your own metrics, with a reproducible manifest and simple HTTP/Router calls.
+
+- Typical problems
+  - Compare competing algorithms (e.g., heuristics vs DP) with identical inputs.
+  - Validate repair loops (generate → run → score → keep best) using a deterministic judge.
+  - Track improvement plateaus during optimization (optional Redis‑backed session history).
+- What you get
+  - Sandbox runner (alpha): executes Python strategies with RLIMITs + AST allow/deny; optional no‑net namespace on Linux.
+  - Dynamic scoring: inject `score(task, context, outputs, timings)` to compute domain‑specific metrics.
+  - Judge ranking: built‑in weighted or lexicographic ranking across correctness/speed/brevity.
+  - Artifacts: run_manifest with run_id, item_ids, options (session/track), and request_id.
+- Try it quickly
+  - Bridge: `CODEWORLD_BASE=http://127.0.0.1:8887 python scenarios/codeworld_bridge_release.py`
+  - Judge demo (shows speed effect): `python scenarios/codeworld_judge_live.py`
+
+## When To Use Certainly (Lean4)
+
+Use Certainly when you need a light, HTTP‑friendly bridge to a theorem prover inside LLM/agent workflows.
+
+- Typical problems
+  - Batch‑check a set of obligations (lemmas) produced by an agent or pipeline.
+  - Capture provenance (session/track/run_id) for reproducibility and audit.
+  - Keep client code stable while changing the proving backend (Lean4 today).
+- What you get
+  - Lean4 bridge with canonical `{messages, items, options}` envelope; back‑compat `lean4_requirements`.
+  - Router provider + alias (`custom_llm_provider="lean4"` or `"certainly"`).
+  - Artifacts: run_manifest with run_id, item_ids, options (session/track), provider info, and request_id.
+- Try it quickly
+  - Bridge: `LEAN4_BRIDGE_BASE=http://127.0.0.1:8787 python scenarios/lean4_bridge_release.py`
+  - Router alias: `LITELLM_ENABLE_CERTAINLY=1 CERTAINLY_BRIDGE_BASE=http://127.0.0.1:8787 python scenarios/certainly_router_release.py`
 
 Lean4 examples:
 - Deterministic tests: `tests/lean4/test_cli_batch.py`, `tests/lean4/test_cli_run.py`.
@@ -533,3 +622,52 @@ All these checks must pass before your PR can be merged.
 See docs/reviews/ for current review briefs:
 - docs/reviews/REVIEW_REQUEST_SCILLM.md
 - docs/reviews/REVIEW_REQUEST_CERTAINLY.md
+
+## Architecture (one picture)
+
+See docs/architecture/overview.mmd for a Mermaid diagram of the main flow:
+
+Router → Bridges (CodeWorld, Certainly) → Runners/Prover → Manifests/Artifacts → Health/Metrics
+
+## Repo Layout
+
+- `deploy/docker/` — Tracked Dockerfiles and compose profiles (core, modules, full, stack).
+- `docs/` — Project documentation (deploy guides, reviews, archive status, assets/screenshots).
+- `litellm/` — Providers and Router integration (adds `codeworld`, `lean4`, and `certainly` alias).
+- `src/` — Bridges and engines:
+  - `codeworld/bridge` and `codeworld/engine` (strategy/scoring runners, judge).
+  - `lean4_prover/bridge` (Certainly/Lean4 bridge).
+- `scenarios/` — Live end‑to‑end demos (skip‑friendly) for bridges and Router.
+- `tests/` — Deterministic, offline unit tests; `tests/_archive/` for legacy root tests.
+- `local/artifacts/` — Generated artifacts (logo, MVP reports, run JSON). CI uploads artifacts from here.
+- `scripts/` — Top‑level utility scripts; provider parity/report helpers.
+
+## Competitive Positioning (quick read)
+
+| Use SciLLM when… | Use other tools when… |
+| --- | --- |
+| You need a prover‑in‑the‑loop stack with reproducible artifacts, strict readiness, and an OpenAI‑compatible surface. | You only need a provider gateway (LiteLLM upstream) or agent composition without proofs (LangChain/LlamaIndex/AutoGen). |
+| You want to execute & rank code strategies under custom metrics with a safety wrapper and built‑in judge. | You only need LLM output scoring (DeepEval/Langfuse/OpenAI Evals) without running arbitrary code variants. |
+| You want local‑first bring‑up (Docker), health/metrics endpoints, and per‑run manifests for audit. | You prefer hosted agents or cloud‑only flows and don’t need strict reproducibility gates. |
+
+## Beta Limits & Policy
+
+- Platforms: Linux recommended. macOS/Windows run with reduced isolation (no `unshare -n`).
+- CodeWorld isolation: process‑level (RLIMITs + AST allow/deny). For GA, use containerized workers (seccomp/AppArmor).
+- Certainly (Lean4) status: umbrella provider in beta; future Coq/Isabelle backends are out of scope for this milestone.
+- Deprecation: `additional_kwargs['certainly']` is canonical; mirroring to `['lean4']` defaults to 1 for this release and flips to 0 next release.
+
+## LLMs Are Fallible — Verify Deterministically
+
+Scientists and engineers are rightly skeptical of hallucinations. SciLLM is designed to “trust, but verify”:
+- Treat LLM outputs like untrusted suggestions; ask them to produce artifacts that can be checked.
+- Verify with compiler‑like determinism: CodeWorld executes strategies under limits and scores them; Certainly compiles and proves Lean4 obligations.
+- Keep a paper trail: every run emits a manifest (run_id, request_id, item_ids, session/track, provider info) for replay and audit.
+- Separate concerns: deterministic unit tests live in `tests/`; live scenarios in `scenarios/` can touch the world and are skip‑friendly.
+
+## Operator Checklist
+
+- Set `READINESS_LIVE=1` and `STRICT_READY=1` for strict runs; choose `READINESS_EXPECT=codeworld,certainly` (or `codeworld,lean4`).
+- Check `/healthz` and `/metrics` on both bridges.
+- Find run artifacts under `local/artifacts/runs/` (includes `run_id`, `request_id`, `item_id`s, session/track, provider info).
+- Gate CI on judge thresholds (% proved, correctness/speed) and return artifacts for review.
