@@ -13,6 +13,7 @@ Usage:
   python scripts/chutes_warmup.py                # warm up deduped models from env
   python scripts/chutes_warmup.py --dry-run      # print plan only
   python scripts/chutes_warmup.py --test DEFAULT # tiny completion after warmup
+  python scripts/chutes_warmup.py --force        # bypass once-per-day skip
 
 Notes:
   - Requests are minimal (max_tokens=8) and temperature=0.
@@ -92,6 +93,7 @@ async def main() -> None:
     p.add_argument("--test", choices=[
         "DEFAULT", "SMALL_VLM", "MED_VLM", "LARGE", "SMALL", "MED", "LARGE_TEXT"
     ])
+    p.add_argument("--force", action="store_true")
     args = p.parse_args()
 
     api_key = os.getenv("CHUTES_API_KEY")
@@ -99,6 +101,21 @@ async def main() -> None:
     if not api_key:
         print("chutes-warmup: CHUTES_API_KEY not set; skipping (exit 0).")
         return
+
+    # Once-per-day stamp (UTC); can override TTL via CHUTES_WARMUP_TTL_HOURS
+    ttl_hours = float(os.getenv("CHUTES_WARMUP_TTL_HOURS", "24") or 24)
+    try:
+        stamp_dir = os.path.join("local", ".warmup")
+        os.makedirs(stamp_dir, exist_ok=True)
+        day_tag = time.strftime("%Y%m%d", time.gmtime())
+        stamp_file = os.path.join(stamp_dir, f"chutes_{day_tag}.stamp")
+        if not args.force and os.path.exists(stamp_file):
+            age_h = (time.time() - os.path.getmtime(stamp_file)) / 3600.0
+            if age_h < ttl_hours:
+                print(f"chutes-warmup: already warmed today (age={age_h:.1f}h < ttl={ttl_hours}h); skipping")
+                return
+    except Exception:
+        pass
 
     models = _env_models()
     unique: List[str] = list(dict.fromkeys(models.values()))
@@ -133,7 +150,13 @@ async def main() -> None:
         else:
             print(f"chutes-warmup: slot {args.test} not set; skipping test")
 
+    # write stamp at end (best-effort)
+    try:
+        with open(stamp_file, "a", encoding="utf-8") as f:  # type: ignore[name-defined]
+            f.write("")
+    except Exception:
+        pass
+
 
 if __name__ == "__main__":
     asyncio.run(main())
-
