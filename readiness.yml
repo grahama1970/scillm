@@ -192,6 +192,12 @@ checks:
       PYTHONPATH=$(pwd) python scripts/chutes_warmup.py
     optional: true
 
+  - name: runpod_warmup
+    description: Warm up Runpod models (OpenAI-compatible) from env LITELLM_*_MODEL (skip if RUNPOD_API_KEY unset)
+    run: |
+      PYTHONPATH=$(pwd) python scripts/provider_warmup.py --provider runpod
+    optional: true
+
 
   - name: all_smokes_core
     description: Core smoke suites (deterministic) — deprecated in favor of live scenarios
