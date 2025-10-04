@@ -88,6 +88,26 @@ class CodexAgentLLM(CustomLLM):
         _hdr = dict(headers or {})
         if api_key and not any(k.lower() == "authorization" for k in _hdr.keys()):
             _hdr["Authorization"] = f"Bearer {api_key}"
+        # Sanitize hop-by-hop and duplicate Authorization headers defensively
+        _sanitized: dict[str, Any] = {}
+        _forbidden = {
+            "connection",
+            "upgrade",
+            "proxy-authenticate",
+            "proxy-authorization",
+            "te",
+            "trailers",
+            "transfer-encoding",
+            "keep-alive",
+        }
+        for k, v in list(_hdr.items()):
+            lk = str(k).lower()
+            if lk in _forbidden:
+                continue
+            if lk == "authorization" and any(str(x).lower() == "authorization" for x in _sanitized.keys()):
+                continue
+            _sanitized[k] = v
+        _hdr = _sanitized
         request_timeout: Optional[Union[float, httpx.Timeout]] = timeout or 30.0
         max_retries = int(os.getenv("CODEX_AGENT_MAX_RETRIES", "2"))
         base_ms = int(os.getenv("CODEX_AGENT_RETRY_BASE_MS", "120"))
@@ -97,6 +117,8 @@ class CodexAgentLLM(CustomLLM):
         if det_seed:
             import random as _r
             rng = _r.Random(int(det_seed))
+        metrics_enabled = os.getenv("CODEX_AGENT_ENABLE_METRICS", "0") == "1"
+        retry_stats = {"attempts": 0, "failures": 0, "total_sleep_ms": 0}
         attempt = 0
         while True:
             try:
@@ -117,9 +139,13 @@ class CodexAgentLLM(CustomLLM):
                     exp = min(base_ms * (2 ** (attempt - 1)), max_backoff_ms)
                     jitter = exp * ((0.05 + 0.10 * (rng.random() if rng else 0.5)))
                     sleep_ms = exp + jitter
+                    if metrics_enabled:
+                        retry_stats["attempts"] = attempt
+                        retry_stats["failures"] += 1
+                        retry_stats["total_sleep_ms"] += int(sleep_ms)
                     if os.getenv("CODEX_AGENT_LOG_RETRIES", "0") == "1":
                         try:
-                            print_verbose(f"codex-agent retry: attempt={attempt} status={getattr(r,'status_code',0)} sleep_ms={int(sleep_ms)}")
+                            print_verbose(f"[codex-agent][retry] {{\"attempt\":{attempt},\"status\":{getattr(r,'status_code',0)},\"sleep_ms\":{int(sleep_ms)} }}")
                         except Exception:
                             pass
                     _t.sleep(sleep_ms / 1000.0)
@@ -137,9 +163,13 @@ class CodexAgentLLM(CustomLLM):
                     exp = min(base_ms * (2 ** (attempt - 1)), max_backoff_ms)
                     jitter = exp * ((0.05 + 0.10 * (rng.random() if rng else 0.5)))
                     sleep_ms = exp + jitter
+                    if metrics_enabled:
+                        retry_stats["attempts"] = attempt
+                        retry_stats["failures"] += 1
+                        retry_stats["total_sleep_ms"] += int(sleep_ms)
                     if os.getenv("CODEX_AGENT_LOG_RETRIES", "0") == "1":
                         try:
-                            print_verbose(f"codex-agent retry: exception attempt={attempt} sleep_ms={int(sleep_ms)} err={str(e)[:120]}")
+                            print_verbose(f"[codex-agent][retry] {{\"attempt\":{attempt},\"exception\":true,\"sleep_ms\":{int(sleep_ms)},\"error\":\"{str(e)[:80]}\"}}")
                         except Exception:
                             pass
                     _t.sleep(sleep_ms / 1000.0)
@@ -161,6 +191,12 @@ class CodexAgentLLM(CustomLLM):
         except Exception:
             # Fallback: re-wrap safely via dict constructor
             model_response.choices[0].message = {"role": "assistant", "content": content}  # type: ignore[assignment]
+        if metrics_enabled:
+            try:
+                model_response.additional_kwargs = getattr(model_response, "additional_kwargs", {}) or {}
+                model_response.additional_kwargs.setdefault("codex_agent", {})["retry_stats"] = retry_stats
+            except Exception:
+                pass
         return model_response
 
     async def acompletion(
@@ -191,6 +227,25 @@ class CodexAgentLLM(CustomLLM):
         _hdr = dict(headers or {})
         if api_key and not any(k.lower() == "authorization" for k in _hdr.keys()):
             _hdr["Authorization"] = f"Bearer {api_key}"
+        _sanitized: dict[str, Any] = {}
+        _forbidden = {
+            "connection",
+            "upgrade",
+            "proxy-authenticate",
+            "proxy-authorization",
+            "te",
+            "trailers",
+            "transfer-encoding",
+            "keep-alive",
+        }
+        for k, v in list(_hdr.items()):
+            lk = str(k).lower()
+            if lk in _forbidden:
+                continue
+            if lk == "authorization" and any(str(x).lower() == "authorization" for x in _sanitized.keys()):
+                continue
+            _sanitized[k] = v
+        _hdr = _sanitized
         request_timeout: Optional[Union[float, httpx.Timeout]] = timeout or 30.0
         max_retries = int(os.getenv("CODEX_AGENT_MAX_RETRIES", "2"))
         base_ms = int(os.getenv("CODEX_AGENT_RETRY_BASE_MS", "120"))
@@ -200,6 +255,8 @@ class CodexAgentLLM(CustomLLM):
         if det_seed:
             import random as _r
             rng = _r.Random(int(det_seed))
+        metrics_enabled = os.getenv("CODEX_AGENT_ENABLE_METRICS", "0") == "1"
+        retry_stats = {"attempts": 0, "failures": 0, "total_sleep_ms": 0}
         attempt = 0
         while True:
             try:
@@ -222,9 +279,13 @@ class CodexAgentLLM(CustomLLM):
                     sleep_ms = exp + jitter
                     if os.getenv("CODEX_AGENT_LOG_RETRIES", "0") == "1":
                         try:
-                            print_verbose(f"codex-agent retry: attempt={attempt} status={getattr(r,'status_code',0)} sleep_ms={int(sleep_ms)}")
+                            print_verbose(f"[codex-agent][retry] {{\"attempt\":{attempt},\"status\":{getattr(r,'status_code',0)},\"sleep_ms\":{int(sleep_ms)} }}")
                         except Exception:
                             pass
+                    if metrics_enabled:
+                        retry_stats["attempts"] = attempt
+                        retry_stats["failures"] += 1
+                        retry_stats["total_sleep_ms"] += int(sleep_ms)
                     await _a.sleep(sleep_ms / 1000.0)
                     continue
                 if r.status_code < 200 or r.status_code >= 300:
@@ -242,9 +303,13 @@ class CodexAgentLLM(CustomLLM):
                     sleep_ms = exp + jitter
                     if os.getenv("CODEX_AGENT_LOG_RETRIES", "0") == "1":
                         try:
-                            print_verbose(f"codex-agent retry: exception attempt={attempt} sleep_ms={int(sleep_ms)} err={str(e)[:120]}")
+                            print_verbose(f"[codex-agent][retry] {{\"attempt\":{attempt},\"exception\":true,\"sleep_ms\":{int(sleep_ms)},\"error\":\"{str(e)[:80]}\"}}")
                         except Exception:
                             pass
+                    if metrics_enabled:
+                        retry_stats["attempts"] = attempt
+                        retry_stats["failures"] += 1
+                        retry_stats["total_sleep_ms"] += int(sleep_ms)
                     await _a.sleep(sleep_ms / 1000.0)
                     continue
                 raise CustomLLMError(status_code=500, message=str(e)[:400])
@@ -261,6 +326,12 @@ class CodexAgentLLM(CustomLLM):
             model_response.choices[0].message.role = "assistant"  # type: ignore[attr-defined]
         except Exception:
             model_response.choices[0].message = {"role": "assistant", "content": content}  # type: ignore[assignment]
+        if metrics_enabled:
+            try:
+                model_response.additional_kwargs = getattr(model_response, "additional_kwargs", {}) or {}
+                model_response.additional_kwargs.setdefault("codex_agent", {})["retry_stats"] = retry_stats
+            except Exception:
+                pass
         return model_response
 
 # --- Optional self-registration (env-gated) -----------------------------------

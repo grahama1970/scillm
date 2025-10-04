@@ -167,12 +167,15 @@ index 2222222..3333333 100644
              "ts": int(time.perf_counter() * 1000),
              "run_id": uuid.uuid4().hex,
              "schema": "canonical+codeworld@v1",
-             "options": {"max_seconds": timeout, "session_id": session_id, "track_id": track_id},
-             "task_ids": [r.get("item", {}).get("task_id") for r in results if isinstance(r.get("item"), dict) and r.get("item", {}).get("task_id")],
-             "item_ids": [r.get("item_id") for r in results],
-             "tools": [r.get("item", {}).get("context", {}).get("tool_invocations") for r in results if isinstance(r.get("item"), dict)],
-             "strategy": strategy_name or None,
-             "mcts_stats": (results[0].get("mcts") if strategy_name == "mcts" and results else None),
+     "options": {"max_seconds": timeout, "session_id": session_id, "track_id": track_id},
+     "task_ids": [r.get("item", {}).get("task_id") for r in results if isinstance(r.get("item"), dict) and r.get("item", {}).get("task_id")],
+     "item_ids": [r.get("item_id") for r in results],
+     "tools": [r.get("item", {}).get("context", {}).get("tool_invocations") for r in results if isinstance(r.get("item"), dict)],
+     "strategy_name": strategy_name or None,
+     "strategy_seed": (mcts_out.get("seed") if strategy_name == "mcts" else None),
+     "strategy_params": (
+        {"rollouts": mcts_out.get("rollouts"), "depth": mcts_out.get("depth"), "uct_c": mcts_out.get("uct_c")} if strategy_name == "mcts" else None
+     ),
+     "mcts_stats": (results[0].get("mcts") if strategy_name == "mcts" and results else None),
          },
      }
-

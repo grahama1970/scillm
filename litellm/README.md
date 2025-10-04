@@ -91,7 +91,7 @@ See the root quick start: <a href="../QUICK_START.md">QUICK_START.md</a>
 Add decision-time stochastic search for CodeWorld variants.
 
 - Enable (bridge side): `CODEWORLD_ENABLE_MCTS=1` (default)
-- Deterministic runs: set `SCILLM_DETERMINISTIC_SEED=42`
+- Deterministic runs: set `SCILLM_DETERMINISTIC_SEED=42` (same env used across mini-agent, codex-agent, Certainly, and CodeWorld)
 - Example:
 
 ```bash
