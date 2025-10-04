@@ -1404,6 +1404,17 @@ try:
         from .llms.custom_llm import register_custom_provider as _register_custom_provider_codeworld
 
         _register_custom_provider_codeworld("codeworld", _CodeWorldLLM)
+        # Convenience alias: model/provider "codeworld/mcts" injects strategy="mcts"
+        try:
+            class _CodeWorldMCTSLLM(_CodeWorldLLM):  # type: ignore
+                def _build_payload(self, _model, _messages, optional_params):  # type: ignore[override]
+                    optional_params = dict(optional_params or {})
+                    optional_params.setdefault("strategy", "mcts")
+                    return super()._build_payload(_model, _messages, optional_params)
+
+            _register_custom_provider_codeworld("codeworld/mcts", _CodeWorldMCTSLLM)
+        except Exception:
+            pass
 except Exception:
     # Keep base imports resilient
     pass

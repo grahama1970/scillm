@@ -53,14 +53,39 @@ class CodeWorldLLM(CustomLLM):
         return h
 
     def _build_payload(self, _model: str, _messages: list, optional_params: dict) -> Dict[str, Any]:
+        """
+        Build the canonical CodeWorld bridge payload with unified sugar handling
+        to reduce cognitive load and mirror other SciLLM patterns.
+        """
         p: Dict[str, Any] = {"messages": _messages}
+
         # Canonical envelope (if provided)
-        if optional_params.get("items"):
-            p["items"] = optional_params.get("items")
-        if optional_params.get("provider"):
-            p["provider"] = optional_params.get("provider")
+        items = optional_params.get("items")
+        if items:
+            p["items"] = items
+
+        # Provider block (strategy, judge, etc.).
+        provider = optional_params.get("provider") or {}
+        if not isinstance(provider, dict):
+            provider = {}
+        args_block = provider.get("args") if isinstance(provider.get("args"), dict) else {}
+        merged_args = dict(args_block)
+
+        # Unified sugar parameters (top-level) → fold into provider.args
+        # Users can pass either strategy/strategy_config or individual knobs.
+        for k in ("strategy", "strategy_config", "rollouts", "depth", "uct_c", "seed"):
+            if k in optional_params and k not in merged_args:
+                merged_args[k] = optional_params[k]
+
+        if merged_args:
+            provider["name"] = provider.get("name", "codeworld")
+            provider["args"] = merged_args
+        if provider:
+            p["provider"] = provider
+
         if optional_params.get("options"):
             p["options"] = optional_params.get("options")
+
         # Back-compat CodeWorld aliases
         p.setdefault(
             "codeworld_metrics",
