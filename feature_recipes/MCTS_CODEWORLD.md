@@ -79,6 +79,7 @@ resp = completion(
 
 - Set `SCILLM_DETERMINISTIC_SEED` or pass `seed=` or `strategy_config={"seed": N}`.
 - Seed is recorded in `results[i].mcts.seed` and `run_manifest.mcts_stats`.
+ - See determinism policy and seed precedence: `docs/policies/DETERMINISM.md`.
 
 ## Output
 
@@ -108,3 +109,5 @@ export CODEWORLD_ENABLE_MCTS=0
 ## Notes
 
 Phase‑1 uses deterministic pseudo reward (no extra variant execution). Future phases may integrate partial execution or early correctness metrics behind additional flags.
+
+Baseline CodeWorld usage: see `feature_recipes/codeworld_provider.py` and `scenarios/codeworld_bridge_release.py`.
