@@ -211,6 +211,16 @@ checks:
       PYTHONPATH=$(pwd) python scripts/warmup_strict_gate.py --provider runpod
     optional: false
 
+  - name: warmups_strict_all
+    description: Composite strict warmups gate (only enforced if STRICT_WARMUPS=1)
+    run: |
+      set -e
+      if [ "${STRICT_WARMUPS}" != "1" ]; then echo "STRICT_WARMUPS not set; passing"; exit 0; fi
+      PYTHONPATH=$(pwd) python scripts/warmup_strict_gate.py --provider chutes
+      PYTHONPATH=$(pwd) python scripts/warmup_strict_gate.py --provider runpod
+      echo "strict warmups passed"
+    optional: false
+
 
   - name: all_smokes_core
     description: Core smoke suites (deterministic) — deprecated in favor of live scenarios

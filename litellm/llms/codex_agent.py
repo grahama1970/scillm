@@ -125,6 +125,7 @@ class CodexAgentLLM(CustomLLM):
             "final_status": None,
             "first_failure_status": None,
             "retry_sequence": [],
+            "statuses": [],
         }
         attempt = 0
         while True:
@@ -156,6 +157,14 @@ class CodexAgentLLM(CustomLLM):
                             pass
                         if retry_stats.get("first_failure_status") is None:
                             retry_stats["first_failure_status"] = getattr(r, "status_code", None)
+                        try:
+                            retry_stats["statuses"].append(getattr(r, "status_code", None))
+                        except Exception:
+                            pass
+                        try:
+                            retry_stats["statuses"].append(getattr(r, "status_code", None))
+                        except Exception:
+                            pass
                     if os.getenv("CODEX_AGENT_LOG_RETRIES", "0") == "1":
                         try:
                             print_verbose(f"[codex-agent][retry] {{\"attempt\":{attempt},\"status\":{getattr(r,'status_code',0)},\"sleep_ms\":{int(sleep_ms)} }}")
@@ -169,6 +178,7 @@ class CodexAgentLLM(CustomLLM):
                 if metrics_enabled:
                     try:
                         retry_stats["final_status"] = r.status_code
+                        retry_stats["statuses"].append(r.status_code)
                     except Exception:
                         pass
                 break
@@ -191,6 +201,10 @@ class CodexAgentLLM(CustomLLM):
                             pass
                         if retry_stats.get("first_failure_status") is None:
                             retry_stats["first_failure_status"] = getattr(e, "status_code", 500)
+                        try:
+                            retry_stats["statuses"].append(getattr(e, "status_code", 500))
+                        except Exception:
+                            pass
                     if os.getenv("CODEX_AGENT_LOG_RETRIES", "0") == "1":
                         try:
                             print_verbose(f"[codex-agent][retry] {{\"attempt\":{attempt},\"exception\":true,\"sleep_ms\":{int(sleep_ms)},\"error\":\"{str(e)[:80]}\"}}")
@@ -287,6 +301,7 @@ class CodexAgentLLM(CustomLLM):
             "final_status": None,
             "first_failure_status": None,
             "retry_sequence": [],
+            "statuses": [],
         }
         attempt = 0
         while True:
@@ -331,6 +346,7 @@ class CodexAgentLLM(CustomLLM):
                 if metrics_enabled:
                     try:
                         retry_stats["final_status"] = r.status_code
+                        retry_stats["statuses"].append(r.status_code)
                     except Exception:
                         pass
                 break
@@ -358,6 +374,10 @@ class CodexAgentLLM(CustomLLM):
                             pass
                         if retry_stats.get("first_failure_status") is None:
                             retry_stats["first_failure_status"] = getattr(e, "status_code", 500)
+                        try:
+                            retry_stats["statuses"].append(getattr(e, "status_code", 500))
+                        except Exception:
+                            pass
                     await _a.sleep(sleep_ms / 1000.0)
                     continue
                 raise CustomLLMError(status_code=500, message=str(e)[:400])

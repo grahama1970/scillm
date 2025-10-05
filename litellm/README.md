@@ -110,6 +110,16 @@ Security posture: Phase‑1 MCTS uses a hash‑based pseudo value for rollouts (
 
 SciLLM uses a single cross‑provider seed with clear precedence. See `docs/policies/DETERMINISM.md`.
 
+## Provider Feature Matrix (Quick Reference)
+
+| Provider / Mode        | One‑liner Activation                   | Determinism Param                         | Adaptive Strategy | Retry Telemetry         | Formal Methods |
+|------------------------|----------------------------------------|-------------------------------------------|-------------------|-------------------------|----------------|
+| mini‑agent            | scenarios / local shim                 | SCILLM_DETERMINISTIC_SEED                 | N/A               | N/A                     | No             |
+| codex‑agent           | model="codex-agent/mini"               | SCILLM_DETERMINISTIC_SEED                 | N/A               | retry_stats (optional)  | No             |
+| CodeWorld (baseline)  | model="codeworld"                      | SCILLM_DETERMINISTIC_SEED                 | MCTS (optional)   | N/A                     | No             |
+| CodeWorld (MCTS)      | model="codeworld/mcts" or strategy=…   | SCILLM_DETERMINISTIC_SEED + seed override | Yes (root‑bandit) | N/A                     | No             |
+| Certainly (Lean4)     | model="certainly"                      | SCILLM_DETERMINISTIC_SEED                 | N/A               | N/A                     | Yes            |
+
 
 <details>
   <summary>Logo variants</summary>
