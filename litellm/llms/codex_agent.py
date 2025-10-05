@@ -118,7 +118,14 @@ class CodexAgentLLM(CustomLLM):
             import random as _r
             rng = _r.Random(int(det_seed))
         metrics_enabled = os.getenv("CODEX_AGENT_ENABLE_METRICS", "0") == "1"
-        retry_stats = {"attempts": 0, "failures": 0, "total_sleep_ms": 0, "final_status": None}
+        retry_stats = {
+            "attempts": 0,
+            "failures": 0,
+            "total_sleep_ms": 0,
+            "final_status": None,
+            "first_failure_status": None,
+            "retry_sequence": [],
+        }
         attempt = 0
         while True:
             try:
@@ -143,6 +150,12 @@ class CodexAgentLLM(CustomLLM):
                         retry_stats["attempts"] = attempt
                         retry_stats["failures"] += 1
                         retry_stats["total_sleep_ms"] += int(sleep_ms)
+                        try:
+                            retry_stats["retry_sequence"].append(int(sleep_ms))
+                        except Exception:
+                            pass
+                        if retry_stats.get("first_failure_status") is None:
+                            retry_stats["first_failure_status"] = getattr(r, "status_code", None)
                     if os.getenv("CODEX_AGENT_LOG_RETRIES", "0") == "1":
                         try:
                             print_verbose(f"[codex-agent][retry] {{\"attempt\":{attempt},\"status\":{getattr(r,'status_code',0)},\"sleep_ms\":{int(sleep_ms)} }}")
@@ -172,6 +185,12 @@ class CodexAgentLLM(CustomLLM):
                         retry_stats["attempts"] = attempt
                         retry_stats["failures"] += 1
                         retry_stats["total_sleep_ms"] += int(sleep_ms)
+                        try:
+                            retry_stats["retry_sequence"].append(int(sleep_ms))
+                        except Exception:
+                            pass
+                        if retry_stats.get("first_failure_status") is None:
+                            retry_stats["first_failure_status"] = getattr(e, "status_code", 500)
                     if os.getenv("CODEX_AGENT_LOG_RETRIES", "0") == "1":
                         try:
                             print_verbose(f"[codex-agent][retry] {{\"attempt\":{attempt},\"exception\":true,\"sleep_ms\":{int(sleep_ms)},\"error\":\"{str(e)[:80]}\"}}")
@@ -261,7 +280,14 @@ class CodexAgentLLM(CustomLLM):
             import random as _r
             rng = _r.Random(int(det_seed))
         metrics_enabled = os.getenv("CODEX_AGENT_ENABLE_METRICS", "0") == "1"
-        retry_stats = {"attempts": 0, "failures": 0, "total_sleep_ms": 0, "final_status": None}
+        retry_stats = {
+            "attempts": 0,
+            "failures": 0,
+            "total_sleep_ms": 0,
+            "final_status": None,
+            "first_failure_status": None,
+            "retry_sequence": [],
+        }
         attempt = 0
         while True:
             try:
@@ -291,6 +317,12 @@ class CodexAgentLLM(CustomLLM):
                         retry_stats["attempts"] = attempt
                         retry_stats["failures"] += 1
                         retry_stats["total_sleep_ms"] += int(sleep_ms)
+                        try:
+                            retry_stats["retry_sequence"].append(int(sleep_ms))
+                        except Exception:
+                            pass
+                        if retry_stats.get("first_failure_status") is None:
+                            retry_stats["first_failure_status"] = getattr(r, "status_code", None)
                     await _a.sleep(sleep_ms / 1000.0)
                     continue
                 if r.status_code < 200 or r.status_code >= 300:
@@ -320,6 +352,12 @@ class CodexAgentLLM(CustomLLM):
                         retry_stats["attempts"] = attempt
                         retry_stats["failures"] += 1
                         retry_stats["total_sleep_ms"] += int(sleep_ms)
+                        try:
+                            retry_stats["retry_sequence"].append(int(sleep_ms))
+                        except Exception:
+                            pass
+                        if retry_stats.get("first_failure_status") is None:
+                            retry_stats["first_failure_status"] = getattr(e, "status_code", 500)
                     await _a.sleep(sleep_ms / 1000.0)
                     continue
                 raise CustomLLMError(status_code=500, message=str(e)[:400])

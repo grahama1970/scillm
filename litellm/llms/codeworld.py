@@ -71,11 +71,29 @@ class CodeWorldLLM(CustomLLM):
         args_block = provider.get("args") if isinstance(provider.get("args"), dict) else {}
         merged_args = dict(args_block)
 
+        # Accept exploration_constant as a friendlier alias for uct_c
+        if "exploration_constant" in optional_params and "uct_c" not in optional_params:
+            try:
+                optional_params["uct_c"] = optional_params["exploration_constant"]
+            except Exception:
+                pass
+
         # Unified sugar parameters (top-level) → fold into provider.args
         # Users can pass either strategy/strategy_config or individual knobs.
-        for k in ("strategy", "strategy_config", "rollouts", "depth", "uct_c", "seed"):
+        for k in ("strategy", "strategy_config", "rollouts", "depth", "uct_c", "seed", "exploration_constant"):
             if k in optional_params and k not in merged_args:
                 merged_args[k] = optional_params[k]
+
+        # CI auto‑scaling for MCTS exploration when user didn't set explicit values
+        try:
+            ci_mode = (os.getenv("SCILLM_CI") == "1") or (os.getenv("GITHUB_ACTIONS", "").lower() == "true")
+            if ci_mode and merged_args.get("strategy") == "mcts":
+                if ("rollouts" not in args_block) and ("rollouts" not in optional_params):
+                    merged_args.setdefault("rollouts", 24)
+                if ("depth" not in args_block) and ("depth" not in optional_params):
+                    merged_args.setdefault("depth", 5)
+        except Exception:
+            pass
 
         if merged_args:
             provider["name"] = provider.get("name", "codeworld")
