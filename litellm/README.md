@@ -120,6 +120,38 @@ SciLLM uses a single cross‑provider seed with clear precedence. See `docs/poli
 | CodeWorld (MCTS)      | model="codeworld/mcts" or strategy=…   | SCILLM_DETERMINISTIC_SEED + seed override | Yes (root‑bandit) | N/A                     | No             |
 | Certainly (Lean4)     | model="certainly"                      | SCILLM_DETERMINISTIC_SEED                 | N/A               | N/A                     | Yes            |
 
+## Warm‑ups in CI (Optional)
+
+Warm‑ups are skip‑friendly by default. To enforce warm‑ups in CI/staging, set `STRICT_WARMUPS=1` and provide provider credentials via secrets. This composite gate fails fast if warm‑ups aren’t configured.
+
+GitHub Actions example:
+
+```yaml
+name: warmups
+on: [workflow_dispatch]
+jobs:
+  warmups:
+    runs-on: ubuntu-latest
+    env:
+      STRICT_WARMUPS: "1"
+      CHUTES_API_KEY: ${{ secrets.CHUTES_API_KEY }}
+      RUNPOD_API_KEY: ${{ secrets.RUNPOD_API_KEY }}
+      RUNPOD_API_BASE: ${{ secrets.RUNPOD_API_BASE }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install deps
+        run: |
+          pip install -e .
+      - name: Strict warmups gate
+        run: |
+          PYTHONPATH=${{ github.workspace }} python scripts/warmup_strict_gate.py --provider chutes
+          PYTHONPATH=${{ github.workspace }} python scripts/warmup_strict_gate.py --provider runpod
+```
+
 
 <details>
   <summary>Logo variants</summary>
