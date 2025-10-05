@@ -198,6 +198,19 @@ checks:
       PYTHONPATH=$(pwd) python scripts/provider_warmup.py --provider runpod
     optional: true
 
+  # Strict variants (env-gated). These only fail the pipeline when STRICT_WARMUPS=1
+  - name: chutes_warmup_strict
+    description: Strict warmup gate for Chutes (fails if STRICT_WARMUPS=1 and CHUTES_API_KEY missing)
+    run: |
+      PYTHONPATH=$(pwd) python scripts/warmup_strict_gate.py --provider chutes
+    optional: false
+
+  - name: runpod_warmup_strict
+    description: Strict warmup gate for Runpod (fails if STRICT_WARMUPS=1 and creds missing)
+    run: |
+      PYTHONPATH=$(pwd) python scripts/warmup_strict_gate.py --provider runpod
+    optional: false
+
 
   - name: all_smokes_core
     description: Core smoke suites (deterministic) — deprecated in favor of live scenarios
