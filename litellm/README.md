@@ -152,6 +152,18 @@ jobs:
           PYTHONPATH=${{ github.workspace }} python scripts/warmup_strict_gate.py --provider runpod
 ```
 
+Warm‑up probe (manual):
+
+```bash
+# Chutes
+CHUTES_API_KEY=... CHUTES_API_BASE=https://api.chutes.ai/v1 \
+  python scenarios/provider_warmup_probe.py --provider chutes --model "$LITELLM_DEFAULT_MODEL"
+
+# Runpod (OpenAI‑compatible gateway)
+RUNPOD_API_KEY=... RUNPOD_API_BASE=https://api.runpod.ai/v1 \
+  python scenarios/provider_warmup_probe.py --provider runpod --model "$LITELLM_DEFAULT_MODEL"
+```
+
 
 <details>
   <summary>Logo variants</summary>
