@@ -3,7 +3,9 @@ import os
 import tempfile
 import time
 
-from litellm.contrib.batch import JsonlCheckpoint, TokenBucket
+import asyncio
+import pytest
+from litellm.contrib.batch import JsonlCheckpoint, TokenBucket, AsyncTokenBucket, run_batch
 
 
 def test_jsonl_checkpoint_append_and_read():
@@ -31,3 +33,19 @@ def test_token_bucket_single_thread_rate():
     # With rate=5/s for 5 tokens, elapsed should be around 1s; allow slack
     assert elapsed >= 0.7
 
+
+@pytest.mark.asyncio
+async def test_async_token_bucket_and_run_batch(tmp_path):
+    # Prepare items
+    items = [{"id": str(i)} for i in range(5)]
+    # Async fn that returns a dict
+    async def fn(it):
+        await asyncio.sleep(0.01)
+        return {"ok": True, "id": it["id"]}
+
+    bucket = AsyncTokenBucket(rate_per_sec=10.0, capacity=2)
+    out_path = tmp_path / "results.jsonl"
+    await run_batch(items, id_key="id", fn=fn, checkpoint_path=str(out_path), bucket=bucket, max_concurrency=3)
+    cp = JsonlCheckpoint(str(out_path))
+    done = cp.processed_ids()
+    assert done == {"0", "1", "2", "3", "4"}
