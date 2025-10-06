@@ -71,7 +71,6 @@ extra_proxy = [
 ]
 utils = ["numpydoc"]
 caching = ["diskcache>=5.6.1"]
-semantic-router = ["semantic-router"]
 mlflow = ["mlflow>3.1.4; python_version >= '3.10'"]
 
 [project.scripts]
