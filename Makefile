@@ -56,43 +56,39 @@ logo-export:
 
 # Installation targets
 install-dev:
-	poetry install --with dev
+	uv sync --group dev
 
 install-proxy-dev:
-	poetry install --with dev,proxy-dev --extras proxy
+	uv sync --group dev --group proxy-dev --extra proxy
 
 # CI-compatible installations (matches GitHub workflows exactly)
 install-dev-ci:
-	pip install openai==1.99.5
-	poetry install --with dev
-	pip install openai==1.99.5
+	uv sync --group dev
 
 install-proxy-dev-ci:
-	poetry install --with dev,proxy-dev --extras proxy
-	pip install openai==1.99.5
+	uv sync --group dev --group proxy-dev --extra proxy
 
 install-test-deps: install-proxy-dev
-	poetry run pip install "pytest-retry==1.6.3"
-	poetry run pip install pytest-xdist
-	cd enterprise && python -m pip install -e . && cd ..
+	uv run pip install "pytest-retry==1.6.3" pytest-xdist
+	cd enterprise && uv pip install -e . && cd ..
 
 install-helm-unittest:
 	helm plugin install https://github.com/helm-unittest/helm-unittest --version v0.4.4 || echo "ignore error if plugin exists"
 
 # Formatting
 format: install-dev
-	cd litellm && poetry run black . && cd ..
+	cd litellm && uv run black . && cd ..
 
 format-check: install-dev
-	cd litellm && poetry run black --check . && cd ..
+	cd litellm && uv run black --check . && cd ..
 
 # Linting targets
 lint-ruff: install-dev
-	cd litellm && poetry run ruff check . && cd ..
+	cd litellm && uv run ruff check . && cd ..
 
 lint-mypy: install-dev
-	poetry run pip install types-requests types-setuptools types-redis types-PyYAML
-	cd litellm && poetry run mypy . --ignore-missing-imports && cd ..
+	uv run pip install types-requests types-setuptools types-redis types-PyYAML
+	cd litellm && uv run mypy . --ignore-missing-imports && cd ..
 
 lint-black: format-check
 
@@ -122,23 +118,23 @@ run-stress-tests:
 	@. .venv/bin/activate && python stress_tests/mini_agent_concurrency.py
 
 check-circular-imports: install-dev
-	cd litellm && poetry run python ../tests/documentation_tests/test_circular_imports.py && cd ..
+	cd litellm && uv run python ../tests/documentation_tests/test_circular_imports.py && cd ..
 
 check-import-safety: install-dev
-	poetry run python -c "from litellm import *" || (echo '🚨 import failed, this means you introduced unprotected imports! 🚨'; exit 1)
+	uv run python -c "from litellm import *" || (echo '🚨 import failed, this means you introduced unprotected imports! 🚨'; exit 1)
 
 # Combined linting (matches test-linting.yml workflow)
 lint: format-check lint-ruff lint-mypy check-circular-imports check-import-safety
 
 # Testing targets
 test:
-	poetry run pytest tests/
+	uv run pytest tests/
 
 test-unit: install-test-deps
-	poetry run pytest tests/test_litellm -x -vv -n 4
+	uv run pytest tests/test_litellm -x -vv -n 4
 
 test-integration:
-	poetry run pytest tests/ -k "not test_litellm"
+	uv run pytest tests/ -k "not test_litellm"
 
 test-unit-helm: install-helm-unittest
 	helm unittest -f 'tests/*.yaml' deploy/charts/litellm-helm
@@ -146,13 +142,13 @@ test-unit-helm: install-helm-unittest
 # LLM Translation testing targets
 test-llm-translation: install-test-deps
 	@echo "Running LLM translation tests..."
-	@python .github/workflows/run_llm_translation_tests.py
+	@uv run python .github/workflows/run_llm_translation_tests.py
 
 test-llm-translation-single: install-test-deps
 	@echo "Running single LLM translation test file..."
 	@if [ -z "$(FILE)" ]; then echo "Usage: make test-llm-translation-single FILE=test_filename.py"; exit 1; fi
 	@mkdir -p test-results
-	poetry run pytest tests/llm_translation/$(FILE) \
+	uv run pytest tests/llm_translation/$(FILE) \
 		--junitxml=test-results/junit.xml \
 		-v --tb=short --maxfail=100 --timeout=300
 
