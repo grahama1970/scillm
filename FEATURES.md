@@ -41,6 +41,22 @@ This file is a quick, practical map of SciLLM’s capabilities, what they do, an
 
 Tip: Using Docker? `docker compose -f local/docker/compose.agents.yml up --build -d` exposes the mini‑agent on `127.0.0.1:8788` and the codex sidecar on `127.0.0.1:8077`. For the Router provider, set `CODEX_AGENT_API_BASE` to the one you want (no `/v1`).
 
+codex‑agent base rule and endpoints
+- Set `CODEX_AGENT_API_BASE` WITHOUT `/v1`. The provider appends `/v1/chat/completions` internally.
+- Both sidecar (8077) and mini‑agent (8788) expose:
+  - `GET /healthz` (OK)
+  - `GET /v1/models` (stub list)
+  - `POST /v1/chat/completions` (OpenAI‑compatible; choices[0].message.content is a string)
+
+Router judge mapping (optional)
+- Per‑call (quickest):
+  - `r.completion(model="gpt-5", custom_llm_provider="codex-agent", api_base=os.getenv("CODEX_AGENT_API_BASE"), api_key=os.getenv("CODEX_AGENT_API_KEY"), ...)`
+- Or define once:
+  - `Router(model_list=[{"model_name":"gpt-5","litellm_params":{"model":"gpt-5","custom_llm_provider":"codex-agent","api_base":os.getenv("CODEX_AGENT_API_BASE"),"api_key":os.getenv("CODEX_AGENT_API_KEY")}}])`
+
+Retries meta (optional)
+- Set `SCILLM_RETRY_META=1` to stamp `additional_kwargs["router"]["retries"] = {attempts,total_sleep_s,last_retry_after_s}`.
+
 ## Router (Batch‑Friendly)
 
 | Area | Feature | What It Does | How To Use | Files/Notes |
