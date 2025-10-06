@@ -288,7 +288,8 @@ async def chat_completions(req: ChatCompletionRequest, request: Request):
                         "choices": [
                             {
                                 "index": 0,
-                                "message": {"role": "assistant", "content": content or None},
+                                # Always return a string per OpenAI compat; never null
+                                "message": {"role": "assistant", "content": content if isinstance(content, str) else (str(content) if content is not None else "")},
                                 "finish_reason": "stop",
                             }
                         ],
@@ -363,6 +364,16 @@ async def chat_completions(req: ChatCompletionRequest, request: Request):
     return await _invoke_stream()
 
 
+@app.get("/v1/models")
+async def list_models() -> Dict[str, object]:
+    """Minimal stub for OpenAI-compatible model listing.
+
+    Sidecar does not maintain a dynamic registry; provide a stable placeholder
+    so clients that probe /v1/models don't fail.
+    """
+    return {"object": "list", "data": [{"id": "gpt-5", "object": "model"}]}
+
+
 # ---------------------------------------------------------------------------
 # Entrypoint helpers
 # ---------------------------------------------------------------------------
@@ -393,4 +404,3 @@ if __name__ == "__main__":  # pragma: no cover - manual invocation only
     host = os.getenv("CODEX_SIDECAR_HOST", "127.0.0.1")
     port = int(os.getenv("CODEX_SIDECAR_PORT", "8077"))
     serve(host, port)
-
