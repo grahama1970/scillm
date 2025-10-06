@@ -335,10 +335,40 @@ def _to_openai_with_meta(resp: Any, timing_ms: Optional[int], req: RouterParalle
         except Exception:
             content = ""
     out = {"choices": [{"message": {"content": content}}]}
+    # ensure meta container
+    out.setdefault("scillm_router", {})
     if meta is not None:
-        out["scillm_router"] = meta
+        out["scillm_router"].update(meta)
+    # minimal classification when upstream meta was absent
+    try:
+        err = "ok"
+        jv = None
+        if content == "":
+            err = "empty_content"
+        else:
+            try:
+                import json as _json
+                _json.loads(content)
+                jv = True
+            except Exception:
+                jv = False
+                err = "invalid_json"
+        out["scillm_router"].setdefault("error_type", err)
+        if jv is not None:
+            out["scillm_router"].setdefault("json_valid", jv)
+        # schema hint from request
+        if req is not None:
+            rm = (req.kwargs or {}).get("response_mode")
+            rf = (req.kwargs or {}).get("response_format")
+            if rm == "schema_first" or (isinstance(rf, dict) and rf.get("type") == "json_schema"):
+                out["scillm_router"].setdefault("schema_mode", "schema_first")
+            prov = (req.kwargs or {}).get("custom_llm_provider")
+            if prov:
+                out["scillm_router"].setdefault("provider", prov)
+    except Exception:
+        pass
     if timing_ms is not None:
-        out.setdefault("scillm_router", {}).setdefault("timing_ms", timing_ms)
+        out["scillm_router"].setdefault("timing_ms", timing_ms)
     return out
 
 
