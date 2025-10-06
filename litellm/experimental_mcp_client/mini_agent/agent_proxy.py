@@ -65,19 +65,34 @@ def _classify_request(req: "AgentRunReq") -> Dict[str, Any]:
 @app.get("/ready")
 async def ready():
     """Lightweight readiness probe for Docker/compose healthchecks."""
-    return {"ok": True}
+    # Provide minimal config hints to reduce friction
+    hints = {
+        "OPENAI_API_KEY": bool(os.getenv("OPENAI_API_KEY")),
+        "OLLAMA_BASE_URL": bool(os.getenv("OLLAMA_BASE_URL")),
+        "LITELLM_DEFAULT_MODEL": bool(os.getenv("LITELLM_DEFAULT_MODEL")),
+        "MINI_AGENT_OPENAI_SHIM_MODE": os.getenv("MINI_AGENT_OPENAI_SHIM_MODE", ""),
+    }
+    return {"ok": True, "hints": hints}
 
 
 @app.get("/healthz")
 async def healthz():
     """Expose resolved runtime configuration for readiness scripts."""
-    return {
+    cfg = {
         "ok": True,
         "host": MINI_AGENT_API_HOST,
         "port": MINI_AGENT_API_PORT,
         "started_at": STARTED_AT,
         "delay_ms": OPENAI_SHIM_DELAY_MS,
     }
+    # Extend with common env hints
+    cfg["hints"] = {
+        "OPENAI_API_KEY": bool(os.getenv("OPENAI_API_KEY")),
+        "OLLAMA_BASE_URL": bool(os.getenv("OLLAMA_BASE_URL")),
+        "LITELLM_DEFAULT_MODEL": bool(os.getenv("LITELLM_DEFAULT_MODEL")),
+        "MINI_AGENT_OPENAI_SHIM_MODE": os.getenv("MINI_AGENT_OPENAI_SHIM_MODE", ""),
+    }
+    return cfg
 
 
 def _maybe_store_trace(envelope: Dict[str, Any]) -> None:
@@ -328,9 +343,27 @@ async def openai_chat_completions(req: OpenAIChatReq):
     Minimal OpenAI-compatible shim used by deterministic checks. It runs the mini-agent with a local
     invoker and returns an OpenAI-shaped response envelope.
     """
+    # Helpful preflight: if no provider/model config is available, fail early with guidance
+    try:
+        echo = (os.getenv("MINI_AGENT_OPENAI_SHIM_MODE", "") == "echo") or (os.getenv("MINI_AGENT_OPENAI_ECHO", "") == "1")
+        have_openai = bool(os.getenv("OPENAI_API_KEY"))
+        have_ollama = bool(os.getenv("OLLAMA_BASE_URL")) and bool(os.getenv("LITELLM_DEFAULT_MODEL"))
+        if not echo and not (have_openai or have_ollama):
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "mini-agent chat needs a provider: set OPENAI_API_KEY or bring up Ollama and set "
+                    "OLLAMA_BASE_URL + LITELLM_DEFAULT_MODEL=ollama/<tag>. For a no-deps smoke, call /agent/run "
+                    "with {\"tool_backend\":\"local\"} or set MINI_AGENT_OPENAI_SHIM_MODE=echo for a stub reply."
+                ),
+            )
+    except HTTPException:
+        raise
+    except Exception:
+        pass
     # Echo mode: allow readiness checks to validate transport without invoking Router/LLMs
     try:
-        if os.getenv("MINI_AGENT_OPENAI_SHIM_MODE", "") == "echo":
+        if echo:
             return build_shim_completion(req.model)
     except Exception:
         pass
@@ -344,14 +377,27 @@ async def openai_chat_completions(req: OpenAIChatReq):
             cfg=agent.AgentConfig(model=req.model),
         )
         content = getattr(result, "final_answer", None) or SHIM_REPLY
-    except Exception:
-        content = SHIM_REPLY
+    except Exception as e:
+        # Return a helpful error message instead of a bare 500
+        raise HTTPException(
+            status_code=502,
+            detail=(
+                "mini-agent chat failed. If you intended to use OpenAI, set OPENAI_API_KEY. "
+                "For local models, set OLLAMA_BASE_URL and LITELLM_DEFAULT_MODEL. "
+                f"Error: {str(e)[:160]}"
+            ),
+        )
     return build_shim_completion(req.model, content)
 
 # Compatibility route (no version prefix)
 @app.post("/chat/completions")
 async def openai_chat_completions_nov1(req: OpenAIChatReq):
     return await openai_chat_completions(req)
+
+@app.get("/v1/models")
+async def openai_models_stub():
+    """Minimal models stub for OpenAI compatibility."""
+    return {"object": "list", "data": [{"id": "gpt-5", "object": "model"}]}
 
 @app.get("/v1/models")
 async def openai_models_stub():

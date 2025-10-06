@@ -247,7 +247,7 @@ async def _acompletion_with_stream_aware_aggregation(router, req: RouterParallel
     return await call_target(model=req.model, messages=req.messages, **call_kwargs)
 
 
-def _to_openai_with_meta(resp: Any, timing_ms: Optional[int]) -> Dict[str, Any]:
+def _to_openai_with_meta(resp: Any, timing_ms: Optional[int], req: RouterParallelRequest | None = None) -> Dict[str, Any]:
     """
     Normalize Router.acompletion responses to an OpenAI-shaped dict and attach
     SciLLM router meta (if present) under 'scillm_router'.
@@ -272,13 +272,59 @@ def _to_openai_with_meta(resp: Any, timing_ms: Optional[int]) -> Dict[str, Any]:
     # Already dict-shaped
     if isinstance(resp, dict):
         out = dict(resp)
+        # ensure meta container exists
+        out.setdefault("scillm_router", {})
+        # attach upstream meta if present
         if meta is not None:
             try:
-                out.setdefault("scillm_router", {}).update(meta)
+                out["scillm_router"].update(meta)
             except Exception:
                 out["scillm_router"] = meta
+        # minimal classification when upstream meta is absent
+        try:
+            content = ((out.get("choices") or [{}])[0].get("message") or {}).get("content")
+            err = "ok"
+            jv = None
+            if content is None:
+                err = "empty_content"
+            elif isinstance(content, str):
+                if content.strip() == "":
+                    err = "empty_content"
+                else:
+                    try:
+                        import json as _json
+                        _json.loads(content)
+                        jv = True
+                    except Exception:
+                        jv = False
+                        err = "invalid_json"
+            # Only stamp if upstream meta didn’t set error_type
+            out["scillm_router"].setdefault("error_type", err)
+            if jv is not None:
+                out["scillm_router"].setdefault("json_valid", jv)
+            # best-effort provider
+            if req is not None:
+                prov = None
+                try:
+                    prov = (req.kwargs or {}).get("custom_llm_provider")
+                except Exception:
+                    prov = None
+                if prov:
+                    out["scillm_router"].setdefault("provider", prov)
+            # schema hint
+            try:
+                rf = (req.kwargs or {}).get("response_format") if req else None
+                rm = (req.kwargs or {}).get("response_mode") if req else None
+                if isinstance(rf, dict) and rf.get("type") == "json_schema":
+                    out["scillm_router"].setdefault("schema_mode", "schema_first")
+                elif rm == "schema_first":
+                    out["scillm_router"].setdefault("schema_mode", "schema_first")
+            except Exception:
+                pass
+        except Exception:
+            pass
         if timing_ms is not None:
-            out.setdefault("scillm_router", {}).setdefault("timing_ms", timing_ms)
+            out["scillm_router"].setdefault("timing_ms", timing_ms)
         return out
 
     # Fallback to minimal OpenAI dict shape
@@ -337,7 +383,7 @@ async def gather_parallel_acompletions(
                 resp = await _acompletion_with_stream_aware_aggregation(router, req)
             _dt = int(((_t.perf_counter() - _t0) * 1000))
             # Always return OpenAI-shaped dict with 'scillm_router' meta when available
-            normalized = _to_openai_with_meta(resp, _dt)
+            normalized = _to_openai_with_meta(resp, _dt, req)
             return ParallelResult(index=i, request=req, response=normalized, exception=None, timing_ms=_dt)
         except Exception as e:
             return ParallelResult(index=i, request=req, response=None, exception=e, timing_ms=None)
