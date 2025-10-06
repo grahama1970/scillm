@@ -352,3 +352,8 @@ async def openai_chat_completions(req: OpenAIChatReq):
 @app.post("/chat/completions")
 async def openai_chat_completions_nov1(req: OpenAIChatReq):
     return await openai_chat_completions(req)
+
+@app.get("/v1/models")
+async def openai_models_stub():
+    """Minimal models stub for OpenAI compatibility."""
+    return {"object": "list", "data": [{"id": "gpt-5", "object": "model"}]}
