@@ -153,11 +153,15 @@ def main() -> None:
     ap.add_argument("--judge-model", required=True)
     ap.add_argument("--timeout", type=float, default=60.0)
     ap.add_argument("--out", default="local/artifacts/compare")
+    ap.add_argument("--enable-retries", action="store_true", help="Enable 429 retry layer (SCILLM_RETRY_ENABLED=1)")
     # Optional: route via codex-agent provider for resilience/metrics
     ap.add_argument("--use-codex-a", action="store_true")
     ap.add_argument("--use-codex-b", action="store_true")
     ap.add_argument("--use-codex-judge", action="store_true")
     args = ap.parse_args()
+
+    if args.enable_retries:
+        os.environ["SCILLM_RETRY_ENABLED"] = "1"
 
     items = _read_jsonl(args.items, args.n)
     if not items:
