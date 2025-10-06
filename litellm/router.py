@@ -1324,7 +1324,20 @@ class Router:
             verbose_router_logger.debug(f"router.completion(model={model},..)")
             kwargs["model"] = model
             kwargs["messages"] = messages
-            kwargs["original_function"] = self._completion
+            # Ad-hoc provider bypass for sync completion when explicit creds are supplied
+            try:
+                _explicit = bool(
+                    kwargs.get("custom_llm_provider") and (
+                        kwargs.get("api_base") or kwargs.get("api_key")
+                    )
+                )
+            except Exception:
+                _explicit = False
+            if _explicit:
+                import litellm as _litellm
+                kwargs["original_function"] = _litellm.completion
+            else:
+                kwargs["original_function"] = self._completion
             self._update_kwargs_before_fallbacks(model=model, kwargs=kwargs)
 
             response = self.function_with_fallbacks(**kwargs)
@@ -1496,7 +1509,20 @@ class Router:
             kwargs["model"] = model
             kwargs["messages"] = messages
             kwargs["stream"] = stream
-            kwargs["original_function"] = self._acompletion
+            # Ad-hoc provider bypass: if explicit creds are supplied, call provider directly
+            try:
+                _explicit = bool(
+                    kwargs.get("custom_llm_provider") and (
+                        kwargs.get("api_base") or kwargs.get("api_key")
+                    )
+                )
+            except Exception:
+                _explicit = False
+            if _explicit:
+                import litellm as _litellm
+                kwargs["original_function"] = _litellm.acompletion
+            else:
+                kwargs["original_function"] = self._acompletion
 
             self._update_kwargs_before_fallbacks(model=model, kwargs=kwargs)
             request_priority = kwargs.get("priority") or self.default_priority

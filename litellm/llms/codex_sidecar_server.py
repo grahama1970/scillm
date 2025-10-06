@@ -247,11 +247,52 @@ app = FastAPI(title="Codex Sidecar", version="0.1.0")
 
 @app.get("/healthz")
 async def healthz() -> Dict[str, object]:
-    return {"ok": True, "concurrency": SETTINGS.max_concurrency}
+    home = os.getenv("HOME", "/root")
+    auth_path = os.getenv("CODEX_AUTH_PATH", os.path.join(home, ".codex", "auth.json"))
+    auth_present = os.path.exists(auth_path)
+    return {"ok": True, "concurrency": SETTINGS.max_concurrency, "auth_present": auth_present}
 
 
 @app.post("/v1/chat/completions")
 async def chat_completions(req: ChatCompletionRequest, request: Request):
+    # Optional echo mode for environments without Codex CLI installed
+    try:
+        if os.getenv("CODEX_SIDECAR_ECHO", "") == "1" or os.getenv("CODEX_ECHO_MODE", "") == "1":
+            body = {
+                "id": "chatcmpl-sidecar",
+                "object": "chat.completion",
+                "created": int(time.time()),
+                "model": req.model,
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "shim ok"},
+                        "finish_reason": "stop",
+                    }
+                ],
+            }
+            return JSONResponse(body)
+    except Exception:
+        pass
+    # Preflight: require auth.json when not in echo mode to avoid opaque CLI failures
+    try:
+        echo = os.getenv("CODEX_SIDECAR_ECHO", "") == "1" or os.getenv("CODEX_ECHO_MODE", "") == "1"
+        home = os.getenv("HOME", "/root")
+        auth_path = os.getenv("CODEX_AUTH_PATH", os.path.join(home, ".codex", "auth.json"))
+        if not echo and not os.path.exists(auth_path):
+            raise HTTPException(
+                status_code=401,
+                detail=(
+                    "codex-agent auth missing: expected credentials at "
+                    f"{auth_path}. Mount ~/.codex/auth.json into the container (read-only), or set "
+                    "CODEX_AUTH_PATH to an alternate location. For stub testing only, set CODEX_SIDECAR_ECHO=1."
+                ),
+            )
+    except HTTPException:
+        raise
+    except Exception:
+        # Best-effort preflight; continue to runtime call
+        pass
     prompt = _messages_to_prompt(req.messages)
     if not prompt:
         raise HTTPException(status_code=400, detail="Empty prompt")
@@ -305,6 +346,22 @@ async def chat_completions(req: ChatCompletionRequest, request: Request):
                     raise HTTPException(status_code=502, detail=f"Codex error ({exc.code}): {exc.stderr[:800]}")
                 except Exception as exc:  # noqa: BLE001
                     last_err = str(exc)
+                    # If echo mode requested or Codex CLI missing, return a benign shim response
+                    if os.getenv("CODEX_SIDECAR_ECHO", "") == "1" or os.getenv("CODEX_ECHO_MODE", "") == "1":
+                        body = {
+                            "id": "chatcmpl-sidecar",
+                            "object": "chat.completion",
+                            "created": int(time.time()),
+                            "model": req.model,
+                            "choices": [
+                                {
+                                    "index": 0,
+                                    "message": {"role": "assistant", "content": "shim ok"},
+                                    "finish_reason": "stop",
+                                }
+                            ],
+                        }
+                        return JSONResponse(body)
                     raise HTTPException(status_code=500, detail=f"Unexpected: {last_err[:800]}")
 
     async def _invoke_stream() -> StreamingResponse:
