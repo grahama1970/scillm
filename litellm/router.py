@@ -4572,7 +4572,26 @@ class Router:
                 try:
                     ra = original_exception.response.headers.get("Retry-After")  # type: ignore
                     if ra is not None:
-                        base_sleep = min(float(ra), retry_max_s)
+                        try:
+                            base_sleep = float(ra)
+                        except Exception:
+                            # HTTP-date
+                            try:
+                                from email.utils import parsedate_to_datetime
+                                from datetime import datetime, timezone
+                                dt = parsedate_to_datetime(ra)
+                                now = datetime.now(timezone.utc)
+                                if dt and dt.tzinfo is None:
+                                    dt = dt.replace(tzinfo=timezone.utc)
+                                delta = (dt - now).total_seconds() if dt else 0
+                                base_sleep = max(delta, 0)
+                            except Exception:
+                                base_sleep = 0.0
+                        if base_sleep <= 0:
+                            base_sleep = 0.5
+                        remaining0 = retry_time_budget_s - (time.time() - _start_ts)
+                        if remaining0 > 0 and base_sleep > remaining0:
+                            base_sleep = max(0.5, remaining0 - 0.1)
                 except Exception:
                     base_sleep = 0.0
             base_sleep = max(base_sleep, float(retry_after or 0)) if not retry_enabled else max(base_sleep, 0.0)
@@ -4592,6 +4611,7 @@ class Router:
                 await asyncio.sleep(base_sleep)
 
             max_attempts = retry_max_attempts if retry_enabled else num_retries
+            cumulative_sleep = 0.0
             for current_attempt in range(max_attempts):
                 try:
                     # if the function call is successful, no exception will be raised and we'll break out of the loop
@@ -4612,6 +4632,7 @@ class Router:
                                 "latency_ms": int((time.time() - _start_ts) * 1000),
                                 "attempts": current_attempt + 1,
                                 "retries": current_attempt,
+                                "cumulative_sleep_s": cumulative_sleep,
                             })
                         except Exception:
                             pass
@@ -4720,8 +4741,30 @@ class Router:
                             })
                         except Exception:
                             pass
+                    # Optional structured log (throttled)
+                    try:
+                        throttle = int(_os.getenv("SCILLM_RETRY_LOG_EVERY", "1") or "1")
+                    except Exception:
+                        throttle = 1
+                    if log_json and (throttle <= 1 or ((current_attempt + 1) % throttle == 0)):
+                        try:
+                            import json as _json
+                            print(_json.dumps({
+                                "event": "429_retry",
+                                "model": kwargs.get("model"),
+                                "attempt": current_attempt + 1,
+                                "sleep_s": round(_timeout, 3),
+                                "elapsed_s": round(elapsed, 3),
+                                "retry_after_s": float(headers.get("Retry-After")) if headers and headers.get("Retry-After") else None,
+                            }, separators=(",", ":")))
+                        except Exception:
+                            pass
                     await asyncio.sleep(_timeout)
-                    # Note: cumulative_sleep is informational; we track 0.0 here to avoid refactor scope; future: accumulate if needed
+                    try:
+                        cumulative_sleep
+                    except NameError:
+                        cumulative_sleep = 0.0
+                    cumulative_sleep += _timeout
 
             if type(original_exception) in litellm.LITELLM_EXCEPTION_TYPES:
                 setattr(original_exception, "max_retries", num_retries)
