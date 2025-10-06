@@ -247,6 +247,55 @@ async def _acompletion_with_stream_aware_aggregation(router, req: RouterParallel
     return await call_target(model=req.model, messages=req.messages, **call_kwargs)
 
 
+def _to_openai_with_meta(resp: Any, timing_ms: Optional[int]) -> Dict[str, Any]:
+    """
+    Normalize Router.acompletion responses to an OpenAI-shaped dict and attach
+    SciLLM router meta (if present) under 'scillm_router'.
+
+    - ModelResponse → {'choices':[{'message':{'content': str}}]}
+    - dict (already aggregated stream or provider dict) → copy and attach meta
+    """
+    meta = None
+    content = None
+    # Try ModelResponse path first
+    try:
+        if hasattr(resp, "additional_kwargs"):
+            meta = getattr(resp, "additional_kwargs", {}).get("router")
+        # choices[0].message.content accessor
+        try:
+            content = resp.choices[0].message.content  # type: ignore[attr-defined]
+        except Exception:
+            content = None
+    except Exception:
+        meta = None
+
+    # Already dict-shaped
+    if isinstance(resp, dict):
+        out = dict(resp)
+        if meta is not None:
+            try:
+                out.setdefault("scillm_router", {}).update(meta)
+            except Exception:
+                out["scillm_router"] = meta
+        if timing_ms is not None:
+            out.setdefault("scillm_router", {}).setdefault("timing_ms", timing_ms)
+        return out
+
+    # Fallback to minimal OpenAI dict shape
+    if not isinstance(content, str):
+        # best-effort string
+        try:
+            content = str(content) if content is not None else ""
+        except Exception:
+            content = ""
+    out = {"choices": [{"message": {"content": content}}]}
+    if meta is not None:
+        out["scillm_router"] = meta
+    if timing_ms is not None:
+        out.setdefault("scillm_router", {}).setdefault("timing_ms", timing_ms)
+    return out
+
+
 # ------------------------------ Public helpers --------------------------------
 
 async def gather_parallel_acompletions(
@@ -287,7 +336,9 @@ async def gather_parallel_acompletions(
             else:
                 resp = await _acompletion_with_stream_aware_aggregation(router, req)
             _dt = int(((_t.perf_counter() - _t0) * 1000))
-            return ParallelResult(index=i, request=req, response=resp, exception=None, timing_ms=_dt)
+            # Always return OpenAI-shaped dict with 'scillm_router' meta when available
+            normalized = _to_openai_with_meta(resp, _dt)
+            return ParallelResult(index=i, request=req, response=normalized, exception=None, timing_ms=_dt)
         except Exception as e:
             return ParallelResult(index=i, request=req, response=None, exception=e, timing_ms=None)
 
