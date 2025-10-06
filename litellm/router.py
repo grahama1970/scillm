@@ -4460,6 +4460,34 @@ class Router:
         )
         model_group: Optional[str] = kwargs.get("model")
         num_retries = kwargs.pop("num_retries")
+        # SciLLM 429 retry extras (opt-in, env-backed)
+        import os as _os
+        import random as _rand
+        retry_enabled = kwargs.pop(
+            "retry_enabled",
+            True if _os.getenv("SCILLM_RETRY_ENABLED", "0") == "1" else False,
+        )
+        retry_max_attempts = int(
+            kwargs.pop("retry_max_attempts", _os.getenv("SCILLM_RETRY_MAX_ATTEMPTS", "8"))
+        )
+        retry_time_budget_s = float(
+            kwargs.pop("retry_time_budget_s", _os.getenv("SCILLM_RETRY_TIME_BUDGET_S", "600"))
+        )
+        retry_base_s = float(
+            kwargs.pop("retry_base_s", _os.getenv("SCILLM_RETRY_BASE_S", "5"))
+        )
+        retry_max_s = float(
+            kwargs.pop("retry_max_s", _os.getenv("SCILLM_RETRY_MAX_S", "120"))
+        )
+        retry_jitter_pct = float(
+            kwargs.pop("retry_jitter_pct", _os.getenv("SCILLM_RETRY_JITTER_PCT", "0.25"))
+        )
+        honor_retry_after = bool(kwargs.pop("honor_retry_after", True))
+        on_attempt = kwargs.pop("on_attempt", None)
+        on_success = kwargs.pop("on_success", None)
+        on_giveup = kwargs.pop("on_giveup", None)
+        log_json = _os.getenv("SCILLM_LOG_JSON", "0") == "1"
+        _start_ts = time.time()
 
         ## ADD MODEL GROUP SIZE TO METADATA - used for model_group_rate_limit_error tracking
         _metadata: dict = kwargs.get("litellm_metadata", kwargs.get("metadata")) or {}
@@ -4522,7 +4550,7 @@ class Router:
                 if _retry_policy_retries is not None:
                     num_retries = _retry_policy_retries
             ## LOGGING
-            if num_retries > 0:
+            if num_retries > 0 or retry_enabled:
                 kwargs = self.log_retry(kwargs=kwargs, e=original_exception)
             else:
                 raise
@@ -4538,10 +4566,33 @@ class Router:
                 healthy_deployments=_healthy_deployments,
                 all_deployments=_all_deployments,
             )
+            # If provider supplies Retry-After and honor is enabled, sleep accordingly first
+            base_sleep = 0.0
+            if honor_retry_after and hasattr(original_exception, "response") and hasattr(original_exception.response, "headers"):
+                try:
+                    ra = original_exception.response.headers.get("Retry-After")  # type: ignore
+                    if ra is not None:
+                        base_sleep = min(float(ra), retry_max_s)
+                except Exception:
+                    base_sleep = 0.0
+            base_sleep = max(base_sleep, float(retry_after or 0)) if not retry_enabled else max(base_sleep, 0.0)
+            if base_sleep > 0:
+                if callable(on_attempt):
+                    try:
+                        on_attempt({
+                            "event": "429_retry",
+                            "model": kwargs.get("model"),
+                            "attempt_no": 0,
+                            "next_sleep_s": base_sleep,
+                            "reason": "429",
+                            "retry_after": base_sleep,
+                        })
+                    except Exception:
+                        pass
+                await asyncio.sleep(base_sleep)
 
-            await asyncio.sleep(retry_after)
-
-            for current_attempt in range(num_retries):
+            max_attempts = retry_max_attempts if retry_enabled else num_retries
+            for current_attempt in range(max_attempts):
                 try:
                     # if the function call is successful, no exception will be raised and we'll break out of the loop
                     response = await self.make_call(original_function, *args, **kwargs)
@@ -4555,12 +4606,21 @@ class Router:
                         attempted_retries=current_attempt + 1,
                         max_retries=num_retries,
                     )
+                    if callable(on_success):
+                        try:
+                            on_success({
+                                "latency_ms": int((time.time() - _start_ts) * 1000),
+                                "attempts": current_attempt + 1,
+                                "retries": current_attempt,
+                            })
+                        except Exception:
+                            pass
                     return response
 
                 except Exception as e:
                     ## LOGGING
                     kwargs = self.log_retry(kwargs=kwargs, e=e)
-                    remaining_retries = num_retries - current_attempt
+                    remaining_retries = max_attempts - current_attempt
                     _model: Optional[str] = kwargs.get("model")  # type: ignore
                     if _model is not None:
                         (
@@ -4572,19 +4632,112 @@ class Router:
                         )
                     else:
                         _healthy_deployments = []
-                    _timeout = self._time_to_sleep_before_retry(
-                        e=original_exception,
-                        remaining_retries=remaining_retries,
-                        num_retries=num_retries,
-                        healthy_deployments=_healthy_deployments,
-                        all_deployments=_all_deployments,
-                    )
+                    # Budget check before any additional delay
+                    elapsed = time.time() - _start_ts
+                    if retry_enabled and elapsed >= retry_time_budget_s:
+                        if callable(on_giveup):
+                            try:
+                                on_giveup({
+                                    "attempts": current_attempt + 1,
+                                    "elapsed_s": elapsed,
+                                    "last_error": str(e)[:200],
+                                })
+                            except Exception:
+                                pass
+                        if log_json:
+                            try:
+                                import json as _json
+                                print(_json.dumps({
+                                    "event": "429_giveup",
+                                    "model": kwargs.get("model"),
+                                    "attempts": current_attempt + 1,
+                                    "elapsed_s": round(elapsed, 3),
+                                    "error": str(e)[:200],
+                                }))
+                            except Exception:
+                                pass
+                        raise e
+
+                    # Compute sleep: Retry-After header wins if present and honor enabled; else exp backoff + jitter
+                    _timeout = 0.0
+                    headers = None
+                    if honor_retry_after and hasattr(e, "response") and hasattr(e.response, "headers"):
+                        headers = e.response.headers  # type: ignore
+                        try:
+                            ra = headers.get("Retry-After") if headers is not None else None
+                            if ra is not None:
+                                _timeout = float(ra)
+                        except Exception:
+                            _timeout = 0.0
+                    if _timeout <= 0:
+                        exp = min(retry_max_s, retry_base_s * (2 ** max(0, current_attempt)))
+                        jitter = exp * (retry_jitter_pct * _rand.random())
+                        _timeout = min(retry_max_s, exp + jitter)
+
+                    # Budget check including next sleep duration
+                    if retry_enabled and (elapsed + _timeout) > retry_time_budget_s:
+                        if callable(on_giveup):
+                            try:
+                                on_giveup({
+                                    "attempts": current_attempt + 1,
+                                    "elapsed_s": elapsed,
+                                    "last_error": str(e)[:200],
+                                })
+                            except Exception:
+                                pass
+                        if log_json:
+                            try:
+                                import json as _json
+                                print(_json.dumps({
+                                    "event": "429_giveup",
+                                    "model": kwargs.get("model"),
+                                    "attempts": current_attempt + 1,
+                                    "elapsed_s": round(elapsed, 3),
+                                    "error": str(e)[:200],
+                                }))
+                            except Exception:
+                                pass
+                        raise e
+
+                    if callable(on_attempt):
+                        try:
+                            on_attempt({
+                                "event": "429_retry",
+                                "model": kwargs.get("model"),
+                                "attempt_no": current_attempt + 1,
+                                "next_sleep_s": _timeout,
+                                "reason": getattr(e, "code", "429"),
+                                "retry_after": float(headers.get("Retry-After")) if headers and headers.get("Retry-After") else None,
+                            })
+                        except Exception:
+                            pass
                     await asyncio.sleep(_timeout)
 
             if type(original_exception) in litellm.LITELLM_EXCEPTION_TYPES:
                 setattr(original_exception, "max_retries", num_retries)
                 setattr(original_exception, "num_retries", current_attempt)
 
+            if callable(on_giveup):
+                try:
+                    on_giveup({
+                        "attempts": (current_attempt or 0) + 1,
+                        "elapsed_s": (time.time() - _start_ts),
+                        "last_error": str(original_exception)[:200],
+                    })
+                except Exception:
+                    pass
+            if log_json:
+                try:
+                    import json as _json
+                    print(_json.dumps({
+                        "event": "429_giveup",
+                        "model": kwargs.get("model"),
+                        "attempts": (current_attempt or 0) + 1,
+                        "elapsed_s": round(time.time() - _start_ts, 3),
+                        "error": str(original_exception)[:200],
+                    }))
+                except Exception:
+                    pass
             raise original_exception
 
     async def make_call(self, original_function: Any, *args, **kwargs):
