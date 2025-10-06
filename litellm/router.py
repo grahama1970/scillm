@@ -1670,6 +1670,22 @@ class Router:
                     "error_type": _err,
                     "provider": getattr(response, "custom_llm_provider", None),
                 })
+                # Optional retries meta: surface provider retry stats when requested
+                try:
+                    if os.getenv("SCILLM_RETRY_META") == "1":
+                        # If router.retries not already set, map provider-specific stats (e.g., codex_agent.retry_stats)
+                        if "retries" not in ak.get("router", {}):
+                            ca = (ak.get("codex_agent") or {})
+                            rstats = ca.get("retry_stats") if isinstance(ca, dict) else None
+                            if isinstance(rstats, dict):
+                                retries = {
+                                    "attempts": rstats.get("attempts"),
+                                    "total_sleep_ms": rstats.get("total_sleep_ms"),
+                                    "last_retry_after_s": rstats.get("last_retry_after_s"),
+                                }
+                                ak["router"]["retries"] = retries
+                except Exception:
+                    pass
                 response.additional_kwargs = ak
             except Exception:
                 pass
