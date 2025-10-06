@@ -1477,6 +1477,22 @@ class Router:
                 schema = kwargs.get("json_schema")
                 kwargs["response_format"] = {"type": "json_schema", "json_schema": schema}
 
+            # For JSON-oriented responses, enforce deterministic defaults if caller didn't set them
+            try:
+                _rf = kwargs.get("response_format")
+                if isinstance(_rf, dict) and _rf.get("type") in ("json_schema", "json_object"):
+                    if "temperature" not in kwargs or kwargs.get("temperature") is None:
+                        kwargs["temperature"] = 0
+                    if "top_p" not in kwargs or kwargs.get("top_p") is None:
+                        kwargs["top_p"] = 1
+                    # Optional penalties: only normalize if unspecified
+                    if kwargs.get("presence_penalty") is None:
+                        kwargs["presence_penalty"] = 0
+                    if kwargs.get("frequency_penalty") is None:
+                        kwargs["frequency_penalty"] = 0
+            except Exception:
+                pass
+
             kwargs["model"] = model
             kwargs["messages"] = messages
             kwargs["stream"] = stream
