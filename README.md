@@ -67,6 +67,20 @@ Fast local endpoint for agent workflows — no external gateway required.
 
 Docker option: `docker compose -f local/docker/compose.agents.yml up --build -d` exposes mini‑agent on `127.0.0.1:8788` and the codex sidecar on `127.0.0.1:8077`. Point `CODEX_AGENT_API_BASE` at the one you want (no `/v1`).
 
+codex‑agent base rule and endpoints
+- Set `CODEX_AGENT_API_BASE` WITHOUT `/v1`; the provider appends `/v1/chat/completions`.
+- Sidecar (8077) and mini‑agent (8788) expose:
+  - `GET /healthz`, `GET /v1/models` (stub), `POST /v1/chat/completions` (content is always a string).
+
+Optional Router mapping for judge
+```python
+from litellm import Router
+r = Router(model_list=[{"model_name":"gpt-5","litellm_params":{"model":"gpt-5","custom_llm_provider":"codex-agent","api_base":os.getenv("CODEX_AGENT_API_BASE"),"api_key":os.getenv("CODEX_AGENT_API_KEY")}}])
+```
+
+Retry metadata (429 backoff)
+- Set `SCILLM_RETRY_META=1` to stamp `additional_kwargs["router"]["retries"] = {attempts,total_sleep_s,last_retry_after_s}`.
+
 ## Rate Limiting & Retries (429)
 
 For long unattended runs that encounter provider 429s, SciLLM’s Router supports opt‑in retrier logic (Retry‑After awareness, exponential jitter backoff, budgets, callbacks). See docs/guide/RATE_LIMIT_RETRIES.md for env and per‑call examples.

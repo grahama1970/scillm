@@ -45,6 +45,18 @@ curl -sSf http://127.0.0.1:8788/healthz
 curl -sS -H 'content-type: application/json' \
   -d '{"model":"gpt-5","messages":[{"role":"user","content":"say hello"}]}' \
   http://127.0.0.1:8788/v1/chat/completions | jq -r '.choices[0].message.content'
+
+Also available (sidecar 8077):
+
+```bash
+docker compose -f local/docker/compose.agents.yml up --build -d codex-sidecar
+export CODEX_AGENT_API_BASE=http://127.0.0.1:8077   # no /v1
+curl -sSf http://127.0.0.1:8077/healthz
+curl -sS  http://127.0.0.1:8077/v1/models | jq .
+curl -sS -H 'content-type: application/json' \
+  -d '{"model":"gpt-5","messages":[{"role":"system","content":"Return STRICT JSON only: {"ok":true}"}]}' \
+  http://127.0.0.1:8077/v1/chat/completions | jq -r '.choices[0].message.content'
+```
 ```
 
 4) Router usage (copy/paste)
@@ -59,6 +71,13 @@ out = r.completion(
     response_format={"type":"json_object"}
 )
 print(out.choices[0].message["content"])  # OpenAI‑format
+
+Optional: one‑time model_list mapping for a cleaner judge call
+
+```python
+from litellm import Router
+r = Router(model_list=[{"model_name":"gpt-5","litellm_params":{"model":"gpt-5","custom_llm_provider":"codex-agent","api_base":os.getenv("CODEX_AGENT_API_BASE"),"api_key":os.getenv("CODEX_AGENT_API_KEY")}}])
+```
 ```
 
 Port busy? Run on another port (e.g., 8789) and set `CODEX_AGENT_API_BASE=http://127.0.0.1:8789`.
