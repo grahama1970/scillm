@@ -1529,6 +1529,16 @@ class Router:
                 # Drop unsupported OpenAI params for codex-agent echo/provider
                 try:
                     if str(kwargs.get("custom_llm_provider","")) == "codex-agent":
+                        # Ensure codex-agent provider is registered
+                        try:
+                            import litellm.llms.codex_agent  # noqa: F401
+                        except Exception:
+                            try:
+                                from litellm.llms.custom_llm import register_custom_provider
+                                from litellm.llms.codex_agent import CodexAgentLLM
+                                register_custom_provider("codex-agent", CodexAgentLLM)
+                            except Exception:
+                                pass
                         for k in ("top_p","presence_penalty","frequency_penalty"):
                             kwargs.pop(k, None)
                 except Exception:
