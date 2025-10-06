@@ -103,12 +103,13 @@ def get_llm_provider(  # noqa: PLR0915
     Return model, custom_llm_provider, dynamic_api_key, api_base
     """
     try:
-        # Fast-path: honor explicit ad-hoc custom providers (e.g., codex-agent)
-        if (custom_llm_provider or "").strip().lower() == "codex-agent":
+        # Fast-path: honor explicit ad-hoc custom providers that should not touch OpenAI client init
+        _clp = (custom_llm_provider or "").strip().lower()
+        if _clp in ("codex-agent",):
             # Normalize model to provider/model form for downstream paths
             if "/" not in model:
-                model = f"codex-agent/{model}"
-            return model.split("/",1)[1] if "/" in model else model, "codex-agent", api_key, api_base
+                model = f"{_clp}/{model}"
+            return model.split("/",1)[1] if "/" in model else model, _clp, api_key, api_base
         if litellm.LiteLLMProxyChatConfig._should_use_litellm_proxy_by_default(
             litellm_params=litellm_params
         ):
