@@ -426,7 +426,8 @@ async def acompletion(
         await _handle_mock_timeout_async(mock_timeout, timeout, model)
 
     loop = asyncio.get_event_loop()
-    custom_llm_provider = kwargs.get("custom_llm_provider", None)
+    # Bind local variable early to avoid UnboundLocalError in downstream branches
+    custom_llm_provider = kwargs.get("custom_llm_provider", custom_llm_provider if 'custom_llm_provider' in locals() else None)
 
     ## PROMPT MANAGEMENT HOOKS ##
     #########################################################
@@ -987,14 +988,25 @@ def completion(  # type: ignore # noqa: PLR0915
     tool_choice = validate_chat_completion_tool_choice(tool_choice=tool_choice)
     ######### unpacking kwargs #####################
     args = locals()
+    # Precedence: explicit base_url / api_key / custom_llm_provider override env
     api_base = kwargs.get("api_base", None)
+    if base_url and not api_base:
+        api_base = base_url
+        kwargs["api_base"] = base_url
+    if api_key:
+        kwargs["api_key"] = api_key
+    if kwargs.get("custom_llm_provider") is not None:
+        kwargs["custom_llm_provider"] = kwargs.get("custom_llm_provider")
     mock_response = kwargs.get("mock_response", None)
     mock_tool_calls = kwargs.get("mock_tool_calls", None)
     mock_timeout = cast(Optional[bool], kwargs.get("mock_timeout", None))
     force_timeout = kwargs.get("force_timeout", 600)  ## deprecated
     logger_fn = kwargs.get("logger_fn", None)
     verbose = kwargs.get("verbose", False)
-    custom_llm_provider = kwargs.get("custom_llm_provider", None)
+    # ensure local var bound before any usage downstream
+    # ensure local var bound before any reference below
+    if "custom_llm_provider" in kwargs and kwargs.get("custom_llm_provider") is not None:
+        custom_llm_provider = kwargs.get("custom_llm_provider")
     litellm_logging_obj = kwargs.get("litellm_logging_obj", None)
     id = kwargs.get("id", None)
     metadata = kwargs.get("metadata", None)
@@ -1005,6 +1017,17 @@ def completion(  # type: ignore # noqa: PLR0915
         Optional[ProviderSpecificHeader], kwargs.get("provider_specific_header", None)
     )
     headers = kwargs.get("headers", None) or extra_headers
+
+    # Normalize aliases for OpenAI-compatible and Ollama providers
+    try:
+        _prov = kwargs.get("custom_llm_provider") or custom_llm_provider
+        if isinstance(model, str) and isinstance(_prov, str):
+            if _prov.lower().startswith("openai") and model.startswith("openai/"):
+                model = model.split("/", 1)[1]
+            if _prov.lower() == "ollama" and model.startswith("ollama/"):
+                model = model.split("/", 1)[1]
+    except Exception:
+        pass
 
     ensure_alternating_roles: Optional[bool] = kwargs.get(
         "ensure_alternating_roles", None
