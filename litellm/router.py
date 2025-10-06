@@ -72,6 +72,33 @@ from litellm.router_utils.add_retry_fallback_headers import (
     add_fallback_headers_to_response,
     add_retry_headers_to_response,
 )
+
+# --- helpers ---------------------------------------------------------------
+def _router_is_empty_content(content: object) -> bool:
+    """Return True if assistant content is effectively empty.
+
+    Handles strings and OpenAI-style list parts (text/image_url).
+    """
+    try:
+        if content is None:
+            return True
+        if isinstance(content, str):
+            return content.strip() == ""
+        if isinstance(content, list):
+            for part in content:
+                if not isinstance(part, dict):
+                    # Unknown structure; treat as non-empty defensively
+                    return False
+                t = part.get("type")
+                if t == "text" and str(part.get("text", "")).strip():
+                    return False
+                if t == "image_url" and ((part.get("image_url") or {}).get("url")):
+                    return False
+            return True
+        return False
+    except Exception:
+        # On any parsing error, do not classify as empty
+        return False
 from litellm.router_utils.batch_utils import (
     _get_router_metadata_variable_name,
     replace_model_in_jsonl,
@@ -1530,7 +1557,7 @@ class Router:
             try:
                 ak = getattr(response, "additional_kwargs", {}) or {}
                 ak.setdefault("router", {})
-                # Basic error typing and provider stamp
+                # Basic error typing (string or list-based multimodal)
                 _content = None
                 try:
                     _content = (((response or {}).get("choices") or [{}])[0] or {}).get("message", {}).get("content")
@@ -1540,7 +1567,7 @@ class Router:
                     except Exception:
                         _content = None
                 _err = "ok"
-                if not (isinstance(_content, str) and _content.strip()):
+                if _router_is_empty_content(_content):
                     _err = "empty_content"
                 ak["router"].update({
                     "deterministic": self._deterministic,
