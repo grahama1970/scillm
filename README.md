@@ -49,6 +49,40 @@ LITELLM_ENABLE_CERTAINLY=1 CERTAINLY_BRIDGE_BASE=http://127.0.0.1:8787 \
   python scenarios/certainly_router_release.py
 ```
 
+## Warm‑ups in CI (Chutes/Runpod)
+
+Some OpenAI‑compatible providers benefit from a short daily warm‑up to avoid first‑token latency spikes. This fork ships skip‑friendly warm‑up scripts and a strict composite gate you can opt into. To enable strict warm‑ups in GitHub Actions, add a job step like:
+
+```yaml
+jobs:
+  readiness-live:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.11' }
+      - name: Install deps
+        run: pip install -U -r requirements.txt
+      - name: Live readiness (strict warm-ups)
+        env:
+          READINESS_LIVE: '1'
+          STRICT_READY: '1'
+          STRICT_WARMUPS: '1'
+          CHUTES_API_KEY: ${{ secrets.CHUTES_API_KEY }}
+          RUNPOD_API_KEY: ${{ secrets.RUNPOD_API_KEY }}
+        run: |
+          make project-ready-live
+```
+
+- Strict gate details are defined in `readiness.yml` as `chutes_warmup_strict`, `runpod_warmup_strict`, and `warmups_strict_all`. For a quick manual probe, you can also run:
+
+```bash
+python scenarios/provider_warmup_probe.py --provider chutes --model "$LITELLM_DEFAULT_MODEL"
+python scenarios/provider_warmup_probe.py --provider runpod --model "$LITELLM_DEFAULT_MODEL"
+```
+
+If `STRICT_WARMUPS` is not set, warm‑ups remain optional and will not fail the job.
+
 ## Why SciLLM
 
 SciLLM exists as an experimental playground for scientists, mathematicians, and engineers who need a reproducible, inspectable way to combine LLMs, program synthesis/evaluation, and theorem proving.
