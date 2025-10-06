@@ -4567,6 +4567,9 @@ class Router:
         on_giveup = kwargs.pop("on_giveup", None)
         log_json = _os.getenv("SCILLM_LOG_JSON", "0") == "1"
         _start_ts = time.time()
+        _retry_meta_enabled = _os.getenv("SCILLM_RETRY_META", "0") == "1"
+        _retry_total_sleep = 0.0
+        _retry_last_retry_after = None
 
         ## ADD MODEL GROUP SIZE TO METADATA - used for model_group_rate_limit_error tracking
         _metadata: dict = kwargs.get("litellm_metadata", kwargs.get("metadata")) or {}
@@ -4587,6 +4590,18 @@ class Router:
             response = add_retry_headers_to_response(
                 response=response, attempted_retries=0, max_retries=None
             )
+            # Attach retries meta (0 attempts) if enabled
+            try:
+                if _retry_meta_enabled:
+                    ak = getattr(response, "additional_kwargs", {}) or {}
+                    ak.setdefault("router", {})["retries"] = {
+                        "attempts": 0,
+                        "total_sleep_s": 0.0,
+                        "last_retry_after_s": None,
+                    }
+                    response.additional_kwargs = ak
+            except Exception:
+                pass
             return response
         except Exception as e:
             current_attempt = None
@@ -4688,6 +4703,10 @@ class Router:
                     except Exception:
                         pass
                 await asyncio.sleep(base_sleep)
+                try:
+                    _retry_total_sleep += float(base_sleep)
+                except Exception:
+                    pass
 
             max_attempts = retry_max_attempts if retry_enabled else num_retries
             cumulative_sleep = 0.0
@@ -4705,6 +4724,18 @@ class Router:
                         attempted_retries=current_attempt + 1,
                         max_retries=num_retries,
                     )
+                    # Stamp retry meta if enabled
+                    try:
+                        if _retry_meta_enabled:
+                            ak = getattr(response, "additional_kwargs", {}) or {}
+                            ak.setdefault("router", {})["retries"] = {
+                                "attempts": current_attempt + 1,
+                                "total_sleep_s": round(float(_retry_total_sleep), 6),
+                                "last_retry_after_s": _retry_last_retry_after,
+                            }
+                            response.additional_kwargs = ak
+                    except Exception:
+                        pass
                     if callable(on_success):
                         try:
                             on_success({
@@ -4769,6 +4800,10 @@ class Router:
                                 _timeout = float(ra)
                                 if _timeout <= 0:
                                     _timeout = 0.5
+                                try:
+                                    _retry_last_retry_after = float(_timeout)
+                                except Exception:
+                                    _retry_last_retry_after = None
                         except Exception:
                             _timeout = 0.0
                     if _timeout <= 0:
@@ -4839,6 +4874,10 @@ class Router:
                         except Exception:
                             pass
                     await asyncio.sleep(_timeout)
+                    try:
+                        _retry_total_sleep += float(_timeout)
+                    except Exception:
+                        pass
                     try:
                         cumulative_sleep
                     except NameError:
