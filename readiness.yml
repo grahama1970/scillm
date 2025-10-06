@@ -221,6 +221,54 @@ checks:
       echo "strict warmups passed"
     optional: false
 
+  - name: grounded_compare_smoke
+    description: Grounded QA compare (A/B + judge) small sample; skip-friendly if creds/models unset
+    run: |
+      set -e
+      # Skip if no provider credentials available
+      if [ -z "${OPENAI_API_KEY}" ] && [ -z "${CHUTES_API_KEY}" ] && [ -z "${RUNPOD_API_KEY}" ]; then
+        echo "skip: no provider credentials (OPENAI/CHUTES/RUNPOD)"; exit 0; fi
+      # Prepare tiny input
+      OUTDIR=local/artifacts/compare_ready
+      mkdir -p "$OUTDIR"
+      ITEMS="$OUTDIR/items.jsonl"
+      cat > "$ITEMS" <<'JSON'
+      {"id":"q1","question":"When did Voyager 1 launch?","evidence":[{"id":"e1","text":"Voyager 1 launched in 1977."}]}
+      {"id":"q2","question":"Who discovered penicillin?","evidence":[{"id":"e2","text":"Alexander Fleming discovered penicillin."}]}
+      JSON
+      # Resolve models (defaults are OpenAI family; override via env)
+      A_MODEL="${READINESS_COMPARE_MODELS_A:-openai/gpt-4o-mini}"
+      B_MODEL="${READINESS_COMPARE_MODELS_B:-openai/gpt-4o}"
+      J_MODEL="${READINESS_COMPARE_MODELS_JUDGE:-openai/gpt-4o-mini}"
+      python scripts/compare_grounded_qa.py --items "$ITEMS" --n 2 \
+        --model-a "$A_MODEL" --model-b "$B_MODEL" --judge-model "$J_MODEL" \
+        --out "$OUTDIR"
+      echo "grounded compare smoke completed"
+    optional: true
+
+  - name: grounded_compare_strict
+    description: Strict grounded compare gate (requires STRICT_COMPARE=1 and provider creds)
+    run: |
+      set -e
+      if [ "${STRICT_COMPARE}" != "1" ]; then echo "STRICT_COMPARE not set; passing"; exit 0; fi
+      if [ -z "${OPENAI_API_KEY}" ] && [ -z "${CHUTES_API_KEY}" ] && [ -z "${RUNPOD_API_KEY}" ]; then
+        echo "error: STRICT_COMPARE=1 but no provider credentials"; exit 1; fi
+      OUTDIR=local/artifacts/compare_ready_strict
+      mkdir -p "$OUTDIR"
+      ITEMS="$OUTDIR/items.jsonl"
+      cat > "$ITEMS" <<'JSON'
+      {"id":"q1","question":"When did Voyager 1 launch?","evidence":[{"id":"e1","text":"Voyager 1 launched in 1977."}]}
+      {"id":"q2","question":"Who discovered penicillin?","evidence":[{"id":"e2","text":"Alexander Fleming discovered penicillin."}]}
+      JSON
+      A_MODEL="${READINESS_COMPARE_MODELS_A:-openai/gpt-4o-mini}"
+      B_MODEL="${READINESS_COMPARE_MODELS_B:-openai/gpt-4o}"
+      J_MODEL="${READINESS_COMPARE_MODELS_JUDGE:-openai/gpt-4o-mini}"
+      python scripts/compare_grounded_qa.py --items "$ITEMS" --n 2 \
+        --model-a "$A_MODEL" --model-b "$B_MODEL" --judge-model "$J_MODEL" \
+        --out "$OUTDIR"
+      echo "strict grounded compare passed"
+    optional: false
+
 
   - name: all_smokes_core
     description: Core smoke suites (deterministic) — deprecated in favor of live scenarios
