@@ -8,6 +8,7 @@
 #  Thank you ! We ❤️ you! - Krrish & Ishaan
 
 import asyncio
+import os
 import copy
 import enum
 import hashlib
@@ -1529,6 +1530,18 @@ class Router:
             try:
                 ak = getattr(response, "additional_kwargs", {}) or {}
                 ak.setdefault("router", {})
+                # Basic error typing and provider stamp
+                _content = None
+                try:
+                    _content = (((response or {}).get("choices") or [{}])[0] or {}).get("message", {}).get("content")
+                except Exception:
+                    try:
+                        _content = response.choices[0].message.content  # type: ignore[attr-defined]
+                    except Exception:
+                        _content = None
+                _err = "ok"
+                if not (isinstance(_content, str) and _content.strip()):
+                    _err = "empty_content"
                 ak["router"].update({
                     "deterministic": self._deterministic,
                     "schema_mode": schema_mode,
@@ -1536,6 +1549,8 @@ class Router:
                     "json_valid": json_valid,
                     "parse_error": parse_error,
                     "timing_ms": int(_duration * 1000),
+                    "error_type": _err,
+                    "provider": getattr(response, "custom_llm_provider", None),
                 })
                 response.additional_kwargs = ak
             except Exception:
@@ -1877,6 +1892,21 @@ class Router:
         kwargs.setdefault(metadata_variable_name, {}).update(
             {"model_group": model, "model_group_alias": model_group_alias}
         )
+
+        # OpenAI-compatible Chutes env bridging for aliases like "openai/<org>/<model>"
+        try:
+            if isinstance(model, str) and model.startswith("openai/"):
+                if (os.getenv("CHUTES_PROVIDER", "").strip().lower() == "openai"):
+                    if not kwargs.get("api_base"):
+                        _ch_base = os.getenv("CHUTES_API_BASE") or os.getenv("CHUTES_BASE")
+                        if _ch_base:
+                            kwargs["api_base"] = _ch_base
+                    if not kwargs.get("api_key"):
+                        _ch_key = os.getenv("CHUTES_API_KEY") or os.getenv("CHUTES_API_TOKEN")
+                        if _ch_key:
+                            kwargs["api_key"] = _ch_key
+        except Exception:
+            pass
 
     def _update_kwargs_with_default_litellm_params(
         self, kwargs: dict, metadata_variable_name: Optional[str] = "metadata"

@@ -18,6 +18,29 @@ This file is a quick, practical map of SciLLM’s capabilities, what they do, an
 | Providers | Certainly (Lean4) | Lean4 bridge for formal proofs/checks | `completion(model="certainly", custom_llm_provider="certainly", api_base=..., items=...)` | litellm/llms/lean4.py |
 | Agent | mini‑agent (experimental) | Deterministic local tool‑use loop | `completion(model="mini-agent/...", custom_llm_provider="mini-agent")` | docs/my-website/docs/experimental/mini-agent.md |
 
+## codex‑agent — Exact Local Values (No Placeholders)
+
+- Start the mini‑agent shim (OpenAI‑compatible):
+  - `uvicorn litellm.experimental_mcp_client.mini_agent.agent_proxy:app --host 127.0.0.1 --port 8788`
+  - If `:8788` is busy, pick another (e.g., `8789`).
+- Environment (set before importing Router):
+  - `LITELLM_ENABLE_CODEX_AGENT=1`
+  - `CODEX_AGENT_API_BASE=http://127.0.0.1:8788`  (do NOT append `/v1` — the provider adds it)
+  - `CODEX_AGENT_API_KEY` (usually unset for local; set only if your gateway enforces auth)
+- Quick verify:
+  - Health: `curl -sSf http://127.0.0.1:8788/healthz`
+  - Chat: `curl -sS -H 'content-type: application/json' -d '{"model":"gpt-5","messages":[{"role":"user","content":"say hello"}]}' http://127.0.0.1:8788/v1/chat/completions | jq -r '.choices[0].message.content'`
+- Router usage (copy/paste):
+  - `export LITELLM_ENABLE_CODEX_AGENT=1`
+  - `export CODEX_AGENT_API_BASE=http://127.0.0.1:8788`
+  - Python:
+    - `from litellm import Router`
+    - `r = Router()`
+    - `out = r.completion(model="gpt-5", custom_llm_provider="codex-agent", messages=[{"role":"user","content":"Return STRICT JSON only: {\"ok\":true}"}], response_format={"type":"json_object"})`
+    - `print(out.choices[0].message["content"])`
+
+Tip: Using Docker? `docker compose -f local/docker/compose.agents.yml up --build -d` exposes the mini‑agent on `127.0.0.1:8788` and the codex sidecar on `127.0.0.1:8077`. For the Router provider, set `CODEX_AGENT_API_BASE` to the one you want (no `/v1`).
+
 ## Router (Batch‑Friendly)
 
 | Area | Feature | What It Does | How To Use | Files/Notes |
