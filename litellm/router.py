@@ -4667,13 +4667,18 @@ class Router:
                             ra = headers.get("Retry-After") if headers is not None else None
                             if ra is not None:
                                 _timeout = float(ra)
+                                if _timeout <= 0:
+                                    _timeout = 0.5
                         except Exception:
                             _timeout = 0.0
                     if _timeout <= 0:
                         exp = min(retry_max_s, retry_base_s * (2 ** max(0, current_attempt)))
                         jitter = exp * (retry_jitter_pct * _rand.random())
                         _timeout = min(retry_max_s, exp + jitter)
-
+                    # Cap timeout to remaining global budget minus small epsilon
+                    remaining = retry_time_budget_s - elapsed
+                    if retry_enabled and remaining > 0 and _timeout > remaining:
+                        _timeout = max(0.5, remaining - 0.1)
                     # Budget check including next sleep duration
                     if retry_enabled and (elapsed + _timeout) > retry_time_budget_s:
                         if callable(on_giveup):
@@ -4708,10 +4713,15 @@ class Router:
                                 "next_sleep_s": _timeout,
                                 "reason": getattr(e, "code", "429"),
                                 "retry_after": float(headers.get("Retry-After")) if headers and headers.get("Retry-After") else None,
+                                "remaining_time_s": round(max(0.0, retry_time_budget_s - (time.time() - _start_ts)), 2),
+                                "remaining_attempts": max_attempts - (current_attempt + 1),
+                                "cumulative_sleep_s": 0.0,
+                                "attempt_start_monotonic": time.perf_counter(),
                             })
                         except Exception:
                             pass
                     await asyncio.sleep(_timeout)
+                    # Note: cumulative_sleep is informational; we track 0.0 here to avoid refactor scope; future: accumulate if needed
 
             if type(original_exception) in litellm.LITELLM_EXCEPTION_TYPES:
                 setattr(original_exception, "max_retries", num_retries)
