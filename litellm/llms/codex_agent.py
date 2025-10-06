@@ -130,7 +130,7 @@ class CodexAgentLLM(CustomLLM):
         attempt = 0
         while True:
             try:
-                if isinstance(client, HTTPHandler):
+                if client is not None and hasattr(client, "post"):
                     r = client.post(
                         f"{base}/v1/chat/completions",
                         json=payload,
@@ -306,7 +306,7 @@ class CodexAgentLLM(CustomLLM):
         attempt = 0
         while True:
             try:
-                if isinstance(client, AsyncHTTPHandler):
+                if client is not None and hasattr(client, "post"):
                     r = await client.post(
                         f"{base}/v1/chat/completions",
                         json=payload,
@@ -323,6 +323,11 @@ class CodexAgentLLM(CustomLLM):
                     exp = min(base_ms * (2 ** (attempt - 1)), max_backoff_ms)
                     jitter = exp * ((0.05 + 0.10 * (rng.random() if rng else 0.5)))
                     sleep_ms = exp + jitter
+                    if metrics_enabled:
+                        try:
+                            retry_stats["statuses"].append(getattr(r, "status_code", None))
+                        except Exception:
+                            pass
                     if os.getenv("CODEX_AGENT_LOG_RETRIES", "0") == "1":
                         try:
                             print_verbose(f"[codex-agent][retry] {{\"attempt\":{attempt},\"status\":{getattr(r,'status_code',0)},\"sleep_ms\":{int(sleep_ms)} }}")

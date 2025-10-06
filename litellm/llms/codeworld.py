@@ -24,6 +24,7 @@ Env fallbacks:
 - CODEWORLD_TOKEN (Bearer token if server enforces auth)
 """
 import os
+import threading
 import time
 import asyncio
 from typing import Any, Dict, Optional, Union, Callable
@@ -92,6 +93,43 @@ class CodeWorldLLM(CustomLLM):
                     merged_args.setdefault("rollouts", 24)
                 if ("depth" not in args_block) and ("depth" not in optional_params):
                     merged_args.setdefault("depth", 5)
+        except Exception:
+            pass
+
+        # One-time warnings (thread-safe) for alias conflicts and seed mismatches
+        try:
+            _warn_once = getattr(self.__class__, "_SCILLM_CODEWORLD_WARN_ONCE", None)
+            if _warn_once is None:
+                self.__class__._SCILLM_CODEWORLD_WARN_ONCE = {"exploration": False, "seed_mismatch": False}  # type: ignore[attr-defined]
+                self.__class__._SCILLM_CODEWORLD_LOCK = threading.Lock()  # type: ignore[attr-defined]
+            lock = getattr(self.__class__, "_SCILLM_CODEWORLD_LOCK")  # type: ignore[attr-defined]
+            warn_once = getattr(self.__class__, "_SCILLM_CODEWORLD_WARN_ONCE")  # type: ignore[attr-defined]
+
+            # exploration_constant vs uct_c conflict detection
+            if "exploration_constant" in optional_params and "uct_c" in optional_params:
+                try:
+                    if float(optional_params["exploration_constant"]) != float(optional_params["uct_c"]):
+                        if not os.getenv("SCILLM_SUPPRESS_EXPLORATION_ALIAS_WARNING"):
+                            with lock:
+                                if not warn_once["exploration"]:
+                                    print("[codeworld][warn] exploration_constant and uct_c differ; using uct_c (canonical). Set SCILLM_SUPPRESS_EXPLORATION_ALIAS_WARNING=1 to suppress.")
+                                    warn_once["exploration"] = True
+                except Exception:
+                    pass
+
+            # Seed mismatch warning (per-request vs global)
+            if merged_args.get("strategy") == "mcts":
+                try:
+                    req_seed = merged_args.get("seed")
+                    global_seed = os.getenv("SCILLM_DETERMINISTIC_SEED")
+                    if req_seed is not None and global_seed is not None and str(req_seed) != str(global_seed):
+                        if not os.getenv("SCILLM_SUPPRESS_SEED_MISMATCH_WARNING"):
+                            with lock:
+                                if not warn_once["seed_mismatch"]:
+                                    print(f"[codeworld][warn] per-request seed ({req_seed}) differs from SCILLM_DETERMINISTIC_SEED ({global_seed}). Per-request wins.")
+                                    warn_once["seed_mismatch"] = True
+                except Exception:
+                    pass
         except Exception:
             pass
 
