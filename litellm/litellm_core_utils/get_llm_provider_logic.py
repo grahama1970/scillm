@@ -120,6 +120,15 @@ def get_llm_provider(  # noqa: PLR0915
             api_key = litellm_params.api_key
 
         dynamic_api_key = None
+
+        # Normalize OpenAI-compatible alias: "openai/<org>/<model>" → provider="openai", model="<org>/<model>"
+        try:
+            if model.startswith("openai/") and (custom_llm_provider in (None, "", "openai")):
+                _, remainder = model.split("/", 1)
+                model = remainder
+                custom_llm_provider = "openai"
+        except Exception:
+            pass
         # check if llm provider provided
         # AZURE AI-Studio Logic - Azure AI Studio supports AZURE/Cohere
         # If User passes azure/command-r-plus -> we should send it to cohere_chat/command-r-plus
