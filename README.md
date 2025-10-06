@@ -49,6 +49,10 @@ LITELLM_ENABLE_CERTAINLY=1 CERTAINLY_BRIDGE_BASE=http://127.0.0.1:8787 \
   python scenarios/certainly_router_release.py
 ```
 
+## Rate Limiting & Retries (429)
+
+For long unattended runs that encounter provider 429s, SciLLM’s Router supports opt‑in retrier logic (Retry‑After awareness, exponential jitter backoff, budgets, callbacks). See docs/guide/RATE_LIMIT_RETRIES.md for env and per‑call examples.
+
 ## Warm‑ups in CI (Chutes/Runpod)
 
 Some OpenAI‑compatible providers benefit from a short daily warm‑up to avoid first‑token latency spikes. This fork ships skip‑friendly warm‑up scripts and a strict composite gate you can opt into. To enable strict warm‑ups in GitHub Actions, add a job step like:
