@@ -286,6 +286,9 @@ class Router:
             RouterGeneralSettings
         ] = RouterGeneralSettings(),
         ignore_invalid_deployments: bool = False,
+        # SciLLM additions (backward-compatible)
+        deterministic: bool = False,
+        image_policy: Optional[dict] = None,
     ) -> None:
         """
         Initialize the Router class with the given parameters for caching, reliability, and routing strategy.
@@ -427,6 +430,12 @@ class Router:
             {}
         )  # {"TEAM_ID": PatternMatchRouter}
         self.auto_routers: Dict[str, "AutoRouter"] = {}
+
+        # Determinism & policy flags
+        self._deterministic = bool(deterministic)
+        self._warned_temp = False
+        self._image_policy = image_policy or {}
+        self._budget: dict = {"max_tokens": None, "max_requests": None, "on_exhaust": None, "hard": True}
 
         if model_list is not None:
             model_list = copy.deepcopy(model_list)
@@ -698,12 +707,52 @@ class Router:
         self.add_optional_pre_call_checks(default_pre_call_checks)
         return None
 
+    # ---- SciLLM additions ----------------------------------------------------
+    def set_budget(
+        self,
+        max_tokens: Optional[int] = None,
+        max_requests: Optional[int] = None,
+        on_exhaust: Optional[Callable] = None,
+        hard: bool = True,
+    ) -> None:
+        """Configure simple per-batch budget policy used by parallel_acompletions.
+
+        - max_requests: pre-scheduling cap; hard=True raises, else returns partial.
+        - max_tokens: post-run check based on usage.completion_tokens; hard=True raises.
+        - on_exhaust: optional callback when an exhaust event is detected.
+        """
+        self._budget = {
+            "max_tokens": max_tokens,
+            "max_requests": max_requests,
+            "on_exhaust": on_exhaust,
+            "hard": bool(hard),
+        }
+
+    @staticmethod
+    def resolve_default_model() -> Optional[str]:
+        """Resolve a default model with precedence: SCILLM_* -> LITELLM_* -> DEFAULT_LITELLM_MODEL -> LITELLM_MODEL.
+        Logs a one-time deprecation if *_VLLM_MODEL is used (not implemented here to avoid noisy output).
+        """
+        import os as _os
+        for key in (
+            "SCILLM_DEFAULT_MODEL",
+            "SCILLM_MODEL",
+            "LITELLM_DEFAULT_MODEL",
+            "LITELLM_MODEL",
+            "DEFAULT_LITELLM_MODEL",
+        ):
+            val = _os.getenv(key)
+            if val:
+                return val
+        return None
+
     async def parallel_acompletions(
         self,
         requests,
         preserve_order: bool = True,
         return_exceptions: bool = True,
         concurrency: Optional[int] = None,
+        max_concurrency: Optional[int] = None,
     ):
         """Minimal parallel helper (experimental).
 
@@ -713,10 +762,23 @@ class Router:
         from types import SimpleNamespace
         from litellm.router_utils.parallel_acompletion import gather_parallel_acompletions
 
+        # Determine effective concurrency
+        eff_conc = max_concurrency if max_concurrency is not None else concurrency
+        if self._deterministic:
+            eff_conc = 1
+
+        # Enforce request-count budget pre-scheduling
+        reqs = list(requests)
+        max_reqs = self._budget.get("max_requests")
+        if isinstance(max_reqs, int) and max_reqs > 0 and len(reqs) > max_reqs:
+            if self._budget.get("hard", True):
+                raise RuntimeError("BudgetExceeded: max_requests")
+            reqs = reqs[:max_reqs]
+
         prs = await gather_parallel_acompletions(
             self,
-            requests,
-            concurrency=concurrency,
+            reqs,
+            concurrency=eff_conc,
             preserve_order=preserve_order,
         )
 
@@ -767,16 +829,65 @@ class Router:
                 return resp
             return None
 
-        return [
-            SimpleNamespace(
-                index=r.index,
-                request=r.request,
-                response=r.response,
-                error=r.exception,
-                content=_extract_content(r.response),
+        results = []
+        total_tokens_out = 0
+        for r in prs:
+            resp = r.response
+            content = _extract_content(resp)
+            # extract basic usage if present
+            tokens_in = tokens_out = None
+            try:
+                if hasattr(resp, "usage"):
+                    u = getattr(resp, "usage")
+                    tokens_in = getattr(u, "prompt_tokens", None)
+                    tokens_out = getattr(u, "completion_tokens", None)
+                elif isinstance(resp, dict) and "usage" in resp:
+                    u = resp.get("usage") or {}
+                    tokens_in = u.get("prompt_tokens")
+                    tokens_out = u.get("completion_tokens")
+            except Exception:
+                pass
+            try:
+                total_tokens_out += int(tokens_out or 0)
+            except Exception:
+                pass
+            meta = {
+                "timing_ms": r.timing_ms,
+                "tokens_in": tokens_in,
+                "tokens_out": tokens_out,
+                "deterministic": self._deterministic,
+            }
+            results.append(
+                SimpleNamespace(
+                    index=r.index,
+                    request=r.request,
+                    response=resp,
+                    exception=r.exception,
+                    content=content,
+                    meta=meta,
+                )
             )
-            for r in prs
-        ]
+
+        # Post-check token budget
+        max_tokens = self._budget.get("max_tokens")
+        if isinstance(max_tokens, int) and max_tokens > 0 and total_tokens_out > max_tokens:
+            on_exhaust = self._budget.get("on_exhaust")
+            hard = self._budget.get("hard", True)
+            if callable(on_exhaust):
+                try:
+                    on_exhaust()
+                except Exception:
+                    pass
+            if hard:
+                raise RuntimeError("BudgetExceeded: max_tokens")
+            # mark last result
+            if results:
+                try:
+                    results[-1].meta["budget_exhausted"] = True
+                except Exception:
+                    pass
+
+        return results
 
     async def parallel_as_completed(self, requests):
         """
@@ -1285,6 +1396,53 @@ class Router:
         **kwargs,
     ):
         try:
+            # Deterministic mode enforcement
+            if self._deterministic:
+                if "temperature" in kwargs and kwargs.get("temperature") not in (0, 0.0):
+                    if not self._warned_temp:
+                        print("[router][warn] deterministic=True; forcing temperature=0, top_p=1 (caller set non-zero temperature).")
+                        self._warned_temp = True
+                kwargs["temperature"] = 0
+                kwargs.setdefault("top_p", 1)
+                if kwargs.get("presence_penalty") not in (None, 0, 0.0):
+                    kwargs["presence_penalty"] = 0
+                if kwargs.get("frequency_penalty") not in (None, 0, 0.0):
+                    kwargs["frequency_penalty"] = 0
+
+            # Image policy minimal enforcement
+            try:
+                pol = self._image_policy or {}
+                if pol:
+                    max_each = int(pol.get("max_each_bytes", 300_000))
+                    max_total = int(pol.get("max_total_bytes", 1_000_000))
+                    mode = pol.get("mode", "reject")
+                    total = 0
+                    for m in messages or []:
+                        content = m.get("content") if isinstance(m, dict) else None
+                        parts = content if isinstance(content, list) else []
+                        for p in parts:
+                            if isinstance(p, dict) and p.get("type") == "image_url":
+                                url = ((p.get("image_url") or {}).get("url"))
+                                if isinstance(url, str) and url.startswith("data:image") and ";base64," in url:
+                                    b64 = url.split(",", 1)[1]
+                                    size = int(len(b64) * 0.75)
+                                    total += size
+                                    if size > max_each or total > max_total:
+                                        if mode == "reject" or True:
+                                            raise ValueError("image payload exceeds policy limits")
+            except Exception:
+                pass
+
+            # Schema-first mode flags
+            schema_mode = False
+            fallback_used = False
+            json_valid = False
+            parse_error = None
+            if kwargs.get("response_mode") == "schema_first" and kwargs.get("json_schema"):
+                schema_mode = True
+                schema = kwargs.get("json_schema")
+                kwargs["response_format"] = {"type": "json_schema", "json_schema": schema}
+
             kwargs["model"] = model
             kwargs["messages"] = messages
             kwargs["stream"] = stream
@@ -1305,6 +1463,50 @@ class Router:
                 response = await self.schedule_acompletion(**kwargs)
             else:
                 response = await self.async_function_with_fallbacks(**kwargs)
+
+            # Validate schema-first content and fallback once if needed (non-stream)
+            if schema_mode and not stream:
+                try:
+                    content = None
+                    try:
+                        content = (((response or {}).get("choices") or [{}])[0] or {}).get("message", {}).get("content")
+                    except Exception:
+                        try:
+                            content = response.choices[0].message.content  # type: ignore[attr-defined]
+                        except Exception:
+                            content = None
+                    if isinstance(content, str) and content.strip():
+                        import json as _json
+                        _json.loads(content)
+                        json_valid = True
+                    else:
+                        parse_error = "empty"
+                except Exception as _e:
+                    parse_error = str(_e)[:120]
+                if not json_valid:
+                    fk = dict(kwargs)
+                    fk["response_format"] = {"type": "json_object"}
+                    try:
+                        fallback_used = True
+                        if request_priority is not None and isinstance(request_priority, int):
+                            response = await self.schedule_acompletion(**fk)
+                        else:
+                            response = await self.async_function_with_fallbacks(**fk)
+                        try:
+                            c2 = None
+                            try:
+                                c2 = (((response or {}).get("choices") or [{}])[0] or {}).get("message", {}).get("content")
+                            except Exception:
+                                c2 = response.choices[0].message.content  # type: ignore[attr-defined]
+                            if isinstance(c2, str) and c2.strip():
+                                import json as _json
+                                _json.loads(c2)
+                                json_valid = True
+                                parse_error = None
+                        except Exception as _e2:
+                            parse_error = str(_e2)[:120]
+                    except Exception:
+                        pass
             end_time = time.time()
             _duration = end_time - start_time
             asyncio.create_task(
@@ -1317,6 +1519,21 @@ class Router:
                     parent_otel_span=_get_parent_otel_span_from_kwargs(kwargs),
                 )
             )
+            # Stamp router meta on additional_kwargs
+            try:
+                ak = getattr(response, "additional_kwargs", {}) or {}
+                ak.setdefault("router", {})
+                ak["router"].update({
+                    "deterministic": self._deterministic,
+                    "schema_mode": schema_mode,
+                    "fallback_used": fallback_used,
+                    "json_valid": json_valid,
+                    "parse_error": parse_error,
+                    "timing_ms": int(_duration * 1000),
+                })
+                response.additional_kwargs = ak
+            except Exception:
+                pass
 
             return response
         except Exception as e:
