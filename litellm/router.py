@@ -857,16 +857,22 @@ class Router:
                 "tokens_out": tokens_out,
                 "deterministic": self._deterministic,
             }
-            results.append(
-                SimpleNamespace(
-                    index=r.index,
-                    request=r.request,
-                    response=resp,
-                    exception=r.exception,
-                    content=content,
-                    meta=meta,
-                )
-            )
+            # Return OpenAI-shaped dicts by default to match client expectations
+            def _to_openai_dict(x):
+                try:
+                    if isinstance(x, dict):
+                        return x
+                    # ModelResponse has json()/model_dump()
+                    if hasattr(x, "json"):
+                        return x.json()  # type: ignore
+                    if hasattr(x, "model_dump"):
+                        return x.model_dump()  # type: ignore
+                except Exception:
+                    pass
+                # best-effort fallback
+                return {"choices": [{"message": {"content": content}}]}
+
+            results.append(_to_openai_dict(resp))
 
         # Post-check token budget
         max_tokens = self._budget.get("max_tokens")
