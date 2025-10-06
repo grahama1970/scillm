@@ -1335,6 +1335,12 @@ class Router:
                 _explicit = False
             if _explicit:
                 import litellm as _litellm
+                try:
+                    if str(kwargs.get("custom_llm_provider","")) == "codex-agent":
+                        for k in ("top_p","presence_penalty","frequency_penalty"):
+                            kwargs.pop(k, None)
+                except Exception:
+                    pass
                 kwargs["original_function"] = _litellm.completion
             else:
                 kwargs["original_function"] = self._completion
@@ -1520,6 +1526,13 @@ class Router:
                 _explicit = False
             if _explicit:
                 import litellm as _litellm
+                # Drop unsupported OpenAI params for codex-agent echo/provider
+                try:
+                    if str(kwargs.get("custom_llm_provider","")) == "codex-agent":
+                        for k in ("top_p","presence_penalty","frequency_penalty"):
+                            kwargs.pop(k, None)
+                except Exception:
+                    pass
                 kwargs["original_function"] = _litellm.acompletion
             else:
                 kwargs["original_function"] = self._acompletion
