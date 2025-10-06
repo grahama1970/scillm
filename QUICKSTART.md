@@ -20,6 +20,49 @@ uv pip install -e .[dev]
 cp env.example .env  # optional, enables cached Lean/LiteLLM settings
 ```
 
+## Mini‑Agent & codex‑agent (OpenAI‑compatible) — 60‑sec local setup
+
+Use this if you want an OpenAI‑style endpoint for agent/router tests without any external gateway.
+
+1) Start the mini‑agent shim (default 127.0.0.1:8788)
+
+```bash
+uvicorn litellm.experimental_mcp_client.mini_agent.agent_proxy:app --host 127.0.0.1 --port 8788
+```
+
+2) Export env (before importing Router). Do NOT append `/v1` to the base.
+
+```bash
+export LITELLM_ENABLE_CODEX_AGENT=1
+export CODEX_AGENT_API_BASE=http://127.0.0.1:8788
+# export CODEX_AGENT_API_KEY=...   # usually unset for local
+```
+
+3) Quick verify
+
+```bash
+curl -sSf http://127.0.0.1:8788/healthz
+curl -sS -H 'content-type: application/json' \
+  -d '{"model":"gpt-5","messages":[{"role":"user","content":"say hello"}]}' \
+  http://127.0.0.1:8788/v1/chat/completions | jq -r '.choices[0].message.content'
+```
+
+4) Router usage (copy/paste)
+
+```python
+from litellm import Router
+r = Router()
+out = r.completion(
+    model="gpt-5",
+    custom_llm_provider="codex-agent",
+    messages=[{"role":"user","content":"Return STRICT JSON only: {\"ok\":true}"}],
+    response_format={"type":"json_object"}
+)
+print(out.choices[0].message["content"])  # OpenAI‑format
+```
+
+Port busy? Run on another port (e.g., 8789) and set `CODEX_AGENT_API_BASE=http://127.0.0.1:8789`.
+
 ## 2) Run release scenarios (fast confidence)
 
 ```bash
