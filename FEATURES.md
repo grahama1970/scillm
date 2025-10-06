@@ -48,6 +48,13 @@ codex‑agent base rule and endpoints
   - `GET /v1/models` (stub list)
   - `POST /v1/chat/completions` (OpenAI‑compatible; choices[0].message.content is a string)
 
+Auth & debug
+- Sidecar echo is enabled by default in `local/docker/compose.agents.yml` (`CODEX_SIDECAR_ECHO=1`). For real creds, disable echo and mount `${HOME}/.codex/auth.json:/root/.codex/auth.json:ro`, then run `python debug/check_codex_auth.py`.
+- Helpful probes:
+  - `python debug/verify_mini_agent.py` (Docker + optional local uvicorn)
+  - `python debug/verify_codex_agent_docker.py` (compose start optional; probes /healthz,/models,/chat)
+  - `python debug/codex_parallel_probe.py` (prints `content` + `scillm_router` for parallel echo)
+
 Router judge mapping (optional)
 - Per‑call (quickest):
   - `r.completion(model="gpt-5", custom_llm_provider="codex-agent", api_base=os.getenv("CODEX_AGENT_API_BASE"), api_key=os.getenv("CODEX_AGENT_API_KEY"), ...)`

@@ -59,6 +59,21 @@ curl -sS -H 'content-type: application/json' \
 ```
 ```
 
+Auth for codex‑agent sidecar (when echo is disabled)
+
+- The compose sets `CODEX_SIDECAR_ECHO=1` by default (no creds required). To run with real creds:
+  - Remove or set `CODEX_SIDECAR_ECHO: "0"` for codex‑sidecar in `local/docker/compose.agents.yml`.
+  - Mount your auth: `- ${HOME}/.codex/auth.json:/root/.codex/auth.json:ro`.
+  - Verify inside Docker: `python debug/check_codex_auth.py --container litellm-codex-agent`.
+
+Debug probes
+
+```bash
+python debug/verify_mini_agent.py           # mini‑agent /ready + /agent/run
+python debug/verify_codex_agent_docker.py   # sidecar /healthz + /v1 endpoints
+python debug/codex_parallel_probe.py        # Router.parallel_acompletions → codex‑agent echo
+```
+
 4) Router usage (copy/paste)
 
 ```python
