@@ -416,7 +416,24 @@ async def gather_parallel_acompletions(
             normalized = _to_openai_with_meta(resp, _dt, req)
             return ParallelResult(index=i, request=req, response=normalized, exception=None, timing_ms=_dt)
         except Exception as e:
-            return ParallelResult(index=i, request=req, response=None, exception=e, timing_ms=None)
+            # Emit helpful debug when requested
+            import os as _os, sys as _sys, traceback as _tb
+            if _os.getenv("SCILLM_DEBUG_PARALLEL") == "1":
+                try:
+                    print(f"[scillm][parallel] exception idx={i} model={getattr(req,'model',None)} provider={(getattr(req,'kwargs',{}) or {}).get('custom_llm_provider')} err={e}", file=_sys.stderr)
+                    _tb.print_exc()
+                except Exception:
+                    pass
+            # Return a normalized error-shaped dict so callers always see scillm_router
+            err_out = {
+                "choices": [{"message": {"content": None}}],
+                "scillm_router": {
+                    "error_type": "provider_error",
+                    "schema_mode": (getattr(req, 'kwargs', {}) or {}).get('response_mode'),
+                    "provider": (getattr(req, 'kwargs', {}) or {}).get('custom_llm_provider'),
+                },
+            }
+            return ParallelResult(index=i, request=req, response=err_out, exception=e, timing_ms=None)
 
     tasks = [asyncio.create_task(_do_one(i, r)) for i, r in enumerate(norm_reqs)]
     results = await asyncio.gather(*tasks, return_exceptions=False)

@@ -103,6 +103,12 @@ def get_llm_provider(  # noqa: PLR0915
     Return model, custom_llm_provider, dynamic_api_key, api_base
     """
     try:
+        # Fast-path: honor explicit ad-hoc custom providers (e.g., codex-agent)
+        if (custom_llm_provider or "").strip().lower() == "codex-agent":
+            # Normalize model to provider/model form for downstream paths
+            if "/" not in model:
+                model = f"codex-agent/{model}"
+            return model.split("/",1)[1] if "/" in model else model, "codex-agent", api_key, api_base
         if litellm.LiteLLMProxyChatConfig._should_use_litellm_proxy_by_default(
             litellm_params=litellm_params
         ):
@@ -174,6 +180,11 @@ def get_llm_provider(  # noqa: PLR0915
                 api_key=api_key,
                 dynamic_api_key=dynamic_api_key,
             )
+        # Recognize dynamically-registered custom providers (e.g., 'codex-agent')
+        elif model.split("/", 1)[0] in getattr(litellm, "_custom_providers", []):
+            custom_llm_provider = model.split("/", 1)[0]
+            model = model.split("/", 1)[1] if "/" in model else model
+            return model, custom_llm_provider, dynamic_api_key, api_base
         elif model.split("/", 1)[0] in litellm.provider_list:
             custom_llm_provider = model.split("/", 1)[0]
             model = model.split("/", 1)[1]

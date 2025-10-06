@@ -1334,14 +1334,32 @@ class Router:
             except Exception:
                 _explicit = False
             if _explicit:
+                if os.getenv("SCILLM_DEBUG_ADHOC") == "1":
+                    try:
+                        import sys
+                        print(f"[scillm][adhoc-sync] provider={kwargs.get('custom_llm_provider')} base={kwargs.get('api_base')} model={model}", file=sys.stderr)
+                    except Exception:
+                        pass
+                # Bypass Router fallback machinery entirely for explicit ad-hoc provider calls
                 import litellm as _litellm
                 try:
                     if str(kwargs.get("custom_llm_provider","")) == "codex-agent":
+                        # ensure provider registered and drop unsupported params
+                        try:
+                            import litellm.llms.codex_agent  # noqa: F401
+                        except Exception:
+                            try:
+                                from litellm.llms.custom_llm import register_custom_provider
+                                from litellm.llms.codex_agent import CodexAgentLLM
+                                register_custom_provider("codex-agent", CodexAgentLLM)
+                            except Exception:
+                                pass
                         for k in ("top_p","presence_penalty","frequency_penalty"):
                             kwargs.pop(k, None)
                 except Exception:
                     pass
-                kwargs["original_function"] = _litellm.completion
+                # Call litellm.completion directly to avoid Router model_list/health gating
+                return _litellm.completion(model=model, messages=messages, **kwargs)
             else:
                 kwargs["original_function"] = self._completion
             self._update_kwargs_before_fallbacks(model=model, kwargs=kwargs)
@@ -1525,11 +1543,16 @@ class Router:
             except Exception:
                 _explicit = False
             if _explicit:
+                if os.getenv("SCILLM_DEBUG_ADHOC") == "1":
+                    try:
+                        import sys
+                        print(f"[scillm][adhoc-async] provider={kwargs.get('custom_llm_provider')} base={kwargs.get('api_base')} model={model}", file=sys.stderr)
+                    except Exception:
+                        pass
+                # Bypass Router fallback machinery entirely for explicit ad-hoc provider calls
                 import litellm as _litellm
-                # Drop unsupported OpenAI params for codex-agent echo/provider
                 try:
                     if str(kwargs.get("custom_llm_provider","")) == "codex-agent":
-                        # Ensure codex-agent provider is registered
                         try:
                             import litellm.llms.codex_agent  # noqa: F401
                         except Exception:
@@ -1543,7 +1566,10 @@ class Router:
                             kwargs.pop(k, None)
                 except Exception:
                     pass
-                kwargs["original_function"] = _litellm.acompletion
+                # Avoid duplicate args; ensure we pass model/messages only once
+                kwargs.pop("model", None)
+                kwargs.pop("messages", None)
+                return await _litellm.acompletion(model=model, messages=messages, **kwargs)
             else:
                 kwargs["original_function"] = self._acompletion
 

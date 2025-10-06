@@ -72,6 +72,17 @@ codex‑agent base rule and endpoints
 - Sidecar (8077) and mini‑agent (8788) expose:
   - `GET /healthz`, `GET /v1/models` (stub), `POST /v1/chat/completions` (content is always a string).
 
+Auth for sidecar (non‑echo mode)
+- The compose file enables echo by default (`CODEX_SIDECAR_ECHO=1`). To use real credentials, disable echo and mount your auth file:
+  - Edit `local/docker/compose.agents.yml` codex‑sidecar service and remove `CODEX_SIDECAR_ECHO` or set to `"0"`.
+  - Mount your credentials: `- ${HOME}/.codex/auth.json:/root/.codex/auth.json:ro`.
+  - Verify: `python debug/check_codex_auth.py --container litellm-codex-agent` (exit 0 means present).
+
+Debug probes (copy/paste)
+- Mini‑agent: `python debug/verify_mini_agent.py` (use `--local` to spawn a local uvicorn on 8789)
+- Codex sidecar: `python debug/verify_codex_agent_docker.py` (adds `--start` to compose‑up)
+- Parallel Router → codex‑agent echo: `python debug/codex_parallel_probe.py` (prints `content` and `scillm_router`)
+
 Optional Router mapping for judge
 ```python
 from litellm import Router
