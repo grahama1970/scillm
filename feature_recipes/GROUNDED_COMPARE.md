@@ -23,6 +23,20 @@ python scripts/compare_grounded_qa.py \
 - `--judge-model`: judge model; returns `{supported_a, supported_b, better, confidence, rationale_short}`.
 - `--out`: output directory; script writes `results.jsonl` + `summary.json`.
 
+### Using codex‑agent provider
+
+To route through the codex‑agent provider (benefits: unified retries/logging; optional metrics), set `CODEX_AGENT_API_BASE` and optionally `CODEX_AGENT_API_KEY`, and pass flags:
+
+```bash
+export CODEX_AGENT_API_BASE=http://127.0.0.1:8788  # or your sidecar URL
+python scripts/compare_grounded_qa.py \
+  --items data/items.jsonl --n 25 \
+  --model-a "gpt-4o-mini" --use-codex-a \
+  --model-b "gpt-4o" --use-codex-b \
+  --judge-model "gpt-4o-mini" --use-codex-judge \
+  --out local/artifacts/compare
+```
+
 ## JSON Shapes
 
 - Model outputs (requested JSON):
@@ -60,4 +74,3 @@ python scripts/compare_grounded_qa.py \
 
 ## Determinism
 See [Determinism Policy](../docs/policies/DETERMINISM.md). This is a live scenario by design; keep tests/ deterministic.
-
