@@ -94,7 +94,20 @@ def _judge_messages(item: Dict[str, Any], out_a: Dict[str, Any], out_b: Dict[str
     ]
 
 
-def _call_json(model: str, messages: List[Dict[str, Any]], timeout: float) -> (Dict[str, Any], float):
+def _provider_kwargs(use_codex: bool) -> Dict[str, Any]:
+    if not use_codex:
+        return {}
+    base = os.getenv("CODEX_AGENT_API_BASE")
+    key = os.getenv("CODEX_AGENT_API_KEY")
+    kw: Dict[str, Any] = {"custom_llm_provider": "codex-agent"}
+    if base:
+        kw["api_base"] = base
+    if key:
+        kw["api_key"] = key
+    return kw
+
+
+def _call_json(model: str, messages: List[Dict[str, Any]], timeout: float, **extra) -> (Dict[str, Any], float):
     t0 = time.time()
     resp = litellm.completion(
         model=model,
@@ -103,6 +116,7 @@ def _call_json(model: str, messages: List[Dict[str, Any]], timeout: float) -> (D
         temperature=0,
         response_format={"type": "json_object"},
         max_tokens=256,
+        **extra,
     )
     dt = time.time() - t0
     content = None
@@ -139,6 +153,10 @@ def main() -> None:
     ap.add_argument("--judge-model", required=True)
     ap.add_argument("--timeout", type=float, default=60.0)
     ap.add_argument("--out", default="local/artifacts/compare")
+    # Optional: route via codex-agent provider for resilience/metrics
+    ap.add_argument("--use-codex-a", action="store_true")
+    ap.add_argument("--use-codex-b", action="store_true")
+    ap.add_argument("--use-codex-judge", action="store_true")
     args = ap.parse_args()
 
     items = _read_jsonl(args.items, args.n)
@@ -164,15 +182,21 @@ def main() -> None:
             q = it.get("question") or ""
             ev = it.get("evidence") or []
             msgs = _build_messages(q, ev)
-            out_a, dt_a = _call_json(args.model_a, msgs, args.timeout)
-            out_b, dt_b = _call_json(args.model_b, msgs, args.timeout)
+            out_a, dt_a = _call_json(
+                args.model_a, msgs, args.timeout, **_provider_kwargs(args.use_codex_a)
+            )
+            out_b, dt_b = _call_json(
+                args.model_b, msgs, args.timeout, **_provider_kwargs(args.use_codex_b)
+            )
             lat_a.append(dt_a)
             lat_b.append(dt_b)
             grounded_pass_a += 1 if bool(out_a.get("grounded")) else 0
             grounded_pass_b += 1 if bool(out_b.get("grounded")) else 0
 
             jmsgs = _judge_messages(it, out_a, out_b)
-            jres, dt_j = _call_json(args.judge_model, jmsgs, args.timeout)
+            jres, dt_j = _call_json(
+                args.judge_model, jmsgs, args.timeout, **_provider_kwargs(args.use_codex_judge)
+            )
             judge_supported_a += 1 if bool(jres.get("supported_a")) else 0
             judge_supported_b += 1 if bool(jres.get("supported_b")) else 0
 
@@ -225,4 +249,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
