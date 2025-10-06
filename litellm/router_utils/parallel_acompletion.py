@@ -70,6 +70,7 @@ class ParallelResult:
     request: RouterParallelRequest
     response: Any | None
     exception: Exception | None
+    timing_ms: Optional[int] = None
 
 
 # ----------------------------- Internal helpers -------------------------------
@@ -278,14 +279,17 @@ async def gather_parallel_acompletions(
 
     async def _do_one(i: int, req: RouterParallelRequest) -> ParallelResult:
         try:
+            import time as _t
+            _t0 = _t.perf_counter()
             if sem:
                 async with sem:
                     resp = await _acompletion_with_stream_aware_aggregation(router, req)
             else:
                 resp = await _acompletion_with_stream_aware_aggregation(router, req)
-            return ParallelResult(index=i, request=req, response=resp, exception=None)
+            _dt = int(((_t.perf_counter() - _t0) * 1000))
+            return ParallelResult(index=i, request=req, response=resp, exception=None, timing_ms=_dt)
         except Exception as e:
-            return ParallelResult(index=i, request=req, response=None, exception=e)
+            return ParallelResult(index=i, request=req, response=None, exception=e, timing_ms=None)
 
     tasks = [asyncio.create_task(_do_one(i, r)) for i, r in enumerate(norm_reqs)]
     results = await asyncio.gather(*tasks, return_exceptions=False)
