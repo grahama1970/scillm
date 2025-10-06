@@ -339,6 +339,24 @@ def _to_openai_with_meta(resp: Any, timing_ms: Optional[int], req: RouterParalle
     out.setdefault("scillm_router", {})
     if meta is not None:
         out["scillm_router"].update(meta)
+    # Optional: if retries meta requested and not present, map provider-specific stats
+    try:
+        import os as _os
+        if _os.getenv("SCILLM_RETRY_META") == "1":
+            # Only possible when resp is a ModelResponse-like with additional_kwargs
+            r_ak = getattr(resp, "additional_kwargs", {}) if hasattr(resp, "additional_kwargs") else {}
+            if isinstance(r_ak, dict):
+                if "retries" not in out.get("scillm_router", {}):
+                    ca = (r_ak.get("codex_agent") or {})
+                    rstats = ca.get("retry_stats") if isinstance(ca, dict) else None
+                    if isinstance(rstats, dict):
+                        out.setdefault("scillm_router", {})["retries"] = {
+                            "attempts": rstats.get("attempts"),
+                            "total_sleep_ms": rstats.get("total_sleep_ms"),
+                            "last_retry_after_s": rstats.get("last_retry_after_s"),
+                        }
+    except Exception:
+        pass
     # minimal classification when upstream meta was absent
     try:
         err = "ok"
