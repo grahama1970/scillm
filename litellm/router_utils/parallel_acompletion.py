@@ -425,12 +425,15 @@ async def gather_parallel_acompletions(
                 except Exception:
                     pass
             # Return a normalized error-shaped dict so callers always see scillm_router
+            # Use empty string for content (OpenAI compat), include exception summary and timing_ms=None.
             err_out = {
-                "choices": [{"message": {"content": None}}],
+                "choices": [{"message": {"content": ""}}],
                 "scillm_router": {
                     "error_type": "provider_error",
                     "schema_mode": (getattr(req, 'kwargs', {}) or {}).get('response_mode'),
                     "provider": (getattr(req, 'kwargs', {}) or {}).get('custom_llm_provider'),
+                    "exception": (str(e)[:200] if e else "unknown"),
+                    "timing_ms": None,
                 },
             }
             return ParallelResult(index=i, request=req, response=err_out, exception=e, timing_ms=None)
