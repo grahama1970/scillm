@@ -87,6 +87,7 @@ build-backend = "hatchling.build"
 include = [
   "litellm/**",
   "litellm/py.typed",
+  "scillm/**",
 ]
 
 [dependency-groups]
