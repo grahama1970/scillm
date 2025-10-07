@@ -40,6 +40,13 @@ services:
       - "8887:8887"
     depends_on:
       - redis
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://127.0.0.1:8887/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 10s
     security_opt:
       - no-new-privileges:true
 
@@ -56,6 +63,13 @@ services:
       - "8787:8787"
     volumes:
       []
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://127.0.0.1:8787/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 10s
 
   scillm-proxy:
     build:
