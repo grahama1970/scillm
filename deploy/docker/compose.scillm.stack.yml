@@ -3,8 +3,9 @@ services:
     image: arangodb:3.11
     environment:
       - ARANGO_ROOT_PASSWORD=root
-    ports:
-      - "8529:8529"
+    # Internal only to avoid host port conflicts
+    # ports:
+    #   - "8529:8529"
     healthcheck:
       test: ["CMD", "curl", "-f", "http://127.0.0.1:8529/_api/version"]
       interval: 10s
@@ -13,13 +14,15 @@ services:
 
   redis:
     image: redis:7-alpine
-    ports:
-      - "6379:6379"
+    # Internal only to avoid host port conflicts
+    # ports:
+    #   - "6379:6379"
 
   ollama:
     image: ollama/ollama:latest
-    ports:
-      - "11434:11434"
+    # Internal only to avoid host port conflicts
+    # ports:
+    #   - "11434:11434"
     volumes:
       - ollama_models:/root/.ollama
 
@@ -47,6 +50,8 @@ services:
     command: ["sh","-lc","PYTHONPATH=src uvicorn lean4_prover.bridge.server:app --host 0.0.0.0 --port 8787"]
     environment:
       - LEAN4_BRIDGE_TIMEOUT_SECONDS=300
+      - LEAN4_REPO=/app
+      - CERTAINLY_REPO=/app
     ports:
       - "8787:8787"
     volumes:
@@ -71,4 +76,3 @@ services:
 
 volumes:
   ollama_models: {}
-
