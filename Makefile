@@ -270,3 +270,32 @@ dump-readiness-env:
 	READINESS_LIVE=1 STRICT_READY=1 \
 
 	@python scripts/print_ready_summary.py
+# Bridges: CodeWorld & Lean4
+STACK_COMPOSE ?= deploy/docker/compose.scillm.stack.yml
+
+.PHONY: bridge-up bridge-down bridge-restart bridge-watch codeworld-smoke lean4-smoke codex-regression
+
+bridge-up:
+	@docker compose -f $(STACK_COMPOSE) up -d codeworld-bridge lean4-bridge
+	@echo "Bridges started. Health:"
+	@curl -sSf http://127.0.0.1:8887/healthz || true
+	@curl -sSf http://127.0.0.1:8787/healthz || true
+
+bridge-down:
+	@docker compose -f $(STACK_COMPOSE) rm -sf codeworld-bridge lean4-bridge || true
+
+bridge-restart:
+	@$(MAKE) bridge-down || true
+	@$(MAKE) bridge-up
+
+bridge-watch:
+	@python scripts/watch_bridges.py --loop 30
+
+codeworld-smoke:
+	@PYTHONPATH=$(PWD) python scenarios/codeworld_bridge_release.py
+
+lean4-smoke:
+	@PYTHONPATH=$(PWD) LEAN4_BRIDGE_ECHO?=1 python scenarios/lean4_bridge_release.py
+
+codex-regression:
+	@python scenarios/codex_agent_regression_check.py
