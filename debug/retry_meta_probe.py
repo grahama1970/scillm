@@ -16,7 +16,7 @@ async def main() -> int:
     r = Router(deterministic=True)
     resp = await r.acompletion(
         model="gpt-5",
-        messages=[{"role": "user", "content": "Return STRICT JSON only: {\\"ok\\": true}"}],
+        messages=[{"role": "user", "content": "Return STRICT JSON only: {\\\"ok\\\": true}"}],
         custom_llm_provider="codex-agent",
         api_base=os.getenv("CODEX_AGENT_API_BASE", "http://127.0.0.1:8077"),
         api_key=os.getenv("CODEX_AGENT_API_KEY", ""),
@@ -34,4 +34,3 @@ async def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(asyncio.run(main()))
-

@@ -20,8 +20,11 @@ import signal
 import sys
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from statistics import mean
 from typing import AsyncIterator, Dict, List, Optional, Tuple
+
+import shutil
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -45,8 +48,64 @@ class _Settings:
     log_level: str
 
     @staticmethod
+    def _resolve_codex_cmd() -> List[str]:
+        """Resolve the Codex CLI command, preferring CODEX_CMD when set.
+
+        Falls back to common installation paths (cxplus symlink, repo dist build,
+        global codex). Raises RuntimeError when no candidate is executable so the
+        sidecar fails fast with a meaningful error instead of surfacing opaque
+        FileNotFoundError traces at request time.
+        """
+
+        raw_candidates: List[str] = []
+        env_spec = os.getenv("CODEX_CMD")
+        if env_spec:
+            raw_candidates.append(env_spec)
+
+        home = Path.home()
+        fallback_bases = [
+            home / "workspace" / "experiments" / "codex" / "dist" / "bin" / "codex",
+            home / ".local" / "bin" / "cxplus",
+            home / ".local" / "bin" / "codex",
+            "cxplus",
+            "codex",
+        ]
+        for base in fallback_bases:
+            raw_candidates.append(f"{base} exec --json")
+
+        seen: set[str] = set()
+        for spec in raw_candidates:
+            if not spec:
+                continue
+            expanded = os.path.expanduser(spec.strip())
+            if not expanded or expanded in seen:
+                continue
+            seen.add(expanded)
+            try:
+                parts = shlex.split(expanded)
+            except ValueError:
+                continue
+            if not parts:
+                continue
+            head = parts[0]
+            if os.path.isabs(head):
+                if Path(head).exists():
+                    return parts
+            else:
+                if shutil.which(head):
+                    return parts
+        raise RuntimeError(
+            "Codex CLI not found. Set CODEX_CMD to a working codex exec command "
+            "or install codex/cxplus so it is on PATH."
+        )
+
+    @staticmethod
     def load() -> "_Settings":
-        codex_cmd_str = os.getenv("CODEX_CMD", "codex exec --json --stream")
+        try:
+            codex_cmd = _Settings._resolve_codex_cmd()
+        except RuntimeError as exc:  # pragma: no cover - configuration error
+            raise RuntimeError(str(exc))
+
         input_mode = os.getenv("CODEX_INPUT_MODE", "prompt").strip().lower()
         prompt_flag = os.getenv("CODEX_PROMPT_FLAG", "--prompt")
         max_concurrency = int(os.getenv("MAX_CONCURRENCY", "4"))
@@ -55,7 +114,7 @@ class _Settings:
         retries = int(os.getenv("RETRIES", "1"))
         log_level = os.getenv("LOG_LEVEL", "info").lower()
         return _Settings(
-            codex_cmd=shlex.split(codex_cmd_str),
+            codex_cmd=codex_cmd,
             input_mode=input_mode,
             prompt_flag=prompt_flag,
             max_concurrency=max_concurrency,
@@ -118,23 +177,6 @@ async def _kill_process_tree(proc: asyncio.subprocess.Process) -> None:
         _vlog("kill error", exc)
 
 
-async def _read_stream_lines(
-    stream: asyncio.StreamReader, idle_timeout: float
-) -> AsyncIterator[str]:
-    while True:
-        try:
-            raw = await asyncio.wait_for(stream.readline(), timeout=idle_timeout)
-        except asyncio.TimeoutError as exc:
-            raise TimeoutError(f"No output for {idle_timeout}s") from exc
-        if not raw:
-            break
-        try:
-            line = raw.decode("utf-8", errors="ignore")
-        except Exception:
-            line = raw.decode("utf-8", errors="ignore") if isinstance(raw, (bytes, bytearray)) else str(raw)
-        yield line.rstrip("\r\n")
-
-
 async def _run_codex_once(
     prompt: str,
     model: str,
@@ -169,6 +211,17 @@ async def _run_codex_once(
         creationflags=creationflags,
     )
 
+    # Large Codex responses can exceed asyncio's default 64 KiB read limit and
+    # trigger "Separator is not found" errors.  Increase the per-stream limit so
+    # long JSON payloads are handled without tripping the guard rails.
+    try:
+        if proc.stdout is not None and getattr(proc.stdout, "_limit", None):
+            proc.stdout._limit = max(proc.stdout._limit, 2_000_000)  # ~2 MiB
+        if proc.stderr is not None and getattr(proc.stderr, "_limit", None):
+            proc.stderr._limit = max(proc.stderr._limit, 2_000_000)
+    except Exception:  # pragma: no cover - best effort only
+        pass
+
     async def _writer() -> None:
         if stdin_data is not None and proc.stdin:
             try:
@@ -183,17 +236,32 @@ async def _run_codex_once(
                 pass
 
     async def _reader() -> Tuple[str, str]:
-        stdout_chunks: List[str] = []
-        stderr_chunks: List[str] = []
         try:
-            async for line in _read_stream_lines(proc.stdout, idle_timeout_s):
-                stdout_chunks.append(line)
-            async for line in _read_stream_lines(proc.stderr, idle_timeout_s):
-                stderr_chunks.append(line)
-        except TimeoutError as exc:
+            stdout_task = asyncio.create_task(proc.stdout.read()) if proc.stdout else None
+            stderr_task = asyncio.create_task(proc.stderr.read()) if proc.stderr else None
+            tasks = [t for t in (stdout_task, stderr_task) if t is not None]
+            if not tasks:
+                return "", ""
+            done, pending = await asyncio.wait(
+                tasks,
+                timeout=abs_timeout_s,
+                return_when=asyncio.ALL_COMPLETED,
+            )
+            if pending:
+                for p in pending:
+                    p.cancel()
+                await _kill_process_tree(proc)
+                raise TimeoutError(f"No output before {abs_timeout_s}s timeout")
+            stdout_bytes = stdout_task.result() if stdout_task else b""
+            stderr_bytes = stderr_task.result() if stderr_task else b""
+        except TimeoutError:
+            raise
+        except Exception as exc:
             await _kill_process_tree(proc)
             raise exc
-        return "\n".join(stdout_chunks), "\n".join(stderr_chunks)
+        stdout_text = stdout_bytes.decode("utf-8", errors="ignore") if isinstance(stdout_bytes, (bytes, bytearray)) else str(stdout_bytes or "")
+        stderr_text = stderr_bytes.decode("utf-8", errors="ignore") if isinstance(stderr_bytes, (bytes, bytearray)) else str(stderr_bytes or "")
+        return stdout_text, stderr_text
 
     try:
         writer_task = asyncio.create_task(_writer())
@@ -235,6 +303,48 @@ def _is_transient_exit(code: int) -> bool:
 
 
 _SEM = asyncio.Semaphore(SETTINGS.max_concurrency)
+
+
+def _extract_codex_content(raw: str) -> str:
+    """Extract the assistant message from Codex CLI JSONL output."""
+
+    stripped = raw.strip()
+    if not stripped:
+        return stripped
+    lines = [line for line in stripped.splitlines() if line.strip()]
+    parsed = []
+    for line in lines:
+        try:
+            parsed.append(json.loads(line))
+        except json.JSONDecodeError:
+            # fall back to raw payload if any line is not JSON
+            return stripped
+
+    reasoning_chunks: List[str] = []
+    messages: List[str] = []
+    for entry in parsed:
+        if not isinstance(entry, dict):
+            continue
+        if entry.get("type") != "item.completed":
+            continue
+        item = entry.get("item") or {}
+        if not isinstance(item, dict):
+            continue
+        text = item.get("text")
+        if not isinstance(text, str) or not text.strip():
+            continue
+        if item.get("type") == "reasoning":
+            reasoning_chunks.append(text.strip())
+        elif item.get("type") == "agent_message":
+            messages.append(text.strip())
+
+    if messages:
+        if reasoning_chunks:
+            return "\n\n".join(reasoning_chunks + [messages[-1]]).strip()
+        return messages[-1]
+    if reasoning_chunks:
+        return "\n\n".join(reasoning_chunks).strip()
+    return stripped
 
 
 # ---------------------------------------------------------------------------
@@ -320,7 +430,8 @@ async def chat_completions(req: ChatCompletionRequest, request: Request):
                             await asyncio.sleep(min(1.0 * attempt, 3.0))
                             continue
                         raise ProcessError(code, stderr_text)
-                    content = stdout_text.strip()
+                    _vlog(f"codex stdout chars={len(stdout_text)} stderr chars={len(stderr_text)}")
+                    content = _extract_codex_content(stdout_text)
                     body = {
                         "id": "chatcmpl-sidecar",
                         "object": "chat.completion",
@@ -344,6 +455,15 @@ async def chat_completions(req: ChatCompletionRequest, request: Request):
                     raise HTTPException(status_code=504, detail=f"Timeout: {last_err}")
                 except ProcessError as exc:
                     raise HTTPException(status_code=502, detail=f"Codex error ({exc.code}): {exc.stderr[:800]}")
+                except FileNotFoundError as exc:  # pragma: no cover - guard
+                    raise HTTPException(
+                        status_code=500,
+                        detail=(
+                            "Codex CLI not found (attempted: "
+                            + " ".join(shlex.quote(part) for part in SETTINGS.codex_cmd)
+                            + "). Set CODEX_CMD to an executable codex/cxplus binary."
+                        ),
+                    ) from exc
                 except Exception as exc:  # noqa: BLE001
                     last_err = str(exc)
                     # If echo mode requested or Codex CLI missing, return a benign shim response
