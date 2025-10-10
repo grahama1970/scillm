@@ -103,6 +103,13 @@ def get_llm_provider(  # noqa: PLR0915
     Return model, custom_llm_provider, dynamic_api_key, api_base
     """
     try:
+        # Fast-path: honor explicit ad-hoc custom providers that should not touch OpenAI client init
+        _clp = (custom_llm_provider or "").strip().lower()
+        if _clp in ("codex-agent",):
+            # Normalize model to provider/model form for downstream paths
+            if "/" not in model:
+                model = f"{_clp}/{model}"
+            return model.split("/",1)[1] if "/" in model else model, _clp, api_key, api_base
         if litellm.LiteLLMProxyChatConfig._should_use_litellm_proxy_by_default(
             litellm_params=litellm_params
         ):
@@ -120,6 +127,15 @@ def get_llm_provider(  # noqa: PLR0915
             api_key = litellm_params.api_key
 
         dynamic_api_key = None
+
+        # Normalize OpenAI-compatible alias: "openai/<org>/<model>" → provider="openai", model="<org>/<model>"
+        try:
+            if model.startswith("openai/") and (custom_llm_provider in (None, "", "openai")):
+                _, remainder = model.split("/", 1)
+                model = remainder
+                custom_llm_provider = "openai"
+        except Exception:
+            pass
         # check if llm provider provided
         # AZURE AI-Studio Logic - Azure AI Studio supports AZURE/Cohere
         # If User passes azure/command-r-plus -> we should send it to cohere_chat/command-r-plus
@@ -142,6 +158,12 @@ def get_llm_provider(  # noqa: PLR0915
         ):  # handle scenario where model="azure/*" and custom_llm_provider="azure"
             model = custom_llm_provider + "/" + model
 
+        if custom_llm_provider and "/" not in model:
+            # Allow callers to pass bare provider names (e.g., "mini-agent")
+            # and still route through the custom provider logic without
+            # triggering index errors below.
+            model = f"{custom_llm_provider}/{model}"
+
         if api_key and api_key.startswith("os.environ/"):
             dynamic_api_key = get_secret_str(api_key)
         # check if llm provider part of model name
@@ -149,6 +171,7 @@ def get_llm_provider(  # noqa: PLR0915
         if (
             model.split("/", 1)[0] in litellm.provider_list
             and model.split("/", 1)[0] not in litellm.model_list_set
+            and model.split("/", 1)[0] not in getattr(litellm, "_custom_providers", [])
             and len(model.split("/"))
             > 1  # handle edge case where user passes in `litellm --model mistral` https://github.com/BerriAI/litellm/issues/1351
         ):
@@ -158,6 +181,11 @@ def get_llm_provider(  # noqa: PLR0915
                 api_key=api_key,
                 dynamic_api_key=dynamic_api_key,
             )
+        # Recognize dynamically-registered custom providers (e.g., 'codex-agent')
+        elif model.split("/", 1)[0] in getattr(litellm, "_custom_providers", []):
+            custom_llm_provider = model.split("/", 1)[0]
+            model = model.split("/", 1)[1] if "/" in model else model
+            return model, custom_llm_provider, dynamic_api_key, api_base
         elif model.split("/", 1)[0] in litellm.provider_list:
             custom_llm_provider = model.split("/", 1)[0]
             model = model.split("/", 1)[1]
@@ -773,6 +801,21 @@ def _get_openai_compatible_provider_info(  # noqa: PLR0915
             dynamic_api_key,
         ) = litellm.AIMLChatConfig()._get_openai_compatible_provider_info(
             api_base, api_key
+        )
+    elif custom_llm_provider == "chutes":
+        # Chutes is OpenAI-compatible. Resolve base/key from env if not explicitly provided.
+        # Environment variable support:
+        # - CHUTES_API_BASE or CHUTES_BASE for base URL
+        # - CHUTES_API_KEY or CHUTES_API_TOKEN for auth
+        api_base = (
+            api_base
+            or get_secret("CHUTES_API_BASE")
+            or get_secret("CHUTES_BASE")
+        )  # type: ignore
+        dynamic_api_key = (
+            api_key
+            or get_secret_str("CHUTES_API_KEY")
+            or get_secret_str("CHUTES_API_TOKEN")
         )
 
     if api_base is not None and not isinstance(api_base, str):

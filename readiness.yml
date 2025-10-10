@@ -1,0 +1,263 @@
+checks:
+  - name: deterministic_local
+    description: Deterministic Local (agent core, response utils)
+    run: |
+      PYTHONPATH=$(pwd) pytest -q \
+        tests/local_testing/test_agent_local_finalize.py \
+        tests/local_testing/test_http_tools_invoker.py \
+        tests/local_testing/test_response_utils.py -q
+
+  - name: mini_agent_e2e_low
+    description: Mini-Agent E2E (local shim)
+    run: |
+      PYTHONPATH=$(pwd) python scenarios/mini_agent_http_release.py
+    env:
+      MINI_AGENT_API_HOST: 127.0.0.1
+      MINI_AGENT_API_PORT: "8788"
+    optional: true
+
+  - name: codex_agent_router_shim
+    description: codex-agent via Router (shim)
+    run: |
+      python - <<'PY'
+      import os, socket, threading, json, time
+      from http.server import BaseHTTPRequestHandler, HTTPServer
+      # inline stub server to avoid port collisions
+      s=socket.socket(); s.bind(('127.0.0.1',0)); port=s.getsockname()[1]; s.close()
+      class H(BaseHTTPRequestHandler):
+        def do_POST(self):
+          if not (self.path.endswith('/chat/completions')):
+            self.send_response(404); self.end_headers(); return
+          _ = self.rfile.read(int(self.headers.get('content-length','0') or '0'))
+          self.send_response(200)
+          self.send_header('Content-Type','application/json')
+          self.end_headers()
+          body={'choices':[{'message':{'content':'hello from codex-agent stub'}}]}
+          self.wfile.write(json.dumps(body).encode('utf-8'))
+      server=HTTPServer(('127.0.0.1',port), H)
+      t=threading.Thread(target=server.serve_forever, daemon=True); t.start()
+      # gate env before importing litellm
+      os.environ.setdefault('LITELLM_ENABLE_CODEX_AGENT','1')
+      os.environ['CODEX_AGENT_API_BASE']=f'http://127.0.0.1:{port}'
+      from litellm import Router
+      r = Router(model_list=[{
+        'model_name':'codex-agent-1','litellm_params':{
+          'model':'gpt-5',
+          'custom_llm_provider':'custom_openai',
+          'api_base':os.getenv('CODEX_AGENT_API_BASE'),
+          'api_key':os.getenv('CODEX_AGENT_API_KEY','sk-stub')
+        }
+      }])
+      out = r.completion(model='codex-agent-1', messages=[{'role':'user','content':'Say hello and finish.'}])
+      content = getattr(getattr(out.choices[0],'message',{}),'content','')
+      assert isinstance(content,str) and content.strip()
+      PY
+
+  # (removed docker_smokes; prefer explicit docker scenarios invoked by developers)
+
+  # Expanded ND smokes (must pass under strict readiness)
+  - name: mini_agent_api_live_minimal
+    description: Mini-Agent API reachability + invariants (live-ish, shim guarded)
+    run: |
+      PYTHONPATH=$(pwd) python scenarios/mini_agent_live.py
+    env:
+      LITELLM_ENABLE_MINI_AGENT: "1"
+      MINI_AGENT_API_HOST: 127.0.0.1
+      MINI_AGENT_API_PORT: "8788"
+    optional: true
+
+  - name: mini_agent_lang_tools
+    description: Mini-Agent language toolchain checks (skip missing toolchains; require LLM + python path)
+    run: |
+      PYTHONPATH=$(pwd) python scenarios/mini_agent_docker_release.py
+    env:
+      LITELLM_ENABLE_MINI_AGENT: "1"
+      DOCKER_MINI_AGENT: "1"
+      MINI_AGENT_API_HOST: 127.0.0.1
+      MINI_AGENT_API_PORT: "8788"
+      LITELLM_DEFAULT_CODE_MODEL: ollama_chat/qwen2.5-coder:3b
+    optional: true
+
+  - name: mini_agent_escalation_high
+    description: Mini-Agent escalation path sets metrics and used_model correctly
+    run: |
+      PYTHONPATH=$(pwd) python scenarios/codex_agent_regression_check.py
+    env:
+      MINI_AGENT_API_HOST: 127.0.0.1
+      MINI_AGENT_API_PORT: "8788"
+      NDSMOKE_SHORTCIRCUIT_CHUTES: "1"
+    optional: true
+
+  # Removed legacy ndsmoke loop; covered by scenarios and optional docker checks
+
+  - name: lean4_bridge_smoke
+    description: Lean4 bridge reachable and returns shaped summary (live E2E; skip if not running)
+    run: |
+      PYTHONPATH=$(pwd) python scenarios/lean4_bridge_release.py
+    env:
+      LEAN4_BRIDGE_BASE: http://127.0.0.1:8787
+    optional: true
+
+  - name: codeworld_bridge_smoke
+    description: CodeWorld bridge reachable and returns shaped summary (live E2E; skip if not running)
+    run: |
+      PYTHONPATH=$(pwd) python scenarios/codeworld_bridge_release.py
+    env:
+      CODEWORLD_BASE: http://127.0.0.1:8887
+    optional: true
+
+  - name: lean4_health
+    description: Lean4/Certainly bridge /healthz
+    run: |
+      curl -sSf http://127.0.0.1:8787/healthz
+    optional: true
+
+  - name: lean4_health_strict
+    description: Lean4/Certainly bridge /healthz (strict when live)
+    run: |
+      curl -sSf http://127.0.0.1:8787/healthz
+    env:
+      READINESS_LIVE: "1"
+      STRICT_READY: "1"
+    optional: true
+
+  - name: certainly_health
+    description: Certainly (alias) bridge /healthz
+    run: |
+      curl -sSf http://127.0.0.1:8787/healthz
+    optional: true
+
+  - name: codeworld_health
+    description: CodeWorld bridge /healthz
+    run: |
+      curl -sSf http://127.0.0.1:8887/healthz
+    optional: true
+
+  - name: bridges_fullstack_health
+    description: Full-stack bridges health (both CodeWorld and Lean4)
+    run: |
+      set -e
+      curl -sSf http://127.0.0.1:8887/healthz >/dev/null
+      curl -sSf http://127.0.0.1:8787/healthz >/dev/null
+      echo "both bridges healthy"
+    optional: true
+
+  - name: bridges_fullstack_health_strict
+    description: Full-stack bridges health (strict gate when live readiness expected)
+    run: |
+      set -e
+      curl -sSf http://127.0.0.1:8887/healthz >/dev/null
+      curl -sSf http://127.0.0.1:8787/healthz >/dev/null
+      echo "both bridges healthy (strict)"
+    env:
+      READINESS_LIVE: "1"
+      STRICT_READY: "1"
+    optional: true
+
+  - name: coq_bridge_smoke
+    description: Coq bridge reachable and returns shaped summary (live E2E; skip if not running)
+    run: |
+      PYTHONPATH=$(pwd) python scenarios/coq_bridge_release.py
+    env:
+      COQ_BRIDGE_BASE: http://127.0.0.1:8897
+    optional: true
+
+  # (duplicate) Removed legacy ndsmoke loop entry
+
+  # (removed all_smokes; use scenarios/run_all.py if needed)
+
+  - name: chutes_warmup
+    description: Warm up Chutes.ai models configured via LITELLM_*_MODEL envs (skip if CHUTES_API_KEY unset)
+    run: |
+      PYTHONPATH=$(pwd) python scripts/chutes_warmup.py
+    optional: true
+
+  - name: runpod_warmup
+    description: Warm up Runpod models (OpenAI-compatible) from env LITELLM_*_MODEL (skip if RUNPOD_API_KEY unset)
+    run: |
+      PYTHONPATH=$(pwd) python scripts/provider_warmup.py --provider runpod
+    optional: true
+
+  # Strict variants (env-gated). These only fail the pipeline when STRICT_WARMUPS=1
+  - name: chutes_warmup_strict
+    description: Strict warmup gate for Chutes (fails if STRICT_WARMUPS=1 and CHUTES_API_KEY missing)
+    run: |
+      PYTHONPATH=$(pwd) python scripts/warmup_strict_gate.py --provider chutes
+    optional: false
+
+  - name: runpod_warmup_strict
+    description: Strict warmup gate for Runpod (fails if STRICT_WARMUPS=1 and creds missing)
+    run: |
+      PYTHONPATH=$(pwd) python scripts/warmup_strict_gate.py --provider runpod
+    optional: false
+
+  - name: warmups_strict_all
+    description: Composite strict warmups gate (only enforced if STRICT_WARMUPS=1)
+    run: |
+      set -e
+      if [ "${STRICT_WARMUPS}" != "1" ]; then echo "STRICT_WARMUPS not set; passing"; exit 0; fi
+      PYTHONPATH=$(pwd) python scripts/warmup_strict_gate.py --provider chutes
+      PYTHONPATH=$(pwd) python scripts/warmup_strict_gate.py --provider runpod
+      echo "strict warmups passed"
+    optional: false
+
+  - name: grounded_compare_smoke
+    description: Grounded QA compare (A/B + judge) small sample; skip-friendly if creds/models unset
+    run: |
+      set -e
+      # Skip if no provider credentials available
+      if [ -z "${OPENAI_API_KEY}" ] && [ -z "${CHUTES_API_KEY}" ] && [ -z "${RUNPOD_API_KEY}" ]; then
+        echo "skip: no provider credentials (OPENAI/CHUTES/RUNPOD)"; exit 0; fi
+      # Prepare tiny input
+      OUTDIR=local/artifacts/compare_ready
+      mkdir -p "$OUTDIR"
+      ITEMS="$OUTDIR/items.jsonl"
+      cat > "$ITEMS" <<'JSON'
+      {"id":"q1","question":"When did Voyager 1 launch?","evidence":[{"id":"e1","text":"Voyager 1 launched in 1977."}]}
+      {"id":"q2","question":"Who discovered penicillin?","evidence":[{"id":"e2","text":"Alexander Fleming discovered penicillin."}]}
+      JSON
+      # Resolve models (defaults are OpenAI family; override via env)
+      A_MODEL="${READINESS_COMPARE_MODELS_A:-openai/gpt-4o-mini}"
+      B_MODEL="${READINESS_COMPARE_MODELS_B:-openai/gpt-4o}"
+      J_MODEL="${READINESS_COMPARE_MODELS_JUDGE:-openai/gpt-4o-mini}"
+      python scripts/compare_grounded_qa.py --items "$ITEMS" --n 2 \
+        --model-a "$A_MODEL" --model-b "$B_MODEL" --judge-model "$J_MODEL" \
+        --out "$OUTDIR"
+      echo "grounded compare smoke completed"
+    optional: true
+
+  - name: grounded_compare_strict
+    description: Strict grounded compare gate (requires STRICT_COMPARE=1 and provider creds)
+    run: |
+      set -e
+      if [ "${STRICT_COMPARE}" != "1" ]; then echo "STRICT_COMPARE not set; passing"; exit 0; fi
+      if [ -z "${OPENAI_API_KEY}" ] && [ -z "${CHUTES_API_KEY}" ] && [ -z "${RUNPOD_API_KEY}" ]; then
+        echo "error: STRICT_COMPARE=1 but no provider credentials"; exit 1; fi
+      OUTDIR=local/artifacts/compare_ready_strict
+      mkdir -p "$OUTDIR"
+      ITEMS="$OUTDIR/items.jsonl"
+      cat > "$ITEMS" <<'JSON'
+      {"id":"q1","question":"When did Voyager 1 launch?","evidence":[{"id":"e1","text":"Voyager 1 launched in 1977."}]}
+      {"id":"q2","question":"Who discovered penicillin?","evidence":[{"id":"e2","text":"Alexander Fleming discovered penicillin."}]}
+      JSON
+      A_MODEL="${READINESS_COMPARE_MODELS_A:-openai/gpt-4o-mini}"
+      B_MODEL="${READINESS_COMPARE_MODELS_B:-openai/gpt-4o}"
+      J_MODEL="${READINESS_COMPARE_MODELS_JUDGE:-openai/gpt-4o-mini}"
+      python scripts/compare_grounded_qa.py --items "$ITEMS" --n 2 \
+        --model-a "$A_MODEL" --model-b "$B_MODEL" --judge-model "$J_MODEL" \
+        --out "$OUTDIR"
+      echo "strict grounded compare passed"
+    optional: false
+
+
+  # (removed all_smokes_core)
+
+  - name: scenarios_live
+    description: Live scenarios runner (skip-friendly); supersedes ND smoke tests
+    run: |
+      PYTHONPATH=$(pwd) python scenarios/run_all.py || true
+    optional: true
+
+  # (removed all_smokes_nd)
+
+  # (removed release_smokes)

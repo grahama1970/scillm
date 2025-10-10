@@ -1,126 +1,315 @@
 # Quick Start (Fork)
 
-This fork adds an opt‑in, experimental mini‑agent and a guarded Router streaming seam. Defaults are unchanged. Use this page to get productive fast.
+This fork adds an opt-in Mini-Agent, an env-gated `codex-agent` provider, and a standardized readiness harness. The sections below mirror the runnable assets in `scenarios/` so you can reproduce a green run end-to-end.
 
-- Prereqs
-  - Python 3.10+
-  - Keys for your target model (e.g., OPENAI_API_KEY or GEMINI_API_KEY)
+## 1) Prereqs
+- Python 3.10+
+- Optional but recommended: Docker + Docker Compose
+- Optional: provider keys (e.g., `OPENAI_API_KEY`, `GEMINI_API_KEY`)
+- Put them in `.env`; every script calls `load_dotenv(find_dotenv())` so values auto-load.
 
-- Install (editable)
-  - pip install -e .
-
-- Mini‑Agent (in‑code, guardrailed)
-  - In code:
-    - from litellm.experimental_mcp_client.mini_agent.litellm_mcp_mini_agent import AgentConfig, LocalMCPInvoker, run_mcp_mini_agent
-    - messages = [{"role": "user", "content": "echo hi and finish"}]
-    - cfg = AgentConfig(model="openai/gpt-4o-mini", max_iterations=4)
-    - result = run_mcp_mini_agent(messages, mcp=LocalMCPInvoker(shell_allow_prefixes=("echo",)), cfg=cfg)
-    - print(result.stopped_reason, result.final_answer)
-
-- Optional HTTP Tools Gateway
-  - Start a tools endpoint you control (see docs/experimental/mini-agent.md).
-  - Pass headers via agent_proxy: tool_http_headers={"Authorization":"Bearer <token>"}.
-
-- Deterministic Smokes
-  - PYTHONPATH=$(pwd) pytest -q tests/smoke -k 'mini_agent or http_tools_invoker or router_streaming_'
-
-- Router Streaming Seam (opt‑in; default=legacy)
-  - Do not change defaults in production until canary parity is proven.
-  - Enable extracted only in a canary service: export LITELLM_ROUTER_CORE=extracted.
-
-- Canary Parity (scripted)
-  - OPENAI_API_KEY=… LITELLM_DEFAULT_MODEL=openai/gpt-4o-mini     PARITY_ROUNDS=5 PARITY_THRESH_PCT=3.0     PARITY_OUT=/var/log/litellm_parity.jsonl     uv run local/scripts/router_core_parity.py
-  - Summarize over time: uv run local/scripts/parity_summarize.py --in /var/log/litellm_parity.jsonl --thresh 3.0
-  - Acceptance: same_text True and worst ttft/total ≤ 3% for 1 week.
-
-- Where to read more
-  - STATE_OF_PROJECT.md (status, guardrails, plan)
-  - docs/my-website/docs/experimental/mini-agent.md (usage + troubleshooting)
-  - local/docs/02_operational/CANARY_PARITY_PLAN.md (operations)
+## 2) Install
+- Local editable install for iteration: `pip install -e .`
 
 
-- Mini‑Agent over HTTP Tools (in‑code)
-  - Start your tools gateway (see docs) at http://127.0.0.1:8789
-  - Then call the mini‑agent using the HTTP tools adapter:
+## 2.1) Bring up the local stack (alpha)
 
-```python
-from litellm.experimental_mcp_client.mini_agent.litellm_mcp_mini_agent import AgentConfig, run_mcp_mini_agent
-from litellm.experimental_mcp_client.mini_agent.http_tools_invoker import HttpToolsInvoker
-
-mcp = HttpToolsInvoker("http://127.0.0.1:8789", headers={"Authorization": "Bearer <token>"})
-messages = [{"role": "user", "content": "call echo('hi') and finish"}]
-cfg = AgentConfig(model="openai/gpt-4o-mini", max_iterations=4)
-res = run_mcp_mini_agent(messages, mcp=mcp, cfg=cfg)
-print(res.stopped_reason, res.final_answer)
-```
-
-- Agent Proxy (HTTP entrypoint)
-  - Run the endpoint:
+Recommended Docker bring-up (CodeWorld + Lean4 + Redis + ArangoDB + Ollama + proxy):
 
 ```bash
-uvicorn litellm.experimental_mcp_client.mini_agent.agent_proxy:app --port 8788
+docker compose -f deploy/docker/compose.scillm.stack.yml up --build -d  # or local/docker/... if not migrated
 ```
 
-  - Call it from Python:
+Notes:
+- `codeworld-bridge` runs on `:8887` with `CODEWORLD_SCORING_NONET=1`, `CODEWORLD_STRATEGY_NONET=1`, and `CODEWORLD_REDIS_URL` pre-wired.
+- `lean4-bridge` runs on `:8787`.
+- For reproducibility, pass `options.session_id` and `options.track_id` in scenario/provider calls.
+- For strict deploy readiness: `READINESS_LIVE=1 STRICT_READY=1 make project-ready-live`.
 
-```python
-import httpx
-payload = {
-  "messages": [{"role": "user", "content": "hi"}],
-  "model": "openai/gpt-4o-mini",
-  "tool_backend": "http",
-  "tool_http_base_url": "http://127.0.0.1:8789",
-  "tool_http_headers": {"Authorization": "Bearer <token>"}
+> Verification mindset: LLMs are fallible. In SciLLM, you collaborate with LLMs but demand determinism—CodeWorld executes and scores code under limits; Certainly compiles and proves Lean4 obligations; manifests capture every run for replay.
+
+## 3) One-command scenario run
+
+```bash
+make run-scenarios
+```
+
+This wraps `scenarios/run_all.py`, which:
+- Loads `.env`
+- Ensures `LITELLM_ENABLE_MINI_AGENT=1` and `LITELLM_ENABLE_CODEX_AGENT=1`
+- Runs the release scenarios listed below
+- Prints a colour summary and exits non-zero if any scenario fails
+
+Set `SCENARIOS_STOP_ON_FIRST_FAILURE=1` to short-circuit on the first failure.
+
+## 3.1) TL;DR module demos
+
+```bash
+# CodeWorld judge demo (shows speed effect)
+python scenarios/codeworld_judge_live.py
+
+# Certainly (Lean4) via Router alias
+LITELLM_ENABLE_CERTAINLY=1 CERTAINLY_BRIDGE_BASE=http://127.0.0.1:8787 \
+  python scenarios/certainly_router_release.py
+
+# codex‑agent quick check (OpenAI-compatible)
+export LITELLM_ENABLE_CODEX_AGENT=1
+python scenarios/codex_agent_router.py
+```
+
+## 4) Mini-Agent (local shim)
+
+Script: `scenarios/mini_agent_http_release.py`
+
+```bash
+python scenarios/mini_agent_http_release.py
+```
+
+This spins up the in-process shim if port 8788 is free, asks the mini-agent to run a short Python snippet, and prints the final answer along with `additional_kwargs.mini_agent.metrics`. Expect a JSON summary like:
+
+```json
+{
+  "ok": true,
+  "final_answer": "{\"release_scenario\":{\"ping\":\"Feature update...\"}}",
+  "metrics": {"iterations": 1, "used_model": "ollama/glm4:latest"}
 }
-resp = httpx.post("http://127.0.0.1:8788/agent/run", json=payload, timeout=30.0)
-resp.raise_for_status()
-print(resp.json())
 ```
 
-- Extras (optional helpers)
-  - Images (local/remote to data URL):
+## 5) Mini-Agent over Docker tools
 
-```python
-from litellm.extras.images import compress_image
-url = compress_image("/path/to/image.png", max_kb=64, cache_dir=".cache")
-print(url[:64], "...")
+Script: `scenarios/mini_agent_docker_release.py`
+
+Requirements:
+- `LITELLM_ENABLE_MINI_AGENT=1`
+- `LITELLM_MINI_AGENT_DOCKER_CONTAINER=<container name>` pointing at the tools container (the bundled stack exposes `litellm-mini-agent`)
+- Container must expose `/tools` and `/invoke` on the default bridge or a shared network
+
+The script refuses to run unless the container is reachable. The repo ships a compose file that launches the mini-agent shim, codex sidecar, and Ollama with the shared language toolchains:
+
+```bash
+docker compose -f local/docker/compose.agents.yml up --build -d
+
+LITELLM_MINI_AGENT_DOCKER_CONTAINER=litellm-mini-agent \
+python scenarios/mini_agent_docker_release.py
 ```
 
-  - Cache (Redis one‑liner for Router):
+By default both the local and Docker mini-agent invokers allow Python, Rust, Go, and JavaScript. Adjust via `LITELLM_MINI_AGENT_LANGUAGES` if you need to tighten or extend the tool surface.
+
+On success it prints the agent conversation and `parsed_tools` emitted by the container.
+
+## 6) Mini-Agent live loopback
+
+Script: `scenarios/mini_agent_live.py`
+
+This hits the FastAPI shim via `Router.acompletion`, confirming the loopback path and reporting iterations/duration. Run it alone for a quick confidence check:
+
+```bash
+python scenarios/mini_agent_live.py
+```
+
+## 7) Router parallel + batch
+
+Scripts:
+- `scenarios/router_parallel_release.py`
+- `scenarios/router_batch_release.py`
+
+Each script builds a `Router` with mixed providers and demonstrates the respective helper (`acompletion_parallel` vs batch). Both print the model response plus raw payload for inspection:
+
+```bash
+python scenarios/router_parallel_release.py
+python scenarios/router_batch_release.py
+```
+
+## 8) Codex-Agent provider
+
+Script: `scenarios/codex_agent_router.py`
+
+Ensure the env shim or remote endpoint is running, then:
+
+```bash
+export LITELLM_ENABLE_CODEX_AGENT=1
+python scenarios/codex_agent_router.py
+```
+
+You should see the shim response (`{"name": ..., "arguments": ...}`) followed by the final aggregated text.
+
+## 9) Codex-Agent via Docker sidecar
+
+Script: `scenarios/codex_agent_docker_release.py`
+
+Requirements:
+- `LITELLM_ENABLE_CODEX_AGENT=1`
+- `CODEX_AGENT_DOCKER_CONTAINER=<container name>` (defaults to `litellm-codex-agent`)
+- Optional `CODEX_AGENT_API_BASE`; defaults to `http://127.0.0.1:8077` when using the bundled Compose stack
+
+```bash
+docker compose -f local/docker/compose.agents.yml up --build -d
+
+CODEX_AGENT_DOCKER_CONTAINER=litellm-codex-agent \
+python scenarios/codex_agent_docker_release.py
+```
+
+The script verifies the container is running, checks `/healthz`, then invokes the codex-agent provider via Router.
+
+## 10) Chutes release flow
+
+Script: `scenarios/chutes_release.py`
+
+Requires `CHUTES_MODEL` and matching credentials (see `.env.example`). The script prints request/response JSON and the `provider_specific_fields` returned by Chutes. When credentials are absent it exits gracefully with a skip message.
+
+## 11) Code Agent tool call
+
+Script: `scenarios/code_agent_release.py`
+
+This uses the mini-agent with tool choice `required`, drives the `python_eval` tool, and shows the resulting tool call + response payload. It’s a good verification that tool routing and parsed metadata remain intact.
+
+## 12) Image helper demo
+
+Script: `scenarios/image_compression_release.py`
+
+Runs the helper in `litellm.extras.images` against a sample asset and prints a data URL preview. Change `IMAGE_PATH` in your `.env` to point at a local image if needed.
+
+## 13) Parallel acompletions demo
+
+Script: `scenarios/parallel_acompletions_demo.py`
+
+Showcases the router’s fan-out helper and verifies ordering/metadata. Useful for quick parity checks when adding providers.
+
+## 14) Ready checks & tests
+
+- Deterministic/local scenarios: `make project-ready`
+- Strict deploy-ready (live scenarios, no skips): `make project-ready-live`
+- After touching router/agent code, rerun `make run-scenarios` to confirm all live demos still pass.
+
+## 15) Extras (optional helpers)
+
+All extras live under `litellm/extras/` and are import-safe. Highlights:
 
 ```python
 from litellm.extras.cache import configure_cache_redis
-from litellm.router import Router
+from litellm.extras.json_utils import clean_json_string
+from litellm.extras.log_utils import truncate_large_value
 
-r = Router(model_list=[{"model_name":"m","litellm_params":{"model":"openai/gpt-4o-mini","api_key":"sk-..."}}])
-configure_cache_redis(r, host="127.0.0.1", port=6379, ttl_seconds=300)
+# Router cache in one line
+configure_cache_redis(router, host="127.0.0.1", port=6379, ttl=600)
+
+# JSON repair fallback (uses json_repair when installed, graceful degrade otherwise)
+clean = clean_json_string("{\"ok\": true,,}")
+
+# Logging helper for large payloads
+print(truncate_large_value(data, max_chars=512))
 ```
 
-  - Response utils (extract text from Router response):
+All helpers accept environment overrides and respect `LITELLM_DISABLE_CACHE` / `LITELLM_LOG_SENSITIVE_FIELDS` where applicable.
 
-```python
-from litellm.extras.response_utils import extract_content
-from litellm.router import Router
+## 16) More Use Cases
 
-r = Router(model_list=[{"model_name":"m","litellm_params":{"model":"openai/gpt-4o-mini","api_key":"sk-..."}}])
-resp = await r.acompletion(model="m", messages=[{"role":"user","content":"hi"}])
-print(extract_content(resp))
+- Automated curriculum generation for agents
+  - Use proof outcomes (proved/failed/unproved) to synthesize targeted tasks for the next training/evaluation round.
+- Failure analysis pipelines
+  - Extract unproved goals + diagnostics from Certainly (Lean4) and feed them into repair loops or prompt templates.
+- Headless local loop in CI
+  - Run prover and CodeWorld strategy checks in CI on each PR; gate on % proved and judge thresholds; publish artifacts for reproducible reviews.
+
+## 17) When something fails
+
+- Inspect the individual scenario script to see the exact `Router` or agent call that failed.
+- Ensure `.env` is loaded (every script calls `load_dotenv(find_dotenv())`, but missing keys still surface as explicit errors).
+- For Docker scenarios, verify `docker ps` shows the named container and that it exposes `/tools` and `/invoke`.
+
+Once you can run `make run-scenarios` and `make project-ready-live` without skips, you have the same coverage we use for release readiness.
+
+## 18) CodeWorld Bridge (provider demo)
+
+Script: `feature_recipes/codeworld_bridge.py`
+
+Use CodeWorld's Bridge API from LiteLLM. Configure:
+
+```bash
+export CODEWORLD_BASE=http://codeworld:8000
+export CODEWORLD_TOKEN=...   # if CodeWorld enforces tokens
+
+python feature_recipes/codeworld_bridge.py
 ```
 
-  - Batch helper (concurrent acompletions):
+The script prints a structured JSON payload with `summary` and the full
+payload for `additional_kwargs["codeworld"]` (duration_ms, run_id, run_url,
+artifacts, metrics, scorecard, winner). See CodeWorld's `docs/guides/BRIDGE_API.md`
+for exact schemas. In production, wire this as a LiteLLM custom provider so a
+single `router.acompletion(model="codeworld", ...)` call returns both a human
+summary and the machine-friendly metrics.
+
+### CodeWorld Provider (Router)
 
 ```python
-import asyncio
-from litellm.extras.batch import acompletion_as_completed
-from litellm.router import Router
+import os
+from litellm import Router
 
-r = Router(model_list=[{"model_name":"m","litellm_params":{"model":"openai/gpt-4o-mini","api_key":"sk-..."}}])
-reqs = [
-  {"model":"m","messages":[{"role":"user","content":f"hi {i}"}]}
-  for i in range(5)
-]
-async def go():
-  async for idx, resp in acompletion_as_completed(r, reqs, concurrency=2):
-    print(idx, getattr(getattr(resp.choices[0],"message",{}),"content",None))
-asyncio.run(go())
+router = Router(model_list=[{
+  "model_name": "codeworld",
+  "litellm_params": {
+    "model": "codeworld",
+    "custom_llm_provider": "codeworld",
+    "api_base": os.getenv("CODEWORLD_BASE", "http://127.0.0.1:8000"),
+    "api_key": os.getenv("CODEWORLD_TOKEN"),
+  }
+}])
+
+resp = await router.acompletion(
+  model="codeworld",
+  messages=[{"role":"user","content":"run a short bounded eval"}],
+  request_timeout=45,
+)
+print(resp.choices[0].message["content"])  # summary from CodeWorld Bridge
+```
+# 11) CodeWorld — Evaluate Strategies with Your Metrics
+
+When to use:
+- Compare code strategies under a domain‑specific scoring function.
+- Rank results with a deterministic judge and capture a reproducible manifest.
+
+Quick start (live, skip‑friendly):
+```bash
+CODEWORLD_BASE=http://127.0.0.1:8887 python scenarios/codeworld_bridge_release.py
+python scenarios/codeworld_judge_live.py  # slow variant sleeps ~200ms to show speed impact
+```
+
+Key concepts:
+- Strategy runner (alpha): runs Python code under RLIMITs + AST allow/deny; optional Linux no‑net.
+- Dynamic scoring: provide a `score(task, context, outputs, timings)` function; judge modes weighted/lex.
+- Provenance: include `options.session_id` and `options.track_id`; CodeWorld adds `run_id`, `item_id`, `request_id`.
+
+Minimal payload example (bridge):
+```jsonc
+{
+  "messages": [{"role": "system", "content": "Score strategies"}],
+  "items": [{"task": "foo", "context": {"code_variants": {"v1": "def solve(ctx): return 1"}}}],
+  "provider": {"name": "codeworld", "args": {"judge": true}},
+  "options": {"max_seconds": 10, "session_id": "exp1", "track_id": "trialA"}
+}
+```
+
+# 12) Certainly (Lean4) — Bridge Prover into Agent Workflows
+
+When to use:
+- Batch‑check obligations from an agent or pipeline via a stable bridge.
+- Keep per‑run provenance for replay and review.
+
+Quick start (live, skip‑friendly):
+```bash
+LEAN4_BRIDGE_BASE=http://127.0.0.1:8787 python scenarios/lean4_bridge_release.py
+LITELLM_ENABLE_CERTAINLY=1 CERTAINLY_BRIDGE_BASE=http://127.0.0.1:8787 \
+  python scenarios/certainly_router_release.py
+```
+
+Minimal payload example (bridge):
+```jsonc
+{
+  "messages": [{"role": "system", "content": "Batch proof run"}],
+  "lean4_requirements": [
+    {"requirement_text": "0 + n = n"},
+    {"requirement_text": "m + n = n + m"}
+  ],
+  "options": {"max_seconds": 180, "session_id": "exp2", "track_id": "batch1"}
+}
 ```

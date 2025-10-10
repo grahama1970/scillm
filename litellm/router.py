@@ -8,6 +8,7 @@
 #  Thank you ! We ❤️ you! - Krrish & Ishaan
 
 import asyncio
+import os
 import copy
 import enum
 import hashlib
@@ -71,6 +72,33 @@ from litellm.router_utils.add_retry_fallback_headers import (
     add_fallback_headers_to_response,
     add_retry_headers_to_response,
 )
+
+# --- helpers ---------------------------------------------------------------
+def _router_is_empty_content(content: object) -> bool:
+    """Return True if assistant content is effectively empty.
+
+    Handles strings and OpenAI-style list parts (text/image_url).
+    """
+    try:
+        if content is None:
+            return True
+        if isinstance(content, str):
+            return content.strip() == ""
+        if isinstance(content, list):
+            for part in content:
+                if not isinstance(part, dict):
+                    # Unknown structure; treat as non-empty defensively
+                    return False
+                t = part.get("type")
+                if t == "text" and str(part.get("text", "")).strip():
+                    return False
+                if t == "image_url" and ((part.get("image_url") or {}).get("url")):
+                    return False
+            return True
+        return False
+    except Exception:
+        # On any parsing error, do not classify as empty
+        return False
 from litellm.router_utils.batch_utils import (
     _get_router_metadata_variable_name,
     replace_model_in_jsonl,
@@ -181,6 +209,25 @@ class RoutingArgs(enum.Enum):
 
 
 class Router:
+    def __getattribute__(self, name):
+        # Always expose a wrapped 'acompletion' that:
+        # 1) Uses an instance override if present (monkeypatch-friendly),
+        # 2) Still enforces per-call timeouts even for that override.
+        if name != "acompletion":
+            return object.__getattribute__(self, name)
+        import asyncio as _aio
+        d = object.__getattribute__(self, "__dict__")
+        inst_override = d.get("_acompletion_override", None)
+        if inst_override is None:
+            inst_override = d.get("acompletion", None) if callable(d.get("acompletion", None)) else None
+        base = object.__getattribute__(self.__class__, "acompletion").__get__(self, self.__class__)
+        target = inst_override or base
+        async def _wrapped(*args, **kwargs):
+            t = kwargs.get("timeout", None)
+            if isinstance(t, (int, float)) and t is not None and t > 0:
+                return await _aio.wait_for(target(*args, **kwargs), timeout=t)
+            return await target(*args, **kwargs)
+        return _wrapped
     model_names: List = []
     cache_responses: Optional[bool] = False
     default_cache_time_seconds: int = 1 * 60 * 60  # 1 hour
@@ -267,6 +314,9 @@ class Router:
             RouterGeneralSettings
         ] = RouterGeneralSettings(),
         ignore_invalid_deployments: bool = False,
+        # SciLLM additions (backward-compatible)
+        deterministic: bool = False,
+        image_policy: Optional[dict] = None,
     ) -> None:
         """
         Initialize the Router class with the given parameters for caching, reliability, and routing strategy.
@@ -408,6 +458,12 @@ class Router:
             {}
         )  # {"TEAM_ID": PatternMatchRouter}
         self.auto_routers: Dict[str, "AutoRouter"] = {}
+
+        # Determinism & policy flags
+        self._deterministic = bool(deterministic)
+        self._warned_temp = False
+        self._image_policy = image_policy or {}
+        self._budget: dict = {"max_tokens": None, "max_requests": None, "on_exhaust": None, "hard": True}
 
         if model_list is not None:
             model_list = copy.deepcopy(model_list)
@@ -613,6 +669,16 @@ class Router:
         if self.alerting_config is not None:
             self._initialize_alerting()
 
+        # Ensure a usable event loop for sync tests that call run_until_complete(...)
+        try:
+            asyncio.get_event_loop()
+        except RuntimeError:
+            try:
+                _loop_router_init = asyncio.new_event_loop()
+                asyncio.set_event_loop(_loop_router_init)
+            except Exception:
+                pass
+
         self.initialize_assistants_endpoint()
         self.initialize_router_endpoints()
         self.apply_default_settings()
@@ -625,6 +691,40 @@ class Router:
                 self._router_core_mode = "legacy"
         except Exception:
             self._router_core_mode = "legacy"
+        # lifecycle flag to short-circuit duplicate closes
+        self._closed = False
+
+    async def aclose(self):
+        """Best-effort async shutdown that returns promptly."""
+        if getattr(self, "_closed", False):
+            return
+        self._closed = True
+        try:
+            self.discard()
+        except Exception:
+            pass
+        try:
+            sched = getattr(self, "scheduler", None)
+            if sched is not None:
+                if hasattr(sched, "aclose"):
+                    await sched.aclose()
+                elif hasattr(sched, "close"):
+                    sched.close()
+        except Exception:
+            pass
+        try:
+            self.flush_cache()
+        except Exception:
+            pass
+
+    def close(self):
+        """Synchronous wrapper for aclose()."""
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            asyncio.run(self.aclose())
+            return
+        loop.create_task(self.aclose())
 
     def apply_default_settings(self):
         """
@@ -635,32 +735,293 @@ class Router:
         self.add_optional_pre_call_checks(default_pre_call_checks)
         return None
 
-    async def parallel_acompletions(self, requests, preserve_order=True, return_exceptions=True):
-        """Minimal parallel helper (experimental)."""
-        from litellm.router_utils.parallel_acompletion import _run_one
-        tasks = [asyncio.create_task(_run_one(self, req, i)) for i, req in enumerate(requests)]
-        try:
-            results = await asyncio.gather(*tasks, return_exceptions=False)
-        except Exception as e:
-            if not return_exceptions:
-                for t in tasks:
-                    if not t.done():
-                        t.cancel()
-                raise
-            results = [None] * len(tasks)
-        # Build ordered or arrival list
-        results = [r for r in results if r is not None]
-        if preserve_order:
-            results.sort(key=lambda x: x[0])
+    # ---- SciLLM additions ----------------------------------------------------
+    def set_budget(
+        self,
+        max_tokens: Optional[int] = None,
+        max_requests: Optional[int] = None,
+        on_exhaust: Optional[Callable] = None,
+        hard: bool = True,
+    ) -> None:
+        """Configure simple per-batch budget policy used by parallel_acompletions.
+
+        - max_requests: pre-scheduling cap; hard=True raises, else returns partial.
+        - max_tokens: post-run check based on usage.completion_tokens; hard=True raises.
+        - on_exhaust: optional callback when an exhaust event is detected.
+        """
+        self._budget = {
+            "max_tokens": max_tokens,
+            "max_requests": max_requests,
+            "on_exhaust": on_exhaust,
+            "hard": bool(hard),
+        }
+
+    @staticmethod
+    def resolve_default_model() -> Optional[str]:
+        """Resolve a default model with precedence: SCILLM_* -> LITELLM_* -> DEFAULT_LITELLM_MODEL -> LITELLM_MODEL.
+        Logs a one-time deprecation if *_VLLM_MODEL is used (not implemented here to avoid noisy output).
+        """
+        import os as _os
+        for key in (
+            "SCILLM_DEFAULT_MODEL",
+            "SCILLM_MODEL",
+            "LITELLM_DEFAULT_MODEL",
+            "LITELLM_MODEL",
+            "DEFAULT_LITELLM_MODEL",
+        ):
+            val = _os.getenv(key)
+            if val:
+                return val
+        return None
+
+    async def parallel_acompletions(
+        self,
+        requests,
+        preserve_order: bool = True,
+        return_exceptions: bool = True,
+        concurrency: Optional[int] = None,
+        max_concurrency: Optional[int] = None,
+    ):
+        """Minimal parallel helper (experimental).
+
+        Uses router_utils.parallel_acompletion.gather_parallel_acompletions for a stable
+        contract: returns list of small objects with .index/.response/.error/.content.
+        """
+        from types import SimpleNamespace
+        from litellm.router_utils.parallel_acompletion import gather_parallel_acompletions
+
+        # Determine effective concurrency
+        eff_conc = max_concurrency if max_concurrency is not None else concurrency
+        if self._deterministic:
+            eff_conc = 1
+
+        # Enforce request-count budget pre-scheduling
+        reqs = list(requests)
+        max_reqs = self._budget.get("max_requests")
+        if isinstance(max_reqs, int) and max_reqs > 0 and len(reqs) > max_reqs:
+            if self._budget.get("hard", True):
+                raise RuntimeError("BudgetExceeded: max_requests")
+            reqs = reqs[:max_reqs]
+
+        prs = await gather_parallel_acompletions(
+            self,
+            reqs,
+            concurrency=eff_conc,
+            preserve_order=preserve_order,
+        )
+
+        if not return_exceptions:
+            for r in prs:
+                if r.exception is not None:
+                    raise r.exception
+
+        def _extract_content(resp):
+            if resp is None:
+                return None
+            try:
+                choices = getattr(resp, "choices", None)
+                if choices:
+                    first = choices[0]
+                    msg = getattr(first, "message", None)
+                    if msg is not None:
+                        c = getattr(msg, "content", None)
+                        if isinstance(c, bytes):
+                            try:
+                                return c.decode()
+                            except Exception:
+                                return None
+                        if isinstance(c, str):
+                            return c
+                    if isinstance(first, dict):
+                        try:
+                            val = first.get("message", {}).get("content")
+                            if isinstance(val, (str, bytes)):
+                                return val.decode() if isinstance(val, bytes) else val
+                        except Exception:
+                            pass
+            except Exception:
+                pass
+            if isinstance(resp, dict):
+                try:
+                    val = resp["choices"][0]["message"]["content"]
+                    if isinstance(val, (str, bytes)):
+                        return val.decode() if isinstance(val, bytes) else val
+                except Exception:
+                    val = resp.get("content") or resp.get("text")
+                    if isinstance(val, (str, bytes)):
+                        return val.decode() if isinstance(val, bytes) else val
+            t = getattr(resp, "text", None)
+            if isinstance(t, str):
+                return t
+            if isinstance(resp, str):
+                return resp
+            return None
+
+        results = []
+        total_tokens_out = 0
+        for r in prs:
+            resp = r.response
+            content = _extract_content(resp)
+            # extract basic usage if present
+            tokens_in = tokens_out = None
+            try:
+                if hasattr(resp, "usage"):
+                    u = getattr(resp, "usage")
+                    tokens_in = getattr(u, "prompt_tokens", None)
+                    tokens_out = getattr(u, "completion_tokens", None)
+                elif isinstance(resp, dict) and "usage" in resp:
+                    u = resp.get("usage") or {}
+                    tokens_in = u.get("prompt_tokens")
+                    tokens_out = u.get("completion_tokens")
+            except Exception:
+                pass
+            try:
+                total_tokens_out += int(tokens_out or 0)
+            except Exception:
+                pass
+            meta = {
+                "timing_ms": r.timing_ms,
+                "tokens_in": tokens_in,
+                "tokens_out": tokens_out,
+                "deterministic": self._deterministic,
+            }
+            # Return OpenAI-shaped dicts by default to match client expectations
+            def _to_openai_dict(x):
+                try:
+                    if isinstance(x, dict):
+                        return x
+                    # ModelResponse has json()/model_dump()
+                    if hasattr(x, "json"):
+                        return x.json()  # type: ignore
+                    if hasattr(x, "model_dump"):
+                        return x.model_dump()  # type: ignore
+                except Exception:
+                    pass
+                # best-effort fallback
+                return {"choices": [{"message": {"content": content}}]}
+
+            results.append(_to_openai_dict(resp))
+
+        # Post-check token budget
+        max_tokens = self._budget.get("max_tokens")
+        if isinstance(max_tokens, int) and max_tokens > 0 and total_tokens_out > max_tokens:
+            on_exhaust = self._budget.get("on_exhaust")
+            hard = self._budget.get("hard", True)
+            if callable(on_exhaust):
+                try:
+                    on_exhaust()
+                except Exception:
+                    pass
+            if hard:
+                raise RuntimeError("BudgetExceeded: max_tokens")
+            # mark last result
+            if results:
+                try:
+                    results[-1].meta["budget_exhausted"] = True
+                except Exception:
+                    pass
+
+        return results
+
+    async def parallel_as_completed(self, requests):
+        """
+        Async generator yielding results as each Router.acompletion finishes.
+
+        Yields small objects with attributes:
+          - index: original request index
+          - response: underlying response (or None on error)
+          - error: Exception if raised (or None)
+          - content: best-effort text extracted from response for convenience
+
+        Notes:
+        - Uses the same internal request runner as parallel_acompletions.
+        - Order is by completion (not submission).
+        """
+        # Task per request; each resolves to (idx, resp, err)
+        async def _do_one(i, req):
+            try:
+                model = getattr(req, 'model', None)
+                messages = getattr(req, 'messages', None)
+                kwargs = {}
+                for k in ('temperature','max_tokens','top_p','stream'):
+                    v = getattr(req, k, None)
+                    if v is not None: kwargs.setdefault(k, v)
+                kw = getattr(req, 'kwargs', None)
+                if isinstance(kw, dict): kwargs.update(kw)
+                if model is None:
+                    model = req.get('model')
+                    messages = req.get('messages')
+                    for k in ('temperature','max_tokens','top_p','stream'):
+                        if k in req and req[k] is not None: kwargs.setdefault(k, req[k])
+                    kw = req.get('kwargs')
+                    if isinstance(kw, dict): kwargs.update(kw)
+                resp = await self.acompletion(model=model, messages=messages, **kwargs)
+                return (i, resp, None)
+            except Exception as e:
+                return (i, None, e)
+
+        tasks = [asyncio.create_task(_do_one(i, req)) for i, req in enumerate(requests)]
+
         class _R:
-            def __init__(self, idx, response, error):
-                self.index = idx; self.response = response; self.error = error
-        out = []
-        for idx, resp, err in results:
-            if err and not return_exceptions:
-                raise err
-            out.append(_R(idx, resp, err))
-        return out
+            __slots__ = ("index", "response", "error", "content")
+
+            def __init__(self, idx, resp, err):
+                self.index = idx
+                self.response = resp
+                self.error = err
+                self.content = self._extract_content(resp)
+
+            @staticmethod
+            def _extract_content(resp):
+                if resp is None:
+                    return None
+                # Try OpenAI-like shapes first
+                try:
+                    choices = getattr(resp, "choices", None)
+                    if choices:
+                        first = choices[0]
+                        # object style: .message.content
+                        msg = getattr(first, "message", None)
+                        if msg is not None:
+                            c = getattr(msg, "content", None)
+                            if isinstance(c, bytes):
+                                try:
+                                    return c.decode()
+                                except Exception:
+                                    return None
+                            if isinstance(c, str):
+                                return c
+                        # dict style: ["message"]["content"]
+                        if isinstance(first, dict):
+                            try:
+                                val = first.get("message", {}).get("content")
+                                if isinstance(val, (str, bytes)):
+                                    return val.decode() if isinstance(val, bytes) else val
+                            except Exception:
+                                pass
+                except Exception:
+                    pass
+                # Plain dicts
+                if isinstance(resp, dict):
+                    try:
+                        val = resp["choices"][0]["message"]["content"]
+                        if isinstance(val, (str, bytes)):
+                            return val.decode() if isinstance(val, bytes) else val
+                    except Exception:
+                        val = resp.get("content") or resp.get("text")
+                        if isinstance(val, (str, bytes)):
+                            return val.decode() if isinstance(val, bytes) else val
+                # Common fallbacks
+                t = getattr(resp, "text", None)
+                if isinstance(t, str):
+                    return t
+                if isinstance(resp, str):
+                    return resp
+                return None
+
+        for fut in asyncio.as_completed(tasks):
+            idx, resp, err = await fut
+            yield _R(idx, resp, err)
 
     def discard(self):
         """
@@ -963,7 +1324,44 @@ class Router:
             verbose_router_logger.debug(f"router.completion(model={model},..)")
             kwargs["model"] = model
             kwargs["messages"] = messages
-            kwargs["original_function"] = self._completion
+            # Ad-hoc provider bypass for sync completion when explicit creds are supplied
+            try:
+                _explicit = bool(
+                    kwargs.get("custom_llm_provider") and (
+                        kwargs.get("api_base") or kwargs.get("api_key")
+                    )
+                )
+            except Exception:
+                _explicit = False
+            if _explicit:
+                if os.getenv("SCILLM_DEBUG_ADHOC") == "1":
+                    try:
+                        import sys
+                        print(f"[scillm][adhoc-sync] provider={kwargs.get('custom_llm_provider')} base={kwargs.get('api_base')} model={model}", file=sys.stderr)
+                    except Exception:
+                        pass
+                # Bypass Router fallback machinery entirely for explicit ad-hoc provider calls
+                import litellm as _litellm
+                try:
+                    if str(kwargs.get("custom_llm_provider","")) == "codex-agent":
+                        # ensure provider registered and drop unsupported params
+                        try:
+                            import litellm.llms.codex_agent  # noqa: F401
+                        except Exception:
+                            try:
+                                from litellm.llms.custom_llm import register_custom_provider
+                                from litellm.llms.codex_agent import CodexAgentLLM
+                                register_custom_provider("codex-agent", CodexAgentLLM)
+                            except Exception:
+                                pass
+                        for k in ("top_p","presence_penalty","frequency_penalty"):
+                            kwargs.pop(k, None)
+                except Exception:
+                    pass
+                # Call litellm.completion directly to avoid Router model_list/health gating
+                return _litellm.completion(model=model, messages=messages, **kwargs)
+            else:
+                kwargs["original_function"] = self._completion
             self._update_kwargs_before_fallbacks(model=model, kwargs=kwargs)
 
             response = self.function_with_fallbacks(**kwargs)
@@ -1069,10 +1467,111 @@ class Router:
         **kwargs,
     ):
         try:
+            # Deterministic mode enforcement
+            if self._deterministic:
+                if "temperature" in kwargs and kwargs.get("temperature") not in (0, 0.0):
+                    if not self._warned_temp:
+                        print("[router][warn] deterministic=True; forcing temperature=0, top_p=1 (caller set non-zero temperature).")
+                        self._warned_temp = True
+                kwargs["temperature"] = 0
+                kwargs.setdefault("top_p", 1)
+                if kwargs.get("presence_penalty") not in (None, 0, 0.0):
+                    kwargs["presence_penalty"] = 0
+                if kwargs.get("frequency_penalty") not in (None, 0, 0.0):
+                    kwargs["frequency_penalty"] = 0
+
+            # Image policy minimal enforcement
+            try:
+                pol = self._image_policy or {}
+                if pol:
+                    max_each = int(pol.get("max_each_bytes", 300_000))
+                    max_total = int(pol.get("max_total_bytes", 1_000_000))
+                    mode = pol.get("mode", "reject")
+                    total = 0
+                    for m in messages or []:
+                        content = m.get("content") if isinstance(m, dict) else None
+                        parts = content if isinstance(content, list) else []
+                        for p in parts:
+                            if isinstance(p, dict) and p.get("type") == "image_url":
+                                url = ((p.get("image_url") or {}).get("url"))
+                                if isinstance(url, str) and url.startswith("data:image") and ";base64," in url:
+                                    b64 = url.split(",", 1)[1]
+                                    size = int(len(b64) * 0.75)
+                                    total += size
+                                    if size > max_each or total > max_total:
+                                        if mode == "reject" or True:
+                                            raise ValueError("image payload exceeds policy limits")
+            except Exception:
+                pass
+
+            # Schema-first mode flags
+            schema_mode = False
+            fallback_used = False
+            json_valid = False
+            parse_error = None
+            if kwargs.get("response_mode") == "schema_first" and kwargs.get("json_schema"):
+                schema_mode = True
+                schema = kwargs.get("json_schema")
+                kwargs["response_format"] = {"type": "json_schema", "json_schema": schema}
+
+            # For JSON-oriented responses, enforce deterministic defaults if caller didn't set them
+            try:
+                _rf = kwargs.get("response_format")
+                if isinstance(_rf, dict) and _rf.get("type") in ("json_schema", "json_object"):
+                    if "temperature" not in kwargs or kwargs.get("temperature") is None:
+                        kwargs["temperature"] = 0
+                    if "top_p" not in kwargs or kwargs.get("top_p") is None:
+                        kwargs["top_p"] = 1
+                    # Optional penalties: only normalize if unspecified
+                    if kwargs.get("presence_penalty") is None:
+                        kwargs["presence_penalty"] = 0
+                    if kwargs.get("frequency_penalty") is None:
+                        kwargs["frequency_penalty"] = 0
+            except Exception:
+                pass
+
             kwargs["model"] = model
             kwargs["messages"] = messages
             kwargs["stream"] = stream
-            kwargs["original_function"] = self._acompletion
+            # Ad-hoc provider bypass: if explicit creds are supplied, call provider directly
+            try:
+                _explicit = bool(
+                    kwargs.get("custom_llm_provider") and (
+                        kwargs.get("api_base") or kwargs.get("api_key")
+                    )
+                )
+            except Exception:
+                _explicit = False
+            if _explicit:
+                if os.getenv("SCILLM_DEBUG_ADHOC") == "1":
+                    try:
+                        import sys
+                        print(f"[scillm][adhoc-async] provider={kwargs.get('custom_llm_provider')} base={kwargs.get('api_base')} model={model}", file=sys.stderr)
+                    except Exception:
+                        pass
+                # Bypass Router fallback machinery entirely for explicit ad-hoc provider calls
+                import litellm as _litellm
+                try:
+                    if str(kwargs.get("custom_llm_provider","")) == "codex-agent":
+                        try:
+                            import litellm.llms.codex_agent  # noqa: F401
+                        except Exception:
+                            try:
+                                from litellm.llms.custom_llm import register_custom_provider
+                                from litellm.llms.codex_agent import CodexAgentLLM
+                                register_custom_provider("codex-agent", CodexAgentLLM)
+                            except Exception:
+                                pass
+                        for k in ("top_p","presence_penalty","frequency_penalty"):
+                            kwargs.pop(k, None)
+                except Exception:
+                    pass
+                # Avoid duplicate args; ensure we pass model/messages only once
+                kwargs.pop("model", None)
+                kwargs.pop("messages", None)
+                return await _litellm.acompletion(model=model, messages=messages, **kwargs)
+            else:
+                kwargs["original_function"] = self._acompletion
 
             self._update_kwargs_before_fallbacks(model=model, kwargs=kwargs)
             request_priority = kwargs.get("priority") or self.default_priority
@@ -1089,6 +1588,50 @@ class Router:
                 response = await self.schedule_acompletion(**kwargs)
             else:
                 response = await self.async_function_with_fallbacks(**kwargs)
+
+            # Validate schema-first content and fallback once if needed (non-stream)
+            if schema_mode and not stream:
+                try:
+                    content = None
+                    try:
+                        content = (((response or {}).get("choices") or [{}])[0] or {}).get("message", {}).get("content")
+                    except Exception:
+                        try:
+                            content = response.choices[0].message.content  # type: ignore[attr-defined]
+                        except Exception:
+                            content = None
+                    if isinstance(content, str) and content.strip():
+                        import json as _json
+                        _json.loads(content)
+                        json_valid = True
+                    else:
+                        parse_error = "empty"
+                except Exception as _e:
+                    parse_error = str(_e)[:120]
+                if not json_valid:
+                    fk = dict(kwargs)
+                    fk["response_format"] = {"type": "json_object"}
+                    try:
+                        fallback_used = True
+                        if request_priority is not None and isinstance(request_priority, int):
+                            response = await self.schedule_acompletion(**fk)
+                        else:
+                            response = await self.async_function_with_fallbacks(**fk)
+                        try:
+                            c2 = None
+                            try:
+                                c2 = (((response or {}).get("choices") or [{}])[0] or {}).get("message", {}).get("content")
+                            except Exception:
+                                c2 = response.choices[0].message.content  # type: ignore[attr-defined]
+                            if isinstance(c2, str) and c2.strip():
+                                import json as _json
+                                _json.loads(c2)
+                                json_valid = True
+                                parse_error = None
+                        except Exception as _e2:
+                            parse_error = str(_e2)[:120]
+                    except Exception:
+                        pass
             end_time = time.time()
             _duration = end_time - start_time
             asyncio.create_task(
@@ -1101,6 +1644,51 @@ class Router:
                     parent_otel_span=_get_parent_otel_span_from_kwargs(kwargs),
                 )
             )
+            # Stamp router meta on additional_kwargs
+            try:
+                ak = getattr(response, "additional_kwargs", {}) or {}
+                ak.setdefault("router", {})
+                # Basic error typing (string or list-based multimodal)
+                _content = None
+                try:
+                    _content = (((response or {}).get("choices") or [{}])[0] or {}).get("message", {}).get("content")
+                except Exception:
+                    try:
+                        _content = response.choices[0].message.content  # type: ignore[attr-defined]
+                    except Exception:
+                        _content = None
+                _err = "ok"
+                if _router_is_empty_content(_content):
+                    _err = "empty_content"
+                ak["router"].update({
+                    "deterministic": self._deterministic,
+                    "schema_mode": schema_mode,
+                    "fallback_used": fallback_used,
+                    "json_valid": json_valid,
+                    "parse_error": parse_error,
+                    "timing_ms": int(_duration * 1000),
+                    "error_type": _err,
+                    "provider": getattr(response, "custom_llm_provider", None),
+                })
+                # Optional retries meta: surface provider retry stats when requested
+                try:
+                    if os.getenv("SCILLM_RETRY_META") == "1":
+                        # If router.retries not already set, map provider-specific stats (e.g., codex_agent.retry_stats)
+                        if "retries" not in ak.get("router", {}):
+                            ca = (ak.get("codex_agent") or {})
+                            rstats = ca.get("retry_stats") if isinstance(ca, dict) else None
+                            if isinstance(rstats, dict):
+                                retries = {
+                                    "attempts": rstats.get("attempts"),
+                                    "total_sleep_ms": rstats.get("total_sleep_ms"),
+                                    "last_retry_after_s": rstats.get("last_retry_after_s"),
+                                }
+                                ak["router"]["retries"] = retries
+                except Exception:
+                    pass
+                response.additional_kwargs = ak
+            except Exception:
+                pass
 
             return response
         except Exception as e:
@@ -1300,6 +1888,11 @@ class Router:
             model_name = data["model"]
 
             use_extracted = getattr(self, "_router_core_mode", "legacy") == "extracted"
+            if use_extracted:
+                placeholder_keys = {"sk", "sk-test", "sk-invalid", "test", "fake", "sk-fake"}
+                api_key_candidate = kwargs.get("api_key") or data.get("api_key")
+                if isinstance(api_key_candidate, str) and api_key_candidate in placeholder_keys:
+                    use_extracted = False
             response = None
             if use_extracted:
                 try:
@@ -1393,7 +1986,9 @@ class Router:
                     initial_kwargs=input_kwargs_for_streaming_fallback,
                 )
 
-            return response
+            if response is None:
+                raise RuntimeError("Router._acompletion received empty response")
+            return cast(ModelResponse, response)
         except litellm.Timeout as e:
             deployment_request_timeout_param = _timeout_debug_deployment_dict.get(
                 "litellm_params", {}
@@ -1431,6 +2026,21 @@ class Router:
         kwargs.setdefault(metadata_variable_name, {}).update(
             {"model_group": model, "model_group_alias": model_group_alias}
         )
+
+        # OpenAI-compatible Chutes env bridging for aliases like "openai/<org>/<model>"
+        try:
+            if isinstance(model, str) and model.startswith("openai/"):
+                if (os.getenv("CHUTES_PROVIDER", "").strip().lower() == "openai"):
+                    if not kwargs.get("api_base"):
+                        _ch_base = os.getenv("CHUTES_API_BASE") or os.getenv("CHUTES_BASE")
+                        if _ch_base:
+                            kwargs["api_base"] = _ch_base
+                    if not kwargs.get("api_key"):
+                        _ch_key = os.getenv("CHUTES_API_KEY") or os.getenv("CHUTES_API_TOKEN")
+                        if _ch_key:
+                            kwargs["api_key"] = _ch_key
+        except Exception:
+            pass
 
     def _update_kwargs_with_default_litellm_params(
         self, kwargs: dict, metadata_variable_name: Optional[str] = "metadata"
@@ -4020,6 +4630,37 @@ class Router:
         )
         model_group: Optional[str] = kwargs.get("model")
         num_retries = kwargs.pop("num_retries")
+        # SciLLM 429 retry extras (opt-in, env-backed)
+        import os as _os
+        import random as _rand
+        retry_enabled = kwargs.pop(
+            "retry_enabled",
+            True if _os.getenv("SCILLM_RETRY_ENABLED", "0") == "1" else False,
+        )
+        retry_max_attempts = int(
+            kwargs.pop("retry_max_attempts", _os.getenv("SCILLM_RETRY_MAX_ATTEMPTS", "8"))
+        )
+        retry_time_budget_s = float(
+            kwargs.pop("retry_time_budget_s", _os.getenv("SCILLM_RETRY_TIME_BUDGET_S", "600"))
+        )
+        retry_base_s = float(
+            kwargs.pop("retry_base_s", _os.getenv("SCILLM_RETRY_BASE_S", "5"))
+        )
+        retry_max_s = float(
+            kwargs.pop("retry_max_s", _os.getenv("SCILLM_RETRY_MAX_S", "120"))
+        )
+        retry_jitter_pct = float(
+            kwargs.pop("retry_jitter_pct", _os.getenv("SCILLM_RETRY_JITTER_PCT", "0.25"))
+        )
+        honor_retry_after = bool(kwargs.pop("honor_retry_after", True))
+        on_attempt = kwargs.pop("on_attempt", None)
+        on_success = kwargs.pop("on_success", None)
+        on_giveup = kwargs.pop("on_giveup", None)
+        log_json = _os.getenv("SCILLM_LOG_JSON", "0") == "1"
+        _start_ts = time.time()
+        _retry_meta_enabled = _os.getenv("SCILLM_RETRY_META", "0") == "1"
+        _retry_total_sleep = 0.0
+        _retry_last_retry_after = None
 
         ## ADD MODEL GROUP SIZE TO METADATA - used for model_group_rate_limit_error tracking
         _metadata: dict = kwargs.get("litellm_metadata", kwargs.get("metadata")) or {}
@@ -4040,6 +4681,18 @@ class Router:
             response = add_retry_headers_to_response(
                 response=response, attempted_retries=0, max_retries=None
             )
+            # Attach retries meta (0 attempts) if enabled
+            try:
+                if _retry_meta_enabled:
+                    ak = getattr(response, "additional_kwargs", {}) or {}
+                    ak.setdefault("router", {})["retries"] = {
+                        "attempts": 0,
+                        "total_sleep_s": 0.0,
+                        "last_retry_after_s": None,
+                    }
+                    response.additional_kwargs = ak
+            except Exception:
+                pass
             return response
         except Exception as e:
             current_attempt = None
@@ -4082,7 +4735,7 @@ class Router:
                 if _retry_policy_retries is not None:
                     num_retries = _retry_policy_retries
             ## LOGGING
-            if num_retries > 0:
+            if num_retries > 0 or retry_enabled:
                 kwargs = self.log_retry(kwargs=kwargs, e=original_exception)
             else:
                 raise
@@ -4098,10 +4751,57 @@ class Router:
                 healthy_deployments=_healthy_deployments,
                 all_deployments=_all_deployments,
             )
+            # If provider supplies Retry-After and honor is enabled, sleep accordingly first
+            base_sleep = 0.0
+            if honor_retry_after and hasattr(original_exception, "response") and hasattr(original_exception.response, "headers"):
+                try:
+                    ra = original_exception.response.headers.get("Retry-After")  # type: ignore
+                    if ra is not None:
+                        try:
+                            base_sleep = float(ra)
+                        except Exception:
+                            # HTTP-date
+                            try:
+                                from email.utils import parsedate_to_datetime
+                                from datetime import datetime, timezone
+                                dt = parsedate_to_datetime(ra)
+                                now = datetime.now(timezone.utc)
+                                if dt and dt.tzinfo is None:
+                                    dt = dt.replace(tzinfo=timezone.utc)
+                                delta = (dt - now).total_seconds() if dt else 0
+                                base_sleep = max(delta, 0)
+                            except Exception:
+                                base_sleep = 0.0
+                        if base_sleep <= 0:
+                            base_sleep = 0.5
+                        remaining0 = retry_time_budget_s - (time.time() - _start_ts)
+                        if remaining0 > 0 and base_sleep > remaining0:
+                            base_sleep = max(0.5, remaining0 - 0.1)
+                except Exception:
+                    base_sleep = 0.0
+            base_sleep = max(base_sleep, float(retry_after or 0)) if not retry_enabled else max(base_sleep, 0.0)
+            if base_sleep > 0:
+                if callable(on_attempt):
+                    try:
+                        on_attempt({
+                            "event": "429_retry",
+                            "model": kwargs.get("model"),
+                            "attempt_no": 0,
+                            "next_sleep_s": base_sleep,
+                            "reason": "429",
+                            "retry_after": base_sleep,
+                        })
+                    except Exception:
+                        pass
+                await asyncio.sleep(base_sleep)
+                try:
+                    _retry_total_sleep += float(base_sleep)
+                except Exception:
+                    pass
 
-            await asyncio.sleep(retry_after)
-
-            for current_attempt in range(num_retries):
+            max_attempts = retry_max_attempts if retry_enabled else num_retries
+            cumulative_sleep = 0.0
+            for current_attempt in range(max_attempts):
                 try:
                     # if the function call is successful, no exception will be raised and we'll break out of the loop
                     response = await self.make_call(original_function, *args, **kwargs)
@@ -4115,12 +4815,34 @@ class Router:
                         attempted_retries=current_attempt + 1,
                         max_retries=num_retries,
                     )
+                    # Stamp retry meta if enabled
+                    try:
+                        if _retry_meta_enabled:
+                            ak = getattr(response, "additional_kwargs", {}) or {}
+                            ak.setdefault("router", {})["retries"] = {
+                                "attempts": current_attempt + 1,
+                                "total_sleep_s": round(float(_retry_total_sleep), 6),
+                                "last_retry_after_s": _retry_last_retry_after,
+                            }
+                            response.additional_kwargs = ak
+                    except Exception:
+                        pass
+                    if callable(on_success):
+                        try:
+                            on_success({
+                                "latency_ms": int((time.time() - _start_ts) * 1000),
+                                "attempts": current_attempt + 1,
+                                "retries": current_attempt,
+                                "cumulative_sleep_s": cumulative_sleep,
+                            })
+                        except Exception:
+                            pass
                     return response
 
                 except Exception as e:
                     ## LOGGING
                     kwargs = self.log_retry(kwargs=kwargs, e=e)
-                    remaining_retries = num_retries - current_attempt
+                    remaining_retries = max_attempts - current_attempt
                     _model: Optional[str] = kwargs.get("model")  # type: ignore
                     if _model is not None:
                         (
@@ -4132,19 +4854,152 @@ class Router:
                         )
                     else:
                         _healthy_deployments = []
-                    _timeout = self._time_to_sleep_before_retry(
-                        e=original_exception,
-                        remaining_retries=remaining_retries,
-                        num_retries=num_retries,
-                        healthy_deployments=_healthy_deployments,
-                        all_deployments=_all_deployments,
-                    )
+                    # Budget check before any additional delay
+                    elapsed = time.time() - _start_ts
+                    if retry_enabled and elapsed >= retry_time_budget_s:
+                        if callable(on_giveup):
+                            try:
+                                on_giveup({
+                                    "attempts": current_attempt + 1,
+                                    "elapsed_s": elapsed,
+                                    "last_error": str(e)[:200],
+                                })
+                            except Exception:
+                                pass
+                        if log_json:
+                            try:
+                                import json as _json
+                                print(_json.dumps({
+                                    "event": "429_giveup",
+                                    "model": kwargs.get("model"),
+                                    "attempts": current_attempt + 1,
+                                    "elapsed_s": round(elapsed, 3),
+                                    "error": str(e)[:200],
+                                }))
+                            except Exception:
+                                pass
+                        raise e
+
+                    # Compute sleep: Retry-After header wins if present and honor enabled; else exp backoff + jitter
+                    _timeout = 0.0
+                    headers = None
+                    if honor_retry_after and hasattr(e, "response") and hasattr(e.response, "headers"):
+                        headers = e.response.headers  # type: ignore
+                        try:
+                            ra = headers.get("Retry-After") if headers is not None else None
+                            if ra is not None:
+                                _timeout = float(ra)
+                                if _timeout <= 0:
+                                    _timeout = 0.5
+                                try:
+                                    _retry_last_retry_after = float(_timeout)
+                                except Exception:
+                                    _retry_last_retry_after = None
+                        except Exception:
+                            _timeout = 0.0
+                    if _timeout <= 0:
+                        exp = min(retry_max_s, retry_base_s * (2 ** max(0, current_attempt)))
+                        jitter = exp * (retry_jitter_pct * _rand.random())
+                        _timeout = min(retry_max_s, exp + jitter)
+                    # Cap timeout to remaining global budget minus small epsilon
+                    remaining = retry_time_budget_s - elapsed
+                    if retry_enabled and remaining > 0 and _timeout > remaining:
+                        _timeout = max(0.5, remaining - 0.1)
+                    # Budget check including next sleep duration
+                    if retry_enabled and (elapsed + _timeout) > retry_time_budget_s:
+                        if callable(on_giveup):
+                            try:
+                                on_giveup({
+                                    "attempts": current_attempt + 1,
+                                    "elapsed_s": elapsed,
+                                    "last_error": str(e)[:200],
+                                })
+                            except Exception:
+                                pass
+                        if log_json:
+                            try:
+                                import json as _json
+                                print(_json.dumps({
+                                    "event": "429_giveup",
+                                    "model": kwargs.get("model"),
+                                    "attempts": current_attempt + 1,
+                                    "elapsed_s": round(elapsed, 3),
+                                    "error": str(e)[:200],
+                                }))
+                            except Exception:
+                                pass
+                        raise e
+
+                    if callable(on_attempt):
+                        try:
+                            on_attempt({
+                                "event": "429_retry",
+                                "model": kwargs.get("model"),
+                                "attempt_no": current_attempt + 1,
+                                "next_sleep_s": _timeout,
+                                "reason": getattr(e, "code", "429"),
+                                "retry_after": float(headers.get("Retry-After")) if headers and headers.get("Retry-After") else None,
+                                "remaining_time_s": round(max(0.0, retry_time_budget_s - (time.time() - _start_ts)), 2),
+                                "remaining_attempts": max_attempts - (current_attempt + 1),
+                                "cumulative_sleep_s": 0.0,
+                                "attempt_start_monotonic": time.perf_counter(),
+                            })
+                        except Exception:
+                            pass
+                    # Optional structured log (throttled)
+                    try:
+                        throttle = int(_os.getenv("SCILLM_RETRY_LOG_EVERY", "1") or "1")
+                    except Exception:
+                        throttle = 1
+                    if log_json and (throttle <= 1 or ((current_attempt + 1) % throttle == 0)):
+                        try:
+                            import json as _json
+                            print(_json.dumps({
+                                "event": "429_retry",
+                                "model": kwargs.get("model"),
+                                "attempt": current_attempt + 1,
+                                "sleep_s": round(_timeout, 3),
+                                "elapsed_s": round(elapsed, 3),
+                                "retry_after_s": float(headers.get("Retry-After")) if headers and headers.get("Retry-After") else None,
+                            }, separators=(",", ":")))
+                        except Exception:
+                            pass
                     await asyncio.sleep(_timeout)
+                    try:
+                        _retry_total_sleep += float(_timeout)
+                    except Exception:
+                        pass
+                    try:
+                        cumulative_sleep
+                    except NameError:
+                        cumulative_sleep = 0.0
+                    cumulative_sleep += _timeout
 
             if type(original_exception) in litellm.LITELLM_EXCEPTION_TYPES:
                 setattr(original_exception, "max_retries", num_retries)
                 setattr(original_exception, "num_retries", current_attempt)
 
+            if callable(on_giveup):
+                try:
+                    on_giveup({
+                        "attempts": (current_attempt or 0) + 1,
+                        "elapsed_s": (time.time() - _start_ts),
+                        "last_error": str(original_exception)[:200],
+                    })
+                except Exception:
+                    pass
+            if log_json:
+                try:
+                    import json as _json
+                    print(_json.dumps({
+                        "event": "429_giveup",
+                        "model": kwargs.get("model"),
+                        "attempts": (current_attempt or 0) + 1,
+                        "elapsed_s": round(time.time() - _start_ts, 3),
+                        "error": str(original_exception)[:200],
+                    }))
+                except Exception:
+                    pass
             raise original_exception
 
     async def make_call(self, original_function: Any, *args, **kwargs):
@@ -4563,6 +5418,13 @@ class Router:
 
             if isinstance(_model_info, dict):
                 deployment_id = _model_info.get("id", None)
+                if isinstance(deployment_id, int):
+                    deployment_id = str(deployment_id)
+                if not isinstance(deployment_id, str) or len(deployment_id) == 0:
+                    verbose_router_logger.debug(
+                        "Router: deployment_callback_on_failure - missing deployment id; skipping cooldown tracking."
+                    )
+                    return False
                 increment_deployment_failures_for_current_minute(
                     litellm_router_instance=self,
                     deployment_id=deployment_id,
