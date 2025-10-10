@@ -1,7 +1,7 @@
 # LiteLLM Makefile
 # Simple Makefile for running tests and basic development tasks
 
-.PHONY: help test test-unit test-integration test-unit-helm lint format install-dev install-proxy-dev install-test-deps install-helm-unittest check-circular-imports check-import-safety run-scenarios run-stress-tests
+.PHONY: help test test-unit test-integration test-unit-helm lint format install-dev install-proxy-dev install-test-deps install-helm-unittest check-circular-imports check-import-safety run-scenarios run-stress-tests project-ready project-ready-live project-ready-summary
 
 # Default target
 help:
@@ -17,9 +17,9 @@ help:
 	@echo "  make lint               - Run all linting (Ruff, MyPy, Black check, circular imports, import safety)"
 	@echo "  make run-scenarios      - Run live scenarios (mini-agent, router demos, chutes, code-agent)"
 	@echo "  make lean4-bridge       - Start Lean4 bridge on :8787"
-		@echo "  make lean4-bridge-smoke - Probe Lean4 bridge (live scenario)"
+	@echo "  make lean4-live        - Probe Lean4 bridge (live scenario)"
 	@echo "  make codeworld-bridge   - Start CodeWorld bridge on :8887"
-		@echo "  make codeworld-bridge-smoke - Probe CodeWorld bridge (live scenario)"
+	@echo "  make codeworld-live    - Probe CodeWorld bridge (live scenario)"
 	@echo "  make run-stress-tests   - Run live stress scenarios (throughput, bursts, codex, mini-agent)"
 	@echo "  make lint-ruff          - Run Ruff linting only"
 	@echo "  make lint-mypy          - Run MyPy type checking only"
@@ -33,6 +33,9 @@ help:
 	@echo "  make review-bundle      - Create standard code review bundle (Markdown)"
 	@echo "  make review-bundle-custom - Create custom ==== FILE style review bundle"
 	@echo "  make review-bundle-gist FILE=... - Upload a file as a private GitHub Gist (requires GITHUB_TOKEN)"
+	@echo "  make project-ready        - Run deterministic + local readiness (no network)"
+	@echo "  make project-ready-live   - Run strict/live readiness (enforces required providers)"
+	@echo "  make project-ready-summary- Print last readiness PASS/FAIL/SKIP summary"
 
 # --- Logo exports -------------------------------------------------------------
 .PHONY: logo-export
@@ -92,19 +95,19 @@ lint-mypy: install-dev
 
 lint-black: format-check
 
-run-scenarios:
-	@. .venv/bin/activate && python scenarios/run_all.py
+	run-scenarios:
+		@. .venv/bin/activate && python scenarios/run_all.py
+
+lean4-live:
+	PYTHONPATH=$(PWD) python scenarios/lean4_bridge_release.py
 
 lean4-bridge:
 	PYTHONPATH=src uvicorn lean4_prover.bridge.server:app --port 8787 --log-level warning
 
-lean4-bridge-smoke:
-	PYTHONPATH=$(PWD) python scenarios/lean4_bridge_release.py
-
 codeworld-bridge:
 	PYTHONPATH=src uvicorn codeworld.bridge.server:app --port 8887 --log-level warning
 
-codeworld-bridge-smoke:
+codeworld-live:
 	PYTHONPATH=$(PWD) python scenarios/codeworld_bridge_release.py
 
 run-stress-tests:
@@ -287,6 +290,26 @@ bridge-down:
 bridge-restart:
 	@$(MAKE) bridge-down || true
 	@$(MAKE) bridge-up
+
+# -----------------------------------------------------------------------------
+# Project Readiness — One Way to Green
+# -----------------------------------------------------------------------------
+
+.PHONY: project-ready
+project-ready:
+	/bin/sh -lc '. local/scripts/anti_drift_preflight.sh; python scripts/mvp_check.py' || true
+	python scripts/generate_project_ready.py || true
+	@$(MAKE) project-ready-summary || true
+
+.PHONY: project-ready-live
+project-ready-live:
+	/bin/sh -lc '. local/scripts/anti_drift_preflight.sh; READINESS_LIVE=1 STRICT_READY=1 python scripts/mvp_check.py' || true
+	python scripts/generate_project_ready.py || true
+	@$(MAKE) project-ready-summary || true
+
+.PHONY: project-ready-summary
+project-ready-summary:
+	@python scripts/print_ready_summary.py || true
 
 bridge-watch:
 	@python scripts/watch_bridges.py --loop 30

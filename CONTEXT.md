@@ -8,7 +8,7 @@ This document captures the exact state of our work so we can resume smoothly.
 - Path: `git@github.com:grahama1970/scillm.git#feat/final-polish`
 
 ## High‑value commits (latest first)
-- 17b6a3f468 — make: bridge ops targets + smokes; CI bridges-smoke workflow
+- 17b6a3f468 — make: bridge ops targets + scenarios; CI bridges workflow
 - 13a0edff24 — ops: Docker healthchecks + restart; watchdog script
 - 66e62caab9 — docker(stack) fixes; Lean4 echo fallback; verified scenarios
 - b128131ac9 — scenarios: codex_agent_regression_check
@@ -29,13 +29,13 @@ This document captures the exact state of our work so we can resume smoothly.
 - CodeWorld Bridge
   - Docker service: `codeworld-bridge` (host `:8887`)
   - Health: `curl -sSf http://127.0.0.1:8887/healthz`
-  - Smoke: `PYTHONPATH=$(pwd) python scenarios/codeworld_bridge_release.py`
+  - Scenario: `PYTHONPATH=$(pwd) python scenarios/codeworld_bridge_release.py`
 - Lean4 (Certainly) Bridge
   - Docker service: `lean4-bridge` (host `:8787`)
   - Env set: `LEAN4_REPO=/app`, `CERTAINLY_REPO=/app`
   - Echo fallback: set `LEAN4_BRIDGE_ECHO=1` to avoid 500s when CLI missing
   - Health: `curl -sSf http://127.0.0.1:8787/healthz`
-  - Smoke: `PYTHONPATH=$(pwd) LEAN4_BRIDGE_ECHO=1 python scenarios/lean4_bridge_release.py`
+  - Scenario: `PYTHONPATH=$(pwd) LEAN4_BRIDGE_ECHO=1 python scenarios/lean4_bridge_release.py`
 
 ## Router / Parallel invariants (now enforced)
 - `parallel_acompletions` always returns an OpenAI‑shaped dict and attaches `scillm_router` (even on exceptions).
@@ -56,11 +56,11 @@ This document captures the exact state of our work so we can resume smoothly.
 ## Make Targets
 - `make bridge-up` / `bridge-down` / `bridge-restart`
 - `make bridge-watch` (watchdog loop @ 30s)
-- `make codeworld-smoke` / `lean4-smoke`
+- `make codeworld-live` / `lean4-live`
 - `make codex-regression`
 
 ## CI
-- `.github/workflows/bridges-smoke.yml` — starts bridges, runs health checks, one‑shot watchdog, and smokes (Lean4 in echo mode).
+- `.github/workflows/bridges.yml` — starts bridges, runs health checks, one‑shot watchdog, and scenarios (Lean4 in echo mode).
 
 ## Environment — Quick Exports
 - Codex‑Agent (local sidecar):
@@ -71,13 +71,13 @@ This document captures the exact state of our work so we can resume smoothly.
 - Bridges:
   - CodeWorld up: `docker compose -f deploy/docker/compose.scillm.stack.yml up -d codeworld-bridge`
   - Lean4 up: `docker compose -f deploy/docker/compose.scillm.stack.yml up -d lean4-bridge`
-  - Lean4 echo smoke: `LEAN4_BRIDGE_ECHO=1`
+  - Lean4 echo scenario: `LEAN4_BRIDGE_ECHO=1`
 
 ## What to run first (tomorrow)
 1) Start/verify bridges:
-   - `make bridge-up` (or run GH workflow Bridges Smoke)
+   - `make bridge-up`
    - `make bridge-watch` (optional continuous guard)
-   - `make codeworld-smoke` and `make lean4-smoke`
+   - `make codeworld-live` and `make lean4-live`
 2) Codex regression:
    - `make codex-regression`
 3) Optional probes:
@@ -92,4 +92,3 @@ This document captures the exact state of our work so we can resume smoothly.
 ## Known Pitfalls (captured in runbook)
 - Set provider env before import; omit `/v1` in bases; vision messages must be a list of parts; mount `~/.codex/auth.json` for codex sidecar when echo is off.
 - See memory: `codex-agent-runbook` for full lessons learned.
-

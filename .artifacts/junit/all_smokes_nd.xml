@@ -1,59 +1,252 @@
-<?xml version="1.0" encoding="utf-8"?><testsuites><testsuite name="pytest" errors="0" failures="3" skipped="46" tests="56" time="101.645" timestamp="2025-09-28T16:09:25.641704" hostname="graham-MS-7C60"><testcase classname="tests.ndsmoke.test_chutes_live_optional" name="test_chutes_chat_live_optional" time="1.931"><skipped type="pytest.skip" message="Chutes token has no matching chute; skipping live ndsmoke">/home/graham/workspace/experiments/litellm/tests/ndsmoke/test_chutes_live_optional.py:34: Chutes token has no matching chute; skipping live ndsmoke</skipped></testcase><testcase classname="tests.ndsmoke.test_chutes_openai_ndsmoke" name="test_chutes_chat_minimal_optional" time="0.348"><failure message="httpx.HTTPStatusError: Client error '404 Not Found' for url 'https://api.chutes.ai/chat/completions'&#10;For more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/404">tests/ndsmoke/test_chutes_openai_ndsmoke.py:37: in test_chutes_chat_minimal_optional
-    r.raise_for_status()
-.venv/lib/python3.12/site-packages/httpx/_models.py:829: in raise_for_status
-    raise HTTPStatusError(message, request=request, response=self)
-E   httpx.HTTPStatusError: Client error '404 Not Found' for url 'https://api.chutes.ai/chat/completions'
-E   For more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/404</failure></testcase><testcase classname="tests.ndsmoke.test_chutes_parallel_ndsmoke" name="test_parallel_chutes_min" time="0.001"><skipped type="pytest.skip" message="CHUTES_API_BASE must end with /v1">/home/graham/workspace/experiments/litellm/tests/ndsmoke/test_chutes_parallel_ndsmoke.py:39: CHUTES_API_BASE must end with /v1</skipped></testcase><testcase classname="tests.ndsmoke.test_codex_agent_docker_loopback_optional" name="test_docker_codex_loopback_router_optional" time="0.000"><skipped type="pytest.skip" message="codex loopback disabled; set MINI_AGENT_DOCKER_CODEX_LOOPBACK=1 to enable">/home/graham/workspace/experiments/litellm/tests/ndsmoke/test_codex_agent_docker_loopback_optional.py:30: codex loopback disabled; set MINI_AGENT_DOCKER_CODEX_LOOPBACK=1 to enable</skipped></testcase><testcase classname="tests.ndsmoke.test_codex_agent_live_optional" name="test_codex_agent_live_optional" time="0.001"><skipped type="pytest.skip" message="CODEX_AGENT_API_BASE not set or not reachable">/home/graham/workspace/experiments/litellm/tests/ndsmoke/test_codex_agent_live_optional.py:33: CODEX_AGENT_API_BASE not set or not reachable</skipped></testcase><testcase classname="tests.ndsmoke.test_escalation_chutes_ndsmoke" name="test_escalation_to_chutes_live_optional" time="0.020"><failure message="httpx.ConnectError: [Errno 111] Connection refused">.venv/lib/python3.12/site-packages/httpx/_transports/default.py:101: in map_httpcore_exceptions
-    yield
-.venv/lib/python3.12/site-packages/httpx/_transports/default.py:250: in handle_request
-    resp = self._pool.handle_request(req)
-.venv/lib/python3.12/site-packages/httpcore/_sync/connection_pool.py:256: in handle_request
-    raise exc from None
-.venv/lib/python3.12/site-packages/httpcore/_sync/connection_pool.py:236: in handle_request
-    response = connection.handle_request(
-.venv/lib/python3.12/site-packages/httpcore/_sync/connection.py:101: in handle_request
-    raise exc
-.venv/lib/python3.12/site-packages/httpcore/_sync/connection.py:78: in handle_request
-    stream = self._connect(request)
-.venv/lib/python3.12/site-packages/httpcore/_sync/connection.py:124: in _connect
-    stream = self._network_backend.connect_tcp(**kwargs)
-.venv/lib/python3.12/site-packages/httpcore/_backends/sync.py:207: in connect_tcp
-    with map_exceptions(exc_map):
-/usr/lib/python3.12/contextlib.py:158: in __exit__
-    self.gen.throw(value)
-.venv/lib/python3.12/site-packages/httpcore/_exceptions.py:14: in map_exceptions
-    raise to_exc(exc) from exc
-E   httpcore.ConnectError: [Errno 111] Connection refused
+<?xml version="1.0" encoding="utf-8"?><testsuites name="pytest tests"><testsuite name="pytest" errors="0" failures="10" skipped="3" tests="57" time="118.773" timestamp="2025-10-10T10:35:49.730408-04:00" hostname="graham-MS-7C60"><testcase classname="tests.smoke.test_agent_api_shape" name="test_agent_proxy_response_shapes_minimal" time="3.050" /><testcase classname="tests.smoke.test_codex_agent_binary_resolution" name="test_codex_agent_binary_resolution" time="0.001" /><testcase classname="tests.smoke.test_codex_agent_router_smoke" name="test_codex_agent_router_against_inprocess_shim" time="18.853"><failure message="litellm.exceptions.APIConnectionError: litellm.APIConnectionError: cannot access local variable 'custom_llm_provider' where it is not associated with a value&#10;Traceback (most recent call last):&#10;  File &quot;/home/graham/workspace/experiments/litellm/litellm/main.py&quot;, line 1145, in completion&#10;    custom_llm_provider=custom_llm_provider,&#10;                        ^^^^^^^^^^^^^^^^^^^&#10;UnboundLocalError: cannot access local variable 'custom_llm_provider' where it is not associated with a value&#10;&#10;During handling of the above exception, another exception occurred:&#10;&#10;Traceback (most recent call last):&#10;  File &quot;/home/graham/workspace/experiments/litellm/litellm/main.py&quot;, line 550, in acompletion&#10;    init_response = await loop.run_in_executor(None, func_with_context)&#10;                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^&#10;  File &quot;/home/graham/.local/share/uv/python/cpython-3.12.10-linux-x86_64-gnu/lib/python3.12/concurrent/futures/thread.py&quot;, line 59, in run&#10;    result = self.fn(*self.args, **self.kwargs)&#10;             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^&#10;  File &quot;/home/graham/workspace/experiments/litellm/litellm/utils.py&quot;, line 1078, in wrapper&#10;    result = original_function(*args, **kwargs)&#10;             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^&#10;  File &quot;/home/graham/workspace/experiments/litellm/litellm/main.py&quot;, line 3678, in completion&#10;    custom_llm_provider=custom_llm_provider,&#10;                        ^^^^^^^^^^^^^^^^^^^&#10;UnboundLocalError: cannot access local variable 'custom_llm_provider' where it is not associated with a value&#10;. Received Model Group=codex-agent-1&#10;Available Model Group Fallbacks=None LiteLLM Retried: 1 times, LiteLLM Max Retries: 2">litellm/main.py:1145: in completion
+    custom_llm_provider=custom_llm_provider,
+                        ^^^^^^^^^^^^^^^^^^^
+E   UnboundLocalError: cannot access local variable 'custom_llm_provider' where it is not associated with a value
 
-The above exception was the direct cause of the following exception:
-tests/ndsmoke/test_escalation_chutes_ndsmoke.py:33: in test_escalation_to_chutes_live_optional
-    r = httpx.post(url, json=payload, timeout=60)
-.venv/lib/python3.12/site-packages/httpx/_api.py:304: in post
-    return request(
-.venv/lib/python3.12/site-packages/httpx/_api.py:109: in request
-    return client.request(
-.venv/lib/python3.12/site-packages/httpx/_client.py:825: in request
-    return self.send(request, auth=auth, follow_redirects=follow_redirects)
-.venv/lib/python3.12/site-packages/httpx/_client.py:914: in send
-    response = self._send_handling_auth(
-.venv/lib/python3.12/site-packages/httpx/_client.py:942: in _send_handling_auth
-    response = self._send_handling_redirects(
-.venv/lib/python3.12/site-packages/httpx/_client.py:979: in _send_handling_redirects
-    response = self._send_single_request(request)
-.venv/lib/python3.12/site-packages/httpx/_client.py:1014: in _send_single_request
-    response = transport.handle_request(request)
-.venv/lib/python3.12/site-packages/httpx/_transports/default.py:249: in handle_request
-    with map_httpcore_exceptions():
-/usr/lib/python3.12/contextlib.py:158: in __exit__
-    self.gen.throw(value)
-.venv/lib/python3.12/site-packages/httpx/_transports/default.py:118: in map_httpcore_exceptions
-    raise mapped_exc(message) from exc
-E   httpx.ConnectError: [Errno 111] Connection refused</failure></testcase><testcase classname="tests.ndsmoke.test_exec_rpc_shape_ndsmoke" name="test_exec_rpc_shape_python_print1_optional" time="0.000"><skipped type="pytest.skip" message="exec RPC not reachable on 127.0.0.1:8792">/home/graham/workspace/experiments/litellm/tests/ndsmoke/test_exec_rpc_shape_ndsmoke.py:35: exec RPC not reachable on 127.0.0.1:8792</skipped></testcase><testcase classname="tests.ndsmoke.test_litellm_mcp_smokes" name="test_mcp_tools_registration_smoke" time="0.003" /><testcase classname="tests.ndsmoke.test_litellm_mcp_smokes" name="test_mcp_model_advice_returns_text" time="0.000" /><testcase classname="tests.ndsmoke.test_litellm_mcp_smokes" name="test_mcp_llm_chat_codex_agent_optional" time="0.000"><skipped type="pytest.skip" message="codex-agent base not reachable on 127.0.0.1:48979">/home/graham/workspace/experiments/litellm/tests/ndsmoke/test_litellm_mcp_smokes.py:65: codex-agent base not reachable on 127.0.0.1:48979</skipped></testcase><testcase classname="tests.ndsmoke.test_litellm_mcp_smokes" name="test_mcp_llm_chat_ollama_optional" time="50.867" /><testcase classname="tests.ndsmoke.test_litellm_mcp_stdio_smoke" name="test_stdio_mcp_list_tools_and_model_advice_optional" time="0.001"><skipped type="pytest.skip" message="Python MCP client not installed (model-context-protocol)">/home/graham/workspace/experiments/litellm/tests/ndsmoke/test_litellm_mcp_stdio_smoke.py:15: Python MCP client not installed (model-context-protocol)</skipped></testcase><testcase classname="tests.ndsmoke.test_loop_exec_python_ndsmoke" name="test_loop_exec_python_ndsmoke" time="0.001"><skipped type="pytest.skip" message="mini-agent API not reachable on 127.0.0.1:48979">/home/graham/workspace/experiments/litellm/tests/ndsmoke/test_loop_exec_python_ndsmoke.py:100: mini-agent API not reachable on 127.0.0.1:48979</skipped></testcase><testcase classname="tests.ndsmoke.test_mini_agent_api_live_minimal_ndsmoke" name="test_agent_api_live_minimal_optional" time="0.001"><skipped type="pytest.skip" message="Agent API not reachable on 127.0.0.1:48979">/home/graham/workspace/experiments/litellm/tests/ndsmoke/test_mini_agent_api_live_minimal_ndsmoke.py:23: Agent API not reachable on 127.0.0.1:48979</skipped></testcase><testcase classname="tests.ndsmoke.test_mini_agent_compress_runs_ndsmoke" name="test_mini_agent_compress_runs_iterates_live_optional" time="0.001"><skipped type="pytest.skip" message="mini-agent API not reachable on 127.0.0.1:48979">/home/graham/workspace/experiments/litellm/tests/ndsmoke/test_mini_agent_compress_runs_ndsmoke.py:34: mini-agent API not reachable on 127.0.0.1:48979</skipped></testcase><testcase classname="tests.ndsmoke.test_mini_agent_docker_live_optional" name="test_mini_agent_docker_ollama_code_live_optional" time="0.000"><skipped type="pytest.skip" message="mini-agent API not reachable on 127.0.0.1:48979">/home/graham/workspace/experiments/litellm/tests/ndsmoke/test_mini_agent_docker_live_optional.py:33: mini-agent API not reachable on 127.0.0.1:48979</skipped></testcase><testcase classname="tests.ndsmoke.test_mini_agent_docker_live_optional" name="test_mini_agent_docker_codex_code_live_optional" time="0.001"><skipped type="pytest.skip" message="mini-agent API not reachable on 127.0.0.1:48979">/home/graham/workspace/experiments/litellm/tests/ndsmoke/test_mini_agent_docker_live_optional.py:75: mini-agent API not reachable on 127.0.0.1:48979</skipped></testcase><testcase classname="tests.ndsmoke.test_mini_agent_docker_ready" name="test_mini_agent_docker_ready_optional" time="0.001"><skipped type="pytest.skip" message="mini-agent API not reachable on 127.0.0.1:48979">/home/graham/workspace/experiments/litellm/tests/ndsmoke/test_mini_agent_docker_ready.py:25: mini-agent API not reachable on 127.0.0.1:48979</skipped></testcase><testcase classname="tests.ndsmoke.test_mini_agent_glm4_bugfix_ndsmoke" name="test_mini_agent_glm4_bugfix_iterates_live_optional" time="0.001"><skipped type="pytest.skip" message="mini-agent API not reachable on 127.0.0.1:48979">/home/graham/workspace/experiments/litellm/tests/ndsmoke/test_mini_agent_glm4_bugfix_ndsmoke.py:37: mini-agent API not reachable on 127.0.0.1:48979</skipped></testcase><testcase classname="tests.ndsmoke.test_mini_agent_lang_ndsmoke" name="test_lang_python_live_optional" time="0.001"><skipped type="pytest.skip" message="mini-agent API not reachable on 127.0.0.1:48979">/home/graham/workspace/experiments/litellm/tests/ndsmoke/test_mini_agent_lang_ndsmoke.py:39: mini-agent API not reachable on 127.0.0.1:48979</skipped></testcase><testcase classname="tests.ndsmoke.test_mini_agent_lang_ndsmoke" name="test_lang_javascript_live_optional" time="0.000"><skipped type="pytest.skip" message="mini-agent API not reachable on 127.0.0.1:48979">/home/graham/workspace/experiments/litellm/tests/ndsmoke/test_mini_agent_lang_ndsmoke.py:39: mini-agent API not reachable on 127.0.0.1:48979</skipped></testcase><testcase classname="tests.ndsmoke.test_mini_agent_lang_ndsmoke" name="test_lang_c_live_optional" time="0.001"><skipped type="pytest.skip" message="mini-agent API not reachable on 127.0.0.1:48979">/home/graham/workspace/experiments/litellm/tests/ndsmoke/test_mini_agent_lang_ndsmoke.py:39: mini-agent API not reachable on 127.0.0.1:48979</skipped></testcase><testcase classname="tests.ndsmoke.test_mini_agent_lang_ndsmoke" name="test_lang_cpp_live_optional" time="0.001"><skipped type="pytest.skip" message="mini-agent API not reachable on 127.0.0.1:48979">/home/graham/workspace/experiments/litellm/tests/ndsmoke/test_mini_agent_lang_ndsmoke.py:39: mini-agent API not reachable on 127.0.0.1:48979</skipped></testcase><testcase classname="tests.ndsmoke.test_mini_agent_lang_ndsmoke" name="test_lang_go_live_optional" time="0.001"><skipped type="pytest.skip" message="mini-agent API not reachable on 127.0.0.1:48979">/home/graham/workspace/experiments/litellm/tests/ndsmoke/test_mini_agent_lang_ndsmoke.py:39: mini-agent API not reachable on 127.0.0.1:48979</skipped></testcase><testcase classname="tests.ndsmoke.test_mini_agent_lang_ndsmoke" name="test_lang_java_live_optional" time="0.001"><skipped type="pytest.skip" message="mini-agent API not reachable on 127.0.0.1:48979">/home/graham/workspace/experiments/litellm/tests/ndsmoke/test_mini_agent_lang_ndsmoke.py:39: mini-agent API not reachable on 127.0.0.1:48979</skipped></testcase><testcase classname="tests.ndsmoke.test_mini_agent_lang_ndsmoke" name="test_lang_rust_live_optional" time="0.000"><skipped type="pytest.skip" message="mini-agent API not reachable on 127.0.0.1:48979">/home/graham/workspace/experiments/litellm/tests/ndsmoke/test_mini_agent_lang_ndsmoke.py:39: mini-agent API not reachable on 127.0.0.1:48979</skipped></testcase><testcase classname="tests.ndsmoke.test_mini_agent_lang_ndsmoke" name="test_lang_asm_live_optional" time="0.001"><skipped type="pytest.skip" message="mini-agent API not reachable on 127.0.0.1:48979">/home/graham/workspace/experiments/litellm/tests/ndsmoke/test_mini_agent_lang_ndsmoke.py:39: mini-agent API not reachable on 127.0.0.1:48979</skipped></testcase><testcase classname="tests.ndsmoke.test_mini_agent_ollama_live_optional" name="test_mini_agent_with_ollama_optional" time="0.034"><skipped type="pytest.skip" message="no suitable ollama text model found">/home/graham/workspace/experiments/litellm/tests/ndsmoke/test_mini_agent_ollama_live_optional.py:65: no suitable ollama text model found</skipped></testcase><testcase classname="tests.ndsmoke.test_multilang_ollama_loop_ndsmoke" name="test_multilang_loop_ndsmoke[ts-TS_OK-Return only one ```ts code block that runs with ts-node. Write function runLengthEncode(s: string): string and in main print two tests and then print TS_OK.]" time="0.001"><skipped type="pytest.skip" message="exec RPC not reachable on 127.0.0.1:8792">/home/graham/workspace/experiments/litellm/tests/ndsmoke/test_multilang_ollama_loop_ndsmoke.py:99: exec RPC not reachable on 127.0.0.1:8792</skipped></testcase><testcase classname="tests.ndsmoke.test_multilang_ollama_loop_ndsmoke" name="test_multilang_loop_ndsmoke[c-C_OK-Return only one ```c code block. Program prints C_OK to stdout. Compile with -Wall -Werror; fix if it fails.]" time="0.000"><skipped type="pytest.skip" message="exec RPC not reachable on 127.0.0.1:8792">/home/graham/workspace/experiments/litellm/tests/ndsmoke/test_multilang_ollama_loop_ndsmoke.py:99: exec RPC not reachable on 127.0.0.1:8792</skipped></testcase><testcase classname="tests.ndsmoke.test_multilang_ollama_loop_ndsmoke" name="test_multilang_loop_ndsmoke[cpp-CPP_OK-Return only one ```cpp code block (C++20). Program prints CPP_OK. Compile with -O2 -std=c++20 -Wall -Werror; fix if it fails.]" time="0.000"><skipped type="pytest.skip" message="exec RPC not reachable on 127.0.0.1:8792">/home/graham/workspace/experiments/litellm/tests/ndsmoke/test_multilang_ollama_loop_ndsmoke.py:99: exec RPC not reachable on 127.0.0.1:8792</skipped></testcase><testcase classname="tests.ndsmoke.test_multilang_ollama_loop_ndsmoke" name="test_multilang_loop_ndsmoke[go-GO_OK-Return only one ```go code block. Program prints GO_OK. If it fails to run, fix and retry.]" time="0.000"><skipped type="pytest.skip" message="exec RPC not reachable on 127.0.0.1:8792">/home/graham/workspace/experiments/litellm/tests/ndsmoke/test_multilang_ollama_loop_ndsmoke.py:99: exec RPC not reachable on 127.0.0.1:8792</skipped></testcase><testcase classname="tests.ndsmoke.test_multilang_ollama_loop_ndsmoke" name="test_multilang_loop_ndsmoke[java-JAVA_OK-Return only one ```java code block. Class Main prints JAVA_OK. If javac/java fails, fix and retry.]" time="0.000"><skipped type="pytest.skip" message="exec RPC not reachable on 127.0.0.1:8792">/home/graham/workspace/experiments/litellm/tests/ndsmoke/test_multilang_ollama_loop_ndsmoke.py:99: exec RPC not reachable on 127.0.0.1:8792</skipped></testcase><testcase classname="tests.ndsmoke.test_multilang_ollama_loop_ndsmoke" name="test_multilang_loop_ndsmoke[rs-RUST_OK-Return only one ```rust code block. Program prints RUST_OK. If rustc fails, fix and retry.]" time="0.001"><skipped type="pytest.skip" message="exec RPC not reachable on 127.0.0.1:8792">/home/graham/workspace/experiments/litellm/tests/ndsmoke/test_multilang_ollama_loop_ndsmoke.py:99: exec RPC not reachable on 127.0.0.1:8792</skipped></testcase><testcase classname="tests.ndsmoke.test_multilang_ollama_loop_ndsmoke" name="test_multilang_loop_ndsmoke[asm-ASM_OK-Return only one ```asm code block (NASM x86_64 Linux). Program prints ASM_OK to stdout using sys_write syscall. If assembly/link fails, fix and retry.]" time="0.000"><skipped type="pytest.skip" message="exec RPC not reachable on 127.0.0.1:8792">/home/graham/workspace/experiments/litellm/tests/ndsmoke/test_multilang_ollama_loop_ndsmoke.py:99: exec RPC not reachable on 127.0.0.1:8792</skipped></testcase><testcase classname="tests.ndsmoke.test_nd_real_ollama_smoke" name="test_nd_real_agent_run_returns_nonempty_content_and_ollama_prefix" time="0.000"><skipped type="pytest.skip" message="ND_REAL=1 required for true ND lane">/home/graham/workspace/experiments/litellm/tests/ndsmoke/test_nd_real_ollama_smoke.py:17: ND_REAL=1 required for true ND lane</skipped></testcase><testcase classname="tests.ndsmoke.test_node_gateway_optional" name="test_node_gateway_optional" time="3.028"><skipped type="pytest.skip" message="node gateway not ready in time">/home/graham/workspace/experiments/litellm/tests/ndsmoke/test_node_gateway_optional.py:47: node gateway not ready in time</skipped></testcase><testcase classname="tests.ndsmoke.test_node_gateway_run_agent" name="test_node_gateway_run_agent_basic" time="0.342" /><testcase classname="tests.ndsmoke.test_node_gateway_run_codex" name="test_node_gateway_run_codex_presence_and_501" time="0.227" /><testcase classname="tests.ndsmoke.test_ollama_batch_as_completed_optional" name="test_ollama_batch_as_completed_optional" time="0.023"><skipped type="pytest.skip" message="no suitable ollama text model found">/home/graham/workspace/experiments/litellm/tests/ndsmoke/test_ollama_batch_as_completed_optional.py:57: no suitable ollama text model found</skipped></testcase><testcase classname="tests.ndsmoke.test_ollama_code_live_optional" name="test_ollama_code_model_live_optional" time="12.008" /><testcase classname="tests.ndsmoke.test_ollama_generate_ndsmoke" name="test_ollama_generate_optional" time="1.517"><failure message="json.decoder.JSONDecodeError: Extra data: line 2 column 1 (char 99)">tests/ndsmoke/test_ollama_generate_ndsmoke.py:24: in test_ollama_generate_optional
-    data = r.json()
-.venv/lib/python3.12/site-packages/httpx/_models.py:832: in json
-    return jsonlib.loads(self.content, **kwargs)
-/usr/lib/python3.12/json/__init__.py:346: in loads
-    return _default_decoder.decode(s)
-/usr/lib/python3.12/json/decoder.py:340: in decode
-    raise JSONDecodeError("Extra data", s, end)
-E   json.decoder.JSONDecodeError: Extra data: line 2 column 1 (char 99)</failure></testcase><testcase classname="tests.ndsmoke.test_ollama_live_optional" name="test_ollama_live_optional" time="0.024"><skipped type="pytest.skip" message="no suitable ollama text model found; set LITELLM_DEFAULT_TEXT_MODEL=ollama/granite3.3:8b">/home/graham/workspace/experiments/litellm/tests/ndsmoke/test_ollama_live_optional.py:55: no suitable ollama text model found; set LITELLM_DEFAULT_TEXT_MODEL=ollama/granite3.3:8b</skipped></testcase><testcase classname="tests.ndsmoke.test_ollama_mm_live_optional" name="test_ollama_multimodal_live_optional" time="28.916" /><testcase classname="tests.ndsmoke.test_ollama_stream_optional" name="test_ollama_stream_optional" time="0.044"><skipped type="pytest.skip" message="no suitable ollama text model found">/home/graham/workspace/experiments/litellm/tests/ndsmoke/test_ollama_stream_optional.py:52: no suitable ollama text model found</skipped></testcase><testcase classname="tests.ndsmoke_e2e.test_agent_run_last_tool_invocation_optional" name="test_agent_last_tool_invocation_optional" time="0.000"><skipped type="pytest.skip" message="Tool-capable model not guaranteed; set E2E_DOCKER_MODEL_READY=1 to enable">/home/graham/workspace/experiments/litellm/tests/ndsmoke_e2e/test_agent_run_last_tool_invocation_optional.py:26: Tool-capable model not guaranteed; set E2E_DOCKER_MODEL_READY=1 to enable</skipped></testcase><testcase classname="tests.ndsmoke_e2e.test_codex_agent_e2e_low" name="test_codex_agent_router_low_optional" time="0.002"><skipped type="pytest.skip" message="CODEX_AGENT_API_BASE not set or not reachable">/home/graham/workspace/experiments/litellm/tests/ndsmoke_e2e/test_codex_agent_e2e_low.py:25: CODEX_AGENT_API_BASE not set or not reachable</skipped></testcase><testcase classname="tests.ndsmoke_e2e.test_codex_agent_timeout_optional" name="test_codex_agent_timeout_optional" time="0.000"><skipped type="pytest.skip" message="codex base not reachable: http://127.0.0.1:48979">/home/graham/workspace/experiments/litellm/tests/ndsmoke_e2e/test_codex_agent_timeout_optional.py:34: codex base not reachable: http://127.0.0.1:48979</skipped></testcase><testcase classname="tests.ndsmoke_e2e.test_exec_rpc_e2e_low" name="test_exec_rpc_python_low_optional" time="0.000"><skipped type="pytest.skip" message="exec-rpc not reachable on 127.0.0.1:8790">/home/graham/workspace/experiments/litellm/tests/ndsmoke_e2e/test_exec_rpc_e2e_low.py:20: exec-rpc not reachable on 127.0.0.1:8790</skipped></testcase><testcase classname="tests.ndsmoke_e2e.test_exec_rpc_e2e_medium_multilang" name="test_exec_rpc_multilang_medium_optional" time="0.000"><skipped type="pytest.skip" message="exec-rpc not reachable on 127.0.0.1:8790">/home/graham/workspace/experiments/litellm/tests/ndsmoke_e2e/test_exec_rpc_e2e_medium_multilang.py:20: exec-rpc not reachable on 127.0.0.1:8790</skipped></testcase><testcase classname="tests.ndsmoke_e2e.test_mini_agent_e2e_high_escalation" name="test_mini_agent_escalation_high_optional" time="0.000"><skipped type="pytest.skip" message="mini-agent API not reachable on 127.0.0.1:48979">/home/graham/workspace/experiments/litellm/tests/ndsmoke_e2e/test_mini_agent_e2e_high_escalation.py:20: mini-agent API not reachable on 127.0.0.1:48979</skipped></testcase><testcase classname="tests.ndsmoke_e2e.test_mini_agent_e2e_low" name="test_mini_agent_finalize_via_api_low" time="0.000"><skipped type="pytest.skip" message="mini-agent API not reachable on 127.0.0.1:48979">/home/graham/workspace/experiments/litellm/tests/ndsmoke_e2e/test_mini_agent_e2e_low.py:20: mini-agent API not reachable on 127.0.0.1:48979</skipped></testcase><testcase classname="tests.ndsmoke_e2e.test_mini_agent_e2e_medium_http_tools" name="test_mini_agent_http_tools_medium_optional" time="0.000"><skipped type="pytest.skip" message="mini-agent API not reachable on 127.0.0.1:48979">/home/graham/workspace/experiments/litellm/tests/ndsmoke_e2e/test_mini_agent_e2e_medium_http_tools.py:20: mini-agent API not reachable on 127.0.0.1:48979</skipped></testcase><testcase classname="tests.ndsmoke_e2e.test_mini_agent_parallel_tools_live_optional" name="test_mini_agent_parallel_tools_order_optional" time="0.000"><skipped type="pytest.skip" message="Tool-capable model not guaranteed; set E2E_DOCKER_MODEL_READY=1 to enable">/home/graham/workspace/experiments/litellm/tests/ndsmoke_e2e/test_mini_agent_parallel_tools_live_optional.py:25: Tool-capable model not guaranteed; set E2E_DOCKER_MODEL_READY=1 to enable</skipped></testcase><testcase classname="tests.ndsmoke_e2e.test_mini_agent_tools_multi_iter_live_optional" name="test_mini_agent_docker_multi_iter_with_repair_optional" time="0.000"><skipped type="pytest.skip" message="Model not guaranteed to produce code block; set E2E_DOCKER_MODEL_READY=1 to enable">/home/graham/workspace/experiments/litellm/tests/ndsmoke_e2e/test_mini_agent_tools_multi_iter_live_optional.py:30: Model not guaranteed to produce code block; set E2E_DOCKER_MODEL_READY=1 to enable</skipped></testcase><testcase classname="tests.ndsmoke_e2e.test_router_streaming_e2e_optional" name="test_router_streaming_e2e_optional" time="0.001"><skipped type="pytest.skip" message="OPENAI_API_BASE/OPENAI_COMPAT_BASE and API key not set">/home/graham/workspace/experiments/litellm/tests/ndsmoke_e2e/test_router_streaming_e2e_optional.py:15: OPENAI_API_BASE/OPENAI_COMPAT_BASE and API key not set</skipped></testcase></testsuite></testsuites>
+During handling of the above exception, another exception occurred:
+litellm/main.py:550: in acompletion
+    init_response = await loop.run_in_executor(None, func_with_context)
+                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+../../../.local/share/uv/python/cpython-3.12.10-linux-x86_64-gnu/lib/python3.12/concurrent/futures/thread.py:59: in run
+    result = self.fn(*self.args, **self.kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+litellm/utils.py:1078: in wrapper
+    result = original_function(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+litellm/main.py:3678: in completion
+    custom_llm_provider=custom_llm_provider,
+                        ^^^^^^^^^^^^^^^^^^^
+E   UnboundLocalError: cannot access local variable 'custom_llm_provider' where it is not associated with a value
+
+During handling of the above exception, another exception occurred:
+tests/smoke/test_codex_agent_router_smoke.py:69: in test_codex_agent_router_against_inprocess_shim
+    out = await router.acompletion(
+litellm/router.py:229: in _wrapped
+    return await target(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+litellm/router.py:1703: in acompletion
+    raise e
+litellm/router.py:1590: in acompletion
+    response = await self.async_function_with_fallbacks(**kwargs)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+litellm/router.py:4561: in async_function_with_fallbacks
+    return await self.async_function_with_fallbacks_common_utils(
+litellm/router.py:4519: in async_function_with_fallbacks_common_utils
+    raise original_exception
+litellm/router.py:4553: in async_function_with_fallbacks
+    response = await self.async_function_with_retries(*args, **kwargs)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+litellm/router.py:5003: in async_function_with_retries
+    raise original_exception
+litellm/router.py:4680: in async_function_with_retries
+    response = await self.make_call(original_function, *args, **kwargs)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+litellm/router.py:5012: in make_call
+    response = await response
+               ^^^^^^^^^^^^^^
+litellm/router.py:2007: in _acompletion
+    raise e
+litellm/router.py:1950: in _acompletion
+    response = await _response
+               ^^^^^^^^^^^^^^^
+litellm/utils.py:1604: in wrapper_async
+    raise e
+litellm/utils.py:1455: in wrapper_async
+    result = await original_function(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+litellm/main.py:577: in acompletion
+    raise exception_type(
+litellm/litellm_core_utils/exception_mapping_utils.py:2309: in exception_type
+    raise e
+litellm/litellm_core_utils/exception_mapping_utils.py:2285: in exception_type
+    raise APIConnectionError(
+E   litellm.exceptions.APIConnectionError: litellm.APIConnectionError: cannot access local variable 'custom_llm_provider' where it is not associated with a value
+E   Traceback (most recent call last):
+E     File "/home/graham/workspace/experiments/litellm/litellm/main.py", line 1145, in completion
+E       custom_llm_provider=custom_llm_provider,
+E                           ^^^^^^^^^^^^^^^^^^^
+E   UnboundLocalError: cannot access local variable 'custom_llm_provider' where it is not associated with a value
+E   
+E   During handling of the above exception, another exception occurred:
+E   
+E   Traceback (most recent call last):
+E     File "/home/graham/workspace/experiments/litellm/litellm/main.py", line 550, in acompletion
+E       init_response = await loop.run_in_executor(None, func_with_context)
+E                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E     File "/home/graham/.local/share/uv/python/cpython-3.12.10-linux-x86_64-gnu/lib/python3.12/concurrent/futures/thread.py", line 59, in run
+E       result = self.fn(*self.args, **self.kwargs)
+E                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E     File "/home/graham/workspace/experiments/litellm/litellm/utils.py", line 1078, in wrapper
+E       result = original_function(*args, **kwargs)
+E                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E     File "/home/graham/workspace/experiments/litellm/litellm/main.py", line 3678, in completion
+E       custom_llm_provider=custom_llm_provider,
+E                           ^^^^^^^^^^^^^^^^^^^
+E   UnboundLocalError: cannot access local variable 'custom_llm_provider' where it is not associated with a value
+E   . Received Model Group=codex-agent-1
+E   Available Model Group Fallbacks=None LiteLLM Retried: 1 times, LiteLLM Max Retries: 2</failure></testcase><testcase classname="tests.smoke.test_concurrent_agents_isolated_state" name="test_concurrent_agents_isolated_state" time="0.001" /><testcase classname="tests.smoke.test_escalation_matrix_smoke" name="test_escalation_matrix_smoke" time="0.000" /><testcase classname="tests.smoke.test_mini_agent_france_smoke" name="test_agent_api_contract_minimal" time="0.019" /><testcase classname="tests.smoke.test_mini_agent_import" name="test_mini_agent_module_import_and_config" time="0.000" /><testcase classname="tests.smoke_optional.test_agent_escalate_smoke" name="test_agent_escalate_on_last_step" time="0.001" /><testcase classname="tests.smoke_optional.test_agent_json_mode_response_passthrough" name="test_agent_json_mode_response_passthrough" time="0.000" /><testcase classname="tests.smoke_optional.test_agent_proxy" name="test_agent_proxy_run_minimal" time="0.008" /><testcase classname="tests.smoke_optional.test_agent_proxy_headers_and_errors" name="test_agent_proxy_errors_and_headers" time="0.003" /><testcase classname="tests.smoke_optional.test_agent_proxy_metrics_smoke" name="test_agent_proxy_returns_metrics" time="0.001" /><testcase classname="tests.smoke_optional.test_agent_proxy_validation_errors" name="test_agent_proxy_headers_precedence" time="0.005" /><testcase classname="tests.smoke_optional.test_batch_as_completed_ordering" name="test_batch_as_completed_ordering" time="0.051" /><testcase classname="tests.smoke_optional.test_batch_as_completed_return_exceptions" name="test_as_completed_return_exceptions" time="0.001" /><testcase classname="tests.smoke_optional.test_http_error_tail" name="test_http_tools_invoker_error_tail" time="0.001" /><testcase classname="tests.smoke_optional.test_http_tools_invoker" name="test_http_tools_invoker_monkeypatch" time="0.001"><skipped type="pytest.skip" message="optional; package-level import requires it">/home/graham/workspace/experiments/litellm/tests/smoke_optional/test_http_tools_invoker.py:80: optional; package-level import requires it</skipped></testcase><testcase classname="tests.smoke_optional.test_http_tools_invoker_429_retry_after_once" name="test_http_tools_invoker_429_retry_after_once" time="0.001" /><testcase classname="tests.smoke_optional.test_http_tools_invoker_headers" name="test_http_tools_invoker_headers_passthrough" time="0.001" /><testcase classname="tests.smoke_optional.test_http_tools_invoker_non_json_body" name="test_http_tools_invoker_non_json_body" time="0.000" /><testcase classname="tests.smoke_optional.test_images_local_remote" name="test_compress_image_local" time="0.001"><skipped type="pytest.skip" message="Pillow not installed">/home/graham/workspace/experiments/litellm/tests/smoke_optional/test_images_local_remote.py:12: Pillow not installed</skipped></testcase><testcase classname="tests.smoke_optional.test_images_local_remote" name="test_fetch_remote_image_cache" time="0.001"><skipped type="pytest.skip" message="extras not installed">/home/graham/workspace/experiments/litellm/tests/smoke_optional/test_images_local_remote.py:29: extras not installed</skipped></testcase><testcase classname="tests.smoke_optional.test_import_fastuuid_fallback" name="test_import_without_fastuuid" time="0.821" /><testcase classname="tests.smoke_optional.test_local_docs_litellm_call_image_prep" name="test_litellm_call_image_prep_uses_utils" time="0.007" /><testcase classname="tests.smoke_optional.test_local_docs_litellm_image_utils" name="test_local_docs_litellm_image_utils_reexport" time="0.000" /><testcase classname="tests.smoke_optional.test_mini_agent" name="test_mini_agent_echo_tool_roundtrip" time="0.003" /><testcase classname="tests.smoke_optional.test_mini_agent_codeblock_autorun_smoke" name="test_mini_agent_autorun_python_codeblock_smoke" time="0.001" /><testcase classname="tests.smoke_optional.test_mini_agent_codeblock_multilang_smoke" name="test_mini_agent_autorun_c_codeblock_smoke" time="0.001" /><testcase classname="tests.smoke_optional.test_mini_agent_repair_loop" name="test_mini_agent_repair_loop_exec_python" time="0.021" /><testcase classname="tests.smoke_optional.test_mini_agent_research_on_unsure" name="test_mini_agent_research_on_unsure" time="0.001" /><testcase classname="tests.smoke_optional.test_mini_agent_response_shapes" name="test_mini_agent_accepts_dict_and_object" time="0.000"><failure message="RuntimeError: There is no current event loop in thread 'MainThread'.">tests/smoke_optional/test_mini_agent_response_shapes.py:44: in test_mini_agent_accepts_dict_and_object
+    res = run_mcp_mini_agent([{"role": "user", "content": "hi"}], mcp=LocalMCPInvoker(), cfg=cfg)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+litellm/experimental_mcp_client/mini_agent/litellm_mcp_mini_agent.py:1039: in run_mcp_mini_agent
+    return asyncio.get_event_loop().run_until_complete(arun_mcp_mini_agent(messages, mcp=mcp, cfg=cfg))
+           ^^^^^^^^^^^^^^^^^^^^^^^^
+../../../.local/share/uv/python/cpython-3.12.10-linux-x86_64-gnu/lib/python3.12/asyncio/events.py:702: in get_event_loop
+    raise RuntimeError('There is no current event loop in thread %r.'
+E   RuntimeError: There is no current event loop in thread 'MainThread'.</failure></testcase><testcase classname="tests.smoke_optional.test_mini_agent_tool_args_non_json" name="test_mini_agent_tool_args_non_json" time="0.001" /><testcase classname="tests.smoke_optional.test_openai_shim_smoke" name="test_openai_shim_basic" time="0.005" /><testcase classname="tests.smoke_optional.test_parallel_acompletions" name="test_parallel_acompletions_preserve_order_true" time="0.003"><failure message="AttributeError: 'dict' object has no attribute 'index'">tests/smoke_optional/test_parallel_acompletions.py:36: in test_parallel_acompletions_preserve_order_true
+    assert [o.index for o in out] == [0, 1]
+            ^^^^^^^
+E   AttributeError: 'dict' object has no attribute 'index'</failure></testcase><testcase classname="tests.smoke_optional.test_parallel_acompletions" name="test_parallel_acompletions_preserve_order_false" time="0.001"><failure message="AttributeError: 'dict' object has no attribute 'response'">tests/smoke_optional/test_parallel_acompletions.py:64: in test_parallel_acompletions_preserve_order_false
+    assert set(o.response for o in out) == {"X", "Y", "Z"}
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+tests/smoke_optional/test_parallel_acompletions.py:64: in &lt;genexpr&gt;
+    assert set(o.response for o in out) == {"X", "Y", "Z"}
+               ^^^^^^^^^^
+E   AttributeError: 'dict' object has no attribute 'response'</failure></testcase><testcase classname="tests.smoke_optional.test_parallel_acompletions_exceptions_and_limits" name="test_parallel_acompletions_exceptions_and_limits" time="0.001"><failure message="AttributeError: 'dict' object has no attribute 'index'">tests/smoke_optional/test_parallel_acompletions_exceptions_and_limits.py:28: in test_parallel_acompletions_exceptions_and_limits
+    assert [o.index for o in out] == [0, 1, 2]
+            ^^^^^^^
+E   AttributeError: 'dict' object has no attribute 'index'</failure></testcase><testcase classname="tests.smoke_optional.test_parallel_acompletions_exceptions_and_limits" name="test_parallel_acompletions_empty_list" time="0.001" /><testcase classname="tests.smoke_optional.test_parallel_order_and_failfast" name="test_parallel_preserve_order" time="0.053" /><testcase classname="tests.smoke_optional.test_parallel_order_and_failfast" name="test_parallel_fail_fast_cancel" time="0.103" /><testcase classname="tests.smoke_optional.test_prune_history_budget_smaller_than_pair" name="test_prune_history_budget_smaller_than_pair" time="0.001" /><testcase classname="tests.smoke_optional.test_prune_history_preserve_pair" name="test_prune_history_preserve_pair" time="0.000" /><testcase classname="tests.smoke_optional.test_prune_history_small_window" name="test_prune_history_small_window_preserves_last_pair" time="0.000" /><testcase classname="tests.smoke_optional.test_research_python_tools" name="test_research_python_tools_basic" time="0.001" /><testcase classname="tests.smoke_optional.test_router_builder_smoke" name="test_router_builder_param_propagation" time="0.002" /><testcase classname="tests.smoke_optional.test_router_cancel_inflight_no_leak" name="test_router_cancel_inflight_no_leak" time="0.001" /><testcase classname="tests.smoke_optional.test_router_fallback_non_streaming_parity" name="test_router_fallback_non_streaming_parity" time="19.095"><failure message="assert (0 &gt;= 1)">tests/smoke_optional/test_router_fallback_non_streaming_parity.py:30: in test_router_fallback_non_streaming_parity
+    assert calls["primary"]&gt;=1 and calls["fb"]==1
+E   assert (0 &gt;= 1)</failure></testcase><testcase classname="tests.smoke_optional.test_router_parallel_api_smoke" name="test_parallel_as_completed_and_acompletions" time="0.042"><failure message="AttributeError: 'dict' object has no attribute 'index'">tests/smoke_optional/test_router_parallel_api_smoke.py:54: in test_parallel_as_completed_and_acompletions
+    assert [res.index for res in results] == [0, 1, 2]
+            ^^^^^^^^^
+E   AttributeError: 'dict' object has no attribute 'index'</failure></testcase><testcase classname="tests.smoke_optional.test_router_streaming_fallback_parity" name="test_router_streaming_midstream_fallback_parity" time="36.969" /><testcase classname="tests.smoke_optional.test_router_streaming_metrics_extracted" name="test_router_streaming_metrics_extracted" time="18.139"><failure message="litellm.exceptions.APIConnectionError: litellm.APIConnectionError: APIConnectionError: OpenAIException - cannot access local variable 'custom_llm_provider' where it is not associated with a value. Received Model Group=a&#10;Available Model Group Fallbacks=None LiteLLM Retried: 1 times, LiteLLM Max Retries: 2">litellm/main.py:1145: in completion
+    custom_llm_provider=custom_llm_provider,
+                        ^^^^^^^^^^^^^^^^^^^
+E   UnboundLocalError: cannot access local variable 'custom_llm_provider' where it is not associated with a value
+
+During handling of the above exception, another exception occurred:
+litellm/main.py:550: in acompletion
+    init_response = await loop.run_in_executor(None, func_with_context)
+                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+../../../.local/share/uv/python/cpython-3.12.10-linux-x86_64-gnu/lib/python3.12/concurrent/futures/thread.py:59: in run
+    result = self.fn(*self.args, **self.kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+litellm/utils.py:1078: in wrapper
+    result = original_function(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+litellm/main.py:3678: in completion
+    custom_llm_provider=custom_llm_provider,
+                        ^^^^^^^^^^^^^^^^^^^
+E   UnboundLocalError: cannot access local variable 'custom_llm_provider' where it is not associated with a value
+
+During handling of the above exception, another exception occurred:
+tests/smoke_optional/test_router_streaming_metrics_extracted.py:47: in test_router_streaming_metrics_extracted
+    stream = asyncio.get_event_loop().run_until_complete(
+../../../.local/share/uv/python/cpython-3.12.10-linux-x86_64-gnu/lib/python3.12/asyncio/base_events.py:691: in run_until_complete
+    return future.result()
+           ^^^^^^^^^^^^^^^
+litellm/router.py:229: in _wrapped
+    return await target(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+litellm/router.py:1703: in acompletion
+    raise e
+litellm/router.py:1590: in acompletion
+    response = await self.async_function_with_fallbacks(**kwargs)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+litellm/router.py:4561: in async_function_with_fallbacks
+    return await self.async_function_with_fallbacks_common_utils(
+litellm/router.py:4519: in async_function_with_fallbacks_common_utils
+    raise original_exception
+litellm/router.py:4553: in async_function_with_fallbacks
+    response = await self.async_function_with_retries(*args, **kwargs)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+litellm/router.py:5003: in async_function_with_retries
+    raise original_exception
+litellm/router.py:4680: in async_function_with_retries
+    response = await self.make_call(original_function, *args, **kwargs)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+litellm/router.py:5012: in make_call
+    response = await response
+               ^^^^^^^^^^^^^^
+litellm/router.py:2007: in _acompletion
+    raise e
+litellm/router.py:1950: in _acompletion
+    response = await _response
+               ^^^^^^^^^^^^^^^
+litellm/utils.py:1604: in wrapper_async
+    raise e
+litellm/utils.py:1455: in wrapper_async
+    result = await original_function(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+litellm/main.py:577: in acompletion
+    raise exception_type(
+litellm/litellm_core_utils/exception_mapping_utils.py:2314: in exception_type
+    raise e  # it's already mapped
+    ^^^^^^^
+litellm/litellm_core_utils/exception_mapping_utils.py:539: in exception_type
+    raise APIConnectionError(
+E   litellm.exceptions.APIConnectionError: litellm.APIConnectionError: APIConnectionError: OpenAIException - cannot access local variable 'custom_llm_provider' where it is not associated with a value. Received Model Group=a
+E   Available Model Group Fallbacks=None LiteLLM Retried: 1 times, LiteLLM Max Retries: 2</failure></testcase><testcase classname="tests.smoke_optional.test_router_streaming_parity" name="test_router_streaming_parity" time="17.952"><failure message="litellm.exceptions.APIConnectionError: litellm.APIConnectionError: APIConnectionError: OpenAIException - cannot access local variable 'custom_llm_provider' where it is not associated with a value. Received Model Group=a&#10;Available Model Group Fallbacks=None LiteLLM Retried: 1 times, LiteLLM Max Retries: 2">litellm/main.py:1145: in completion
+    custom_llm_provider=custom_llm_provider,
+                        ^^^^^^^^^^^^^^^^^^^
+E   UnboundLocalError: cannot access local variable 'custom_llm_provider' where it is not associated with a value
+
+During handling of the above exception, another exception occurred:
+litellm/main.py:550: in acompletion
+    init_response = await loop.run_in_executor(None, func_with_context)
+                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+../../../.local/share/uv/python/cpython-3.12.10-linux-x86_64-gnu/lib/python3.12/concurrent/futures/thread.py:59: in run
+    result = self.fn(*self.args, **self.kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+litellm/utils.py:1078: in wrapper
+    result = original_function(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+litellm/main.py:3678: in completion
+    custom_llm_provider=custom_llm_provider,
+                        ^^^^^^^^^^^^^^^^^^^
+E   UnboundLocalError: cannot access local variable 'custom_llm_provider' where it is not associated with a value
+
+During handling of the above exception, another exception occurred:
+tests/smoke_optional/test_router_streaming_parity.py:69: in test_router_streaming_parity
+    legacy = run("legacy")
+             ^^^^^^^^^^^^^
+tests/smoke_optional/test_router_streaming_parity.py:48: in run
+    stream = asyncio.get_event_loop().run_until_complete(
+../../../.local/share/uv/python/cpython-3.12.10-linux-x86_64-gnu/lib/python3.12/asyncio/base_events.py:691: in run_until_complete
+    return future.result()
+           ^^^^^^^^^^^^^^^
+litellm/router.py:229: in _wrapped
+    return await target(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+litellm/router.py:1703: in acompletion
+    raise e
+litellm/router.py:1590: in acompletion
+    response = await self.async_function_with_fallbacks(**kwargs)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+litellm/router.py:4561: in async_function_with_fallbacks
+    return await self.async_function_with_fallbacks_common_utils(
+litellm/router.py:4519: in async_function_with_fallbacks_common_utils
+    raise original_exception
+litellm/router.py:4553: in async_function_with_fallbacks
+    response = await self.async_function_with_retries(*args, **kwargs)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+litellm/router.py:5003: in async_function_with_retries
+    raise original_exception
+litellm/router.py:4680: in async_function_with_retries
+    response = await self.make_call(original_function, *args, **kwargs)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+litellm/router.py:5012: in make_call
+    response = await response
+               ^^^^^^^^^^^^^^
+litellm/router.py:2007: in _acompletion
+    raise e
+litellm/router.py:1950: in _acompletion
+    response = await _response
+               ^^^^^^^^^^^^^^^
+litellm/utils.py:1604: in wrapper_async
+    raise e
+litellm/utils.py:1455: in wrapper_async
+    result = await original_function(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+litellm/main.py:577: in acompletion
+    raise exception_type(
+litellm/litellm_core_utils/exception_mapping_utils.py:2314: in exception_type
+    raise e  # it's already mapped
+    ^^^^^^^
+litellm/litellm_core_utils/exception_mapping_utils.py:539: in exception_type
+    raise APIConnectionError(
+E   litellm.exceptions.APIConnectionError: litellm.APIConnectionError: APIConnectionError: OpenAIException - cannot access local variable 'custom_llm_provider' where it is not associated with a value. Received Model Group=a
+E   Available Model Group Fallbacks=None LiteLLM Retried: 1 times, LiteLLM Max Retries: 2</failure></testcase><testcase classname="tests.smoke_optional.test_router_streaming_smoke" name="test_router_streaming_smoke[legacy]" time="0.004" /><testcase classname="tests.smoke_optional.test_router_streaming_smoke" name="test_router_streaming_smoke[extracted]" time="0.002"><failure message="assert False&#10; +  where False = isinstance(&lt;litellm.litellm_core_utils.streaming_handler.CustomStreamWrapper object at 0x7af162bb9dc0&gt;, CustomStreamWrapper)">tests/smoke_optional/test_router_streaming_smoke.py:75: in test_router_streaming_smoke
+    assert isinstance(stream, CustomStreamWrapper)
+E   assert False
+E    +  where False = isinstance(&lt;litellm.litellm_core_utils.streaming_handler.CustomStreamWrapper object at 0x7af162bb9dc0&gt;, CustomStreamWrapper)</failure></testcase><testcase classname="tests.smoke_optional.test_router_teardown" name="test_router_teardown_no_errors" time="0.001" /><testcase classname="tests.smoke_optional.test_router_teardown_smoke" name="test_router_teardown_smoke" time="0.002" /><testcase classname="tests.smoke_optional.test_router_timeout_param_enforced" name="test_router_timeout_param_enforced" time="0.051" /><testcase classname="tests.smoke_optional.test_storage_hook_schema_minimal" name="test_storage_hook_schema_minimal" time="0.003" /><testcase classname="tests.smoke_optional.test_storage_hook_smoke" name="test_storage_hook_jsonl" time="0.002" /></testsuite></testsuites>

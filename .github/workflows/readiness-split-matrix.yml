@@ -26,11 +26,11 @@ jobs:
           python -m pip install -U pip
           pip install -r requirements.txt
           pip install pytest-xdist
-      - name: Core smokes (split gate)
+      - name: Core scenarios (split gate)
         env:
           ALL_SMOKES_CORE_TIMEOUT: '900'
           PYTEST_XDIST_AUTO_NUM_WORKERS: '4'
-        run: make project-ready-core-only
+        run: make project-ready
 
   nd:
     runs-on: ubuntu-latest
@@ -49,9 +49,9 @@ jobs:
           python -m pip install -U pip
           pip install -r requirements.txt
           pip install pytest-xdist
-      - name: ND/E2E smokes (matrix shard)
+      - name: ND/E2E scenarios (matrix shard)
         env:
           ALL_SMOKES_ND_TIMEOUT: '1200'
           PYTEST_XDIST_AUTO_NUM_WORKERS: '6'
           PYTEST_ADDOPTS: -k '${{ matrix.shard }}'
-        run: make project-ready-nd-only
+        run: make project-ready-live
