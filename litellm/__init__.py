@@ -1296,7 +1296,6 @@ from .exceptions import (
 )
 from .budget_manager import BudgetManager
 from .proxy.proxy_cli import run_server
-from .router import Router
 from .assistants.main import *
 from .batches.main import *
 from .images.main import *
@@ -1336,3 +1335,91 @@ global_disable_no_log_param: bool = False
 
 ### PASSTHROUGH ###
 from .passthrough import allm_passthrough_route, llm_passthrough_route
+
+# --- Experimental provider: codex-agent (env-gated) ---------------------------
+# Register this BEFORE importing Router so provider validation sees it.
+try:
+    import os as _os
+    if _os.getenv("LITELLM_ENABLE_CODEX_AGENT", "") == "1":
+        from .llms.codex_agent import CodexAgentLLM as _CodexAgentLLM
+        custom_provider_map.append({"provider": "codex-agent", "custom_handler": _CodexAgentLLM()})
+        # Add to provider list once at import time
+        from .utils import custom_llm_setup as _custom_llm_setup
+
+        _custom_llm_setup()
+except Exception:
+    # Best-effort: never break base imports if experimental provider misbehaves
+    pass
+
+# --- Experimental provider: mini-agent (env-gated) ---------------------------
+try:
+    import os as _os_mini
+    if _os_mini.getenv("LITELLM_ENABLE_MINI_AGENT", "") == "1" or _os_mini.getenv("SCILLM_ENABLE_MINI_AGENT", "") == "1":
+        from .llms.mini_agent import MiniAgentLLM as _MiniAgentLLM
+        from .llms.custom_llm import register_custom_provider as _register_custom_provider
+
+        _register_custom_provider("mini-agent", _MiniAgentLLM)
+except Exception:
+    # Never block base imports if experimental provider setup fails
+    pass
+
+from .router import Router
+
+# --- Experimental provider: lean4 / certainly (env-gated) --------------------
+try:
+    import os as _os_lean4
+    if (
+        _os_lean4.getenv("LITELLM_ENABLE_LEAN4", "") == "1"
+        or _os_lean4.getenv("SCILLM_ENABLE_LEAN4", "") == "1"
+        or _os_lean4.getenv("LITELLM_ENABLE_CERTAINLY", "") == "1"
+        or _os_lean4.getenv("SCILLM_ENABLE_CERTAINLY", "") == "1"
+    ):
+        from .llms.lean4 import Lean4LLM as _Lean4LLM
+        # Optional adapter centralizing umbrella behavior
+        try:
+            from .llms.certainly import CertainlyLLM as _CertainlyLLM  # type: ignore
+        except Exception:
+            _CertainlyLLM = None  # type: ignore
+        from .llms.custom_llm import register_custom_provider as _register_custom_provider_lean4
+
+        # Always register lean4 backend explicitly
+        _register_custom_provider_lean4("lean4", _Lean4LLM)
+        # Register 'certainly' to adapter if present else fallback to lean4 handler
+        try:
+            if _CertainlyLLM is not None:
+                _register_custom_provider_lean4("certainly", _CertainlyLLM)  # type: ignore
+            else:
+                _register_custom_provider_lean4("certainly", _Lean4LLM)
+        except Exception:
+            pass
+except Exception:
+    # Keep base imports resilient
+    pass
+
+# --- Experimental provider: codeworld (env-gated) ----------------------------
+try:
+    import os as _os_codeworld
+    if _os_codeworld.getenv("LITELLM_ENABLE_CODEWORLD", "") == "1" or _os_codeworld.getenv("SCILLM_ENABLE_CODEWORLD", "") == "1":
+        from .llms.codeworld import CodeWorldLLM as _CodeWorldLLM
+        from .llms.custom_llm import register_custom_provider as _register_custom_provider_codeworld
+
+        _register_custom_provider_codeworld("codeworld", _CodeWorldLLM)
+        # Convenience alias: model/provider "codeworld/mcts" injects strategy="mcts"
+        try:
+            class _CodeWorldMCTSLLM(_CodeWorldLLM):  # type: ignore
+                def _build_payload(self, _model, _messages, optional_params):  # type: ignore[override]
+                    optional_params = dict(optional_params or {})
+                    # Force consistent explicit structure so bridge logic is uniform
+                    if "strategy" not in optional_params and "strategy_config" not in optional_params:
+                        optional_params["strategy"] = "mcts"
+                        optional_params["strategy_config"] = {"name": "mcts"}
+                    elif optional_params.get("strategy") == "mcts" and "strategy_config" not in optional_params:
+                        optional_params["strategy_config"] = {"name": "mcts"}
+                    return super()._build_payload(_model, _messages, optional_params)
+
+            _register_custom_provider_codeworld("codeworld/mcts", _CodeWorldMCTSLLM)
+        except Exception:
+            pass
+except Exception:
+    # Keep base imports resilient
+    pass

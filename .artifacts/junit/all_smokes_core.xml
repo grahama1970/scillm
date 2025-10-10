@@ -1,0 +1,255 @@
+<?xml version="1.0" encoding="utf-8"?><testsuites name="pytest tests"><testsuite name="pytest" errors="0" failures="11" skipped="4" tests="57" time="116.812" timestamp="2025-10-10T10:31:33.220482-04:00" hostname="graham-MS-7C60"><testcase classname="tests.smoke.test_agent_api_shape" name="test_agent_proxy_response_shapes_minimal" time="3.007"><failure message="UnboundLocalError: cannot access local variable 'pytest' where it is not associated with a value">tests/smoke/test_agent_api_shape.py:25: in test_agent_proxy_response_shapes_minimal
+    if not _can(host, port): pytest.skip(f"Agent API not reachable on {host}:{port}")
+                             ^^^^^^
+E   UnboundLocalError: cannot access local variable 'pytest' where it is not associated with a value</failure></testcase><testcase classname="tests.smoke.test_codex_agent_binary_resolution" name="test_codex_agent_binary_resolution" time="0.000" /><testcase classname="tests.smoke.test_codex_agent_router_smoke" name="test_codex_agent_router_against_inprocess_shim" time="17.855"><failure message="litellm.exceptions.APIConnectionError: litellm.APIConnectionError: cannot access local variable 'custom_llm_provider' where it is not associated with a value&#10;Traceback (most recent call last):&#10;  File &quot;/home/graham/workspace/experiments/litellm/litellm/main.py&quot;, line 1145, in completion&#10;    custom_llm_provider=custom_llm_provider,&#10;                        ^^^^^^^^^^^^^^^^^^^&#10;UnboundLocalError: cannot access local variable 'custom_llm_provider' where it is not associated with a value&#10;&#10;During handling of the above exception, another exception occurred:&#10;&#10;Traceback (most recent call last):&#10;  File &quot;/home/graham/workspace/experiments/litellm/litellm/main.py&quot;, line 550, in acompletion&#10;    init_response = await loop.run_in_executor(None, func_with_context)&#10;                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^&#10;  File &quot;/home/graham/.local/share/uv/python/cpython-3.12.10-linux-x86_64-gnu/lib/python3.12/concurrent/futures/thread.py&quot;, line 59, in run&#10;    result = self.fn(*self.args, **self.kwargs)&#10;             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^&#10;  File &quot;/home/graham/workspace/experiments/litellm/litellm/utils.py&quot;, line 1078, in wrapper&#10;    result = original_function(*args, **kwargs)&#10;             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^&#10;  File &quot;/home/graham/workspace/experiments/litellm/litellm/main.py&quot;, line 3678, in completion&#10;    custom_llm_provider=custom_llm_provider,&#10;                        ^^^^^^^^^^^^^^^^^^^&#10;UnboundLocalError: cannot access local variable 'custom_llm_provider' where it is not associated with a value&#10;. Received Model Group=codex-agent-1&#10;Available Model Group Fallbacks=None LiteLLM Retried: 1 times, LiteLLM Max Retries: 2">litellm/main.py:1145: in completion
+    custom_llm_provider=custom_llm_provider,
+                        ^^^^^^^^^^^^^^^^^^^
+E   UnboundLocalError: cannot access local variable 'custom_llm_provider' where it is not associated with a value
+
+During handling of the above exception, another exception occurred:
+litellm/main.py:550: in acompletion
+    init_response = await loop.run_in_executor(None, func_with_context)
+                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+../../../.local/share/uv/python/cpython-3.12.10-linux-x86_64-gnu/lib/python3.12/concurrent/futures/thread.py:59: in run
+    result = self.fn(*self.args, **self.kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+litellm/utils.py:1078: in wrapper
+    result = original_function(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+litellm/main.py:3678: in completion
+    custom_llm_provider=custom_llm_provider,
+                        ^^^^^^^^^^^^^^^^^^^
+E   UnboundLocalError: cannot access local variable 'custom_llm_provider' where it is not associated with a value
+
+During handling of the above exception, another exception occurred:
+tests/smoke/test_codex_agent_router_smoke.py:69: in test_codex_agent_router_against_inprocess_shim
+    out = await router.acompletion(
+litellm/router.py:229: in _wrapped
+    return await target(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+litellm/router.py:1703: in acompletion
+    raise e
+litellm/router.py:1590: in acompletion
+    response = await self.async_function_with_fallbacks(**kwargs)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+litellm/router.py:4561: in async_function_with_fallbacks
+    return await self.async_function_with_fallbacks_common_utils(
+litellm/router.py:4519: in async_function_with_fallbacks_common_utils
+    raise original_exception
+litellm/router.py:4553: in async_function_with_fallbacks
+    response = await self.async_function_with_retries(*args, **kwargs)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+litellm/router.py:5003: in async_function_with_retries
+    raise original_exception
+litellm/router.py:4680: in async_function_with_retries
+    response = await self.make_call(original_function, *args, **kwargs)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+litellm/router.py:5012: in make_call
+    response = await response
+               ^^^^^^^^^^^^^^
+litellm/router.py:2007: in _acompletion
+    raise e
+litellm/router.py:1950: in _acompletion
+    response = await _response
+               ^^^^^^^^^^^^^^^
+litellm/utils.py:1604: in wrapper_async
+    raise e
+litellm/utils.py:1455: in wrapper_async
+    result = await original_function(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+litellm/main.py:577: in acompletion
+    raise exception_type(
+litellm/litellm_core_utils/exception_mapping_utils.py:2309: in exception_type
+    raise e
+litellm/litellm_core_utils/exception_mapping_utils.py:2285: in exception_type
+    raise APIConnectionError(
+E   litellm.exceptions.APIConnectionError: litellm.APIConnectionError: cannot access local variable 'custom_llm_provider' where it is not associated with a value
+E   Traceback (most recent call last):
+E     File "/home/graham/workspace/experiments/litellm/litellm/main.py", line 1145, in completion
+E       custom_llm_provider=custom_llm_provider,
+E                           ^^^^^^^^^^^^^^^^^^^
+E   UnboundLocalError: cannot access local variable 'custom_llm_provider' where it is not associated with a value
+E   
+E   During handling of the above exception, another exception occurred:
+E   
+E   Traceback (most recent call last):
+E     File "/home/graham/workspace/experiments/litellm/litellm/main.py", line 550, in acompletion
+E       init_response = await loop.run_in_executor(None, func_with_context)
+E                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E     File "/home/graham/.local/share/uv/python/cpython-3.12.10-linux-x86_64-gnu/lib/python3.12/concurrent/futures/thread.py", line 59, in run
+E       result = self.fn(*self.args, **self.kwargs)
+E                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E     File "/home/graham/workspace/experiments/litellm/litellm/utils.py", line 1078, in wrapper
+E       result = original_function(*args, **kwargs)
+E                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E     File "/home/graham/workspace/experiments/litellm/litellm/main.py", line 3678, in completion
+E       custom_llm_provider=custom_llm_provider,
+E                           ^^^^^^^^^^^^^^^^^^^
+E   UnboundLocalError: cannot access local variable 'custom_llm_provider' where it is not associated with a value
+E   . Received Model Group=codex-agent-1
+E   Available Model Group Fallbacks=None LiteLLM Retried: 1 times, LiteLLM Max Retries: 2</failure></testcase><testcase classname="tests.smoke.test_concurrent_agents_isolated_state" name="test_concurrent_agents_isolated_state" time="0.001" /><testcase classname="tests.smoke.test_escalation_matrix_smoke" name="test_escalation_matrix_smoke" time="0.000" /><testcase classname="tests.smoke.test_mini_agent_france_smoke" name="test_agent_api_contract_minimal" time="0.000"><skipped type="pytest.skip" message="mini-agent API not reachable on 127.0.0.1:60857">/home/graham/workspace/experiments/litellm/tests/smoke/test_mini_agent_france_smoke.py:37: mini-agent API not reachable on 127.0.0.1:60857</skipped></testcase><testcase classname="tests.smoke.test_mini_agent_import" name="test_mini_agent_module_import_and_config" time="0.000" /><testcase classname="tests.smoke_optional.test_agent_escalate_smoke" name="test_agent_escalate_on_last_step" time="0.001" /><testcase classname="tests.smoke_optional.test_agent_json_mode_response_passthrough" name="test_agent_json_mode_response_passthrough" time="0.000" /><testcase classname="tests.smoke_optional.test_agent_proxy" name="test_agent_proxy_run_minimal" time="0.008" /><testcase classname="tests.smoke_optional.test_agent_proxy_headers_and_errors" name="test_agent_proxy_errors_and_headers" time="0.003" /><testcase classname="tests.smoke_optional.test_agent_proxy_metrics_smoke" name="test_agent_proxy_returns_metrics" time="0.001" /><testcase classname="tests.smoke_optional.test_agent_proxy_validation_errors" name="test_agent_proxy_headers_precedence" time="0.005" /><testcase classname="tests.smoke_optional.test_batch_as_completed_ordering" name="test_batch_as_completed_ordering" time="0.051" /><testcase classname="tests.smoke_optional.test_batch_as_completed_return_exceptions" name="test_as_completed_return_exceptions" time="0.001" /><testcase classname="tests.smoke_optional.test_http_error_tail" name="test_http_tools_invoker_error_tail" time="0.001" /><testcase classname="tests.smoke_optional.test_http_tools_invoker" name="test_http_tools_invoker_monkeypatch" time="0.001"><skipped type="pytest.skip" message="optional; package-level import requires it">/home/graham/workspace/experiments/litellm/tests/smoke_optional/test_http_tools_invoker.py:80: optional; package-level import requires it</skipped></testcase><testcase classname="tests.smoke_optional.test_http_tools_invoker_429_retry_after_once" name="test_http_tools_invoker_429_retry_after_once" time="0.001" /><testcase classname="tests.smoke_optional.test_http_tools_invoker_headers" name="test_http_tools_invoker_headers_passthrough" time="0.001" /><testcase classname="tests.smoke_optional.test_http_tools_invoker_non_json_body" name="test_http_tools_invoker_non_json_body" time="0.000" /><testcase classname="tests.smoke_optional.test_images_local_remote" name="test_compress_image_local" time="0.001"><skipped type="pytest.skip" message="Pillow not installed">/home/graham/workspace/experiments/litellm/tests/smoke_optional/test_images_local_remote.py:12: Pillow not installed</skipped></testcase><testcase classname="tests.smoke_optional.test_images_local_remote" name="test_fetch_remote_image_cache" time="0.001"><skipped type="pytest.skip" message="extras not installed">/home/graham/workspace/experiments/litellm/tests/smoke_optional/test_images_local_remote.py:29: extras not installed</skipped></testcase><testcase classname="tests.smoke_optional.test_import_fastuuid_fallback" name="test_import_without_fastuuid" time="0.861" /><testcase classname="tests.smoke_optional.test_local_docs_litellm_call_image_prep" name="test_litellm_call_image_prep_uses_utils" time="0.007" /><testcase classname="tests.smoke_optional.test_local_docs_litellm_image_utils" name="test_local_docs_litellm_image_utils_reexport" time="0.000" /><testcase classname="tests.smoke_optional.test_mini_agent" name="test_mini_agent_echo_tool_roundtrip" time="0.003" /><testcase classname="tests.smoke_optional.test_mini_agent_codeblock_autorun_smoke" name="test_mini_agent_autorun_python_codeblock_smoke" time="0.001" /><testcase classname="tests.smoke_optional.test_mini_agent_codeblock_multilang_smoke" name="test_mini_agent_autorun_c_codeblock_smoke" time="0.001" /><testcase classname="tests.smoke_optional.test_mini_agent_repair_loop" name="test_mini_agent_repair_loop_exec_python" time="0.021" /><testcase classname="tests.smoke_optional.test_mini_agent_research_on_unsure" name="test_mini_agent_research_on_unsure" time="0.001" /><testcase classname="tests.smoke_optional.test_mini_agent_response_shapes" name="test_mini_agent_accepts_dict_and_object" time="0.000"><failure message="RuntimeError: There is no current event loop in thread 'MainThread'.">tests/smoke_optional/test_mini_agent_response_shapes.py:44: in test_mini_agent_accepts_dict_and_object
+    res = run_mcp_mini_agent([{"role": "user", "content": "hi"}], mcp=LocalMCPInvoker(), cfg=cfg)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+litellm/experimental_mcp_client/mini_agent/litellm_mcp_mini_agent.py:1039: in run_mcp_mini_agent
+    return asyncio.get_event_loop().run_until_complete(arun_mcp_mini_agent(messages, mcp=mcp, cfg=cfg))
+           ^^^^^^^^^^^^^^^^^^^^^^^^
+../../../.local/share/uv/python/cpython-3.12.10-linux-x86_64-gnu/lib/python3.12/asyncio/events.py:702: in get_event_loop
+    raise RuntimeError('There is no current event loop in thread %r.'
+E   RuntimeError: There is no current event loop in thread 'MainThread'.</failure></testcase><testcase classname="tests.smoke_optional.test_mini_agent_tool_args_non_json" name="test_mini_agent_tool_args_non_json" time="0.001" /><testcase classname="tests.smoke_optional.test_openai_shim_smoke" name="test_openai_shim_basic" time="0.005" /><testcase classname="tests.smoke_optional.test_parallel_acompletions" name="test_parallel_acompletions_preserve_order_true" time="0.003"><failure message="AttributeError: 'dict' object has no attribute 'index'">tests/smoke_optional/test_parallel_acompletions.py:36: in test_parallel_acompletions_preserve_order_true
+    assert [o.index for o in out] == [0, 1]
+            ^^^^^^^
+E   AttributeError: 'dict' object has no attribute 'index'</failure></testcase><testcase classname="tests.smoke_optional.test_parallel_acompletions" name="test_parallel_acompletions_preserve_order_false" time="0.001"><failure message="AttributeError: 'dict' object has no attribute 'response'">tests/smoke_optional/test_parallel_acompletions.py:64: in test_parallel_acompletions_preserve_order_false
+    assert set(o.response for o in out) == {"X", "Y", "Z"}
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+tests/smoke_optional/test_parallel_acompletions.py:64: in &lt;genexpr&gt;
+    assert set(o.response for o in out) == {"X", "Y", "Z"}
+               ^^^^^^^^^^
+E   AttributeError: 'dict' object has no attribute 'response'</failure></testcase><testcase classname="tests.smoke_optional.test_parallel_acompletions_exceptions_and_limits" name="test_parallel_acompletions_exceptions_and_limits" time="0.001"><failure message="AttributeError: 'dict' object has no attribute 'index'">tests/smoke_optional/test_parallel_acompletions_exceptions_and_limits.py:28: in test_parallel_acompletions_exceptions_and_limits
+    assert [o.index for o in out] == [0, 1, 2]
+            ^^^^^^^
+E   AttributeError: 'dict' object has no attribute 'index'</failure></testcase><testcase classname="tests.smoke_optional.test_parallel_acompletions_exceptions_and_limits" name="test_parallel_acompletions_empty_list" time="0.001" /><testcase classname="tests.smoke_optional.test_parallel_order_and_failfast" name="test_parallel_preserve_order" time="0.052" /><testcase classname="tests.smoke_optional.test_parallel_order_and_failfast" name="test_parallel_fail_fast_cancel" time="0.103" /><testcase classname="tests.smoke_optional.test_prune_history_budget_smaller_than_pair" name="test_prune_history_budget_smaller_than_pair" time="0.001" /><testcase classname="tests.smoke_optional.test_prune_history_preserve_pair" name="test_prune_history_preserve_pair" time="0.000" /><testcase classname="tests.smoke_optional.test_prune_history_small_window" name="test_prune_history_small_window_preserves_last_pair" time="0.000" /><testcase classname="tests.smoke_optional.test_research_python_tools" name="test_research_python_tools_basic" time="0.001" /><testcase classname="tests.smoke_optional.test_router_builder_smoke" name="test_router_builder_param_propagation" time="0.002" /><testcase classname="tests.smoke_optional.test_router_cancel_inflight_no_leak" name="test_router_cancel_inflight_no_leak" time="0.001" /><testcase classname="tests.smoke_optional.test_router_fallback_non_streaming_parity" name="test_router_fallback_non_streaming_parity" time="17.376"><failure message="assert (0 &gt;= 1)">tests/smoke_optional/test_router_fallback_non_streaming_parity.py:30: in test_router_fallback_non_streaming_parity
+    assert calls["primary"]&gt;=1 and calls["fb"]==1
+E   assert (0 &gt;= 1)</failure></testcase><testcase classname="tests.smoke_optional.test_router_parallel_api_smoke" name="test_parallel_as_completed_and_acompletions" time="0.043"><failure message="AttributeError: 'dict' object has no attribute 'index'">tests/smoke_optional/test_router_parallel_api_smoke.py:54: in test_parallel_as_completed_and_acompletions
+    assert [res.index for res in results] == [0, 1, 2]
+            ^^^^^^^^^
+E   AttributeError: 'dict' object has no attribute 'index'</failure></testcase><testcase classname="tests.smoke_optional.test_router_streaming_fallback_parity" name="test_router_streaming_midstream_fallback_parity" time="37.970" /><testcase classname="tests.smoke_optional.test_router_streaming_metrics_extracted" name="test_router_streaming_metrics_extracted" time="17.713"><failure message="litellm.exceptions.APIConnectionError: litellm.APIConnectionError: APIConnectionError: OpenAIException - cannot access local variable 'custom_llm_provider' where it is not associated with a value. Received Model Group=a&#10;Available Model Group Fallbacks=None LiteLLM Retried: 1 times, LiteLLM Max Retries: 2">litellm/main.py:1145: in completion
+    custom_llm_provider=custom_llm_provider,
+                        ^^^^^^^^^^^^^^^^^^^
+E   UnboundLocalError: cannot access local variable 'custom_llm_provider' where it is not associated with a value
+
+During handling of the above exception, another exception occurred:
+litellm/main.py:550: in acompletion
+    init_response = await loop.run_in_executor(None, func_with_context)
+                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+../../../.local/share/uv/python/cpython-3.12.10-linux-x86_64-gnu/lib/python3.12/concurrent/futures/thread.py:59: in run
+    result = self.fn(*self.args, **self.kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+litellm/utils.py:1078: in wrapper
+    result = original_function(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+litellm/main.py:3678: in completion
+    custom_llm_provider=custom_llm_provider,
+                        ^^^^^^^^^^^^^^^^^^^
+E   UnboundLocalError: cannot access local variable 'custom_llm_provider' where it is not associated with a value
+
+During handling of the above exception, another exception occurred:
+tests/smoke_optional/test_router_streaming_metrics_extracted.py:47: in test_router_streaming_metrics_extracted
+    stream = asyncio.get_event_loop().run_until_complete(
+../../../.local/share/uv/python/cpython-3.12.10-linux-x86_64-gnu/lib/python3.12/asyncio/base_events.py:691: in run_until_complete
+    return future.result()
+           ^^^^^^^^^^^^^^^
+litellm/router.py:229: in _wrapped
+    return await target(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+litellm/router.py:1703: in acompletion
+    raise e
+litellm/router.py:1590: in acompletion
+    response = await self.async_function_with_fallbacks(**kwargs)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+litellm/router.py:4561: in async_function_with_fallbacks
+    return await self.async_function_with_fallbacks_common_utils(
+litellm/router.py:4519: in async_function_with_fallbacks_common_utils
+    raise original_exception
+litellm/router.py:4553: in async_function_with_fallbacks
+    response = await self.async_function_with_retries(*args, **kwargs)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+litellm/router.py:5003: in async_function_with_retries
+    raise original_exception
+litellm/router.py:4680: in async_function_with_retries
+    response = await self.make_call(original_function, *args, **kwargs)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+litellm/router.py:5012: in make_call
+    response = await response
+               ^^^^^^^^^^^^^^
+litellm/router.py:2007: in _acompletion
+    raise e
+litellm/router.py:1950: in _acompletion
+    response = await _response
+               ^^^^^^^^^^^^^^^
+litellm/utils.py:1604: in wrapper_async
+    raise e
+litellm/utils.py:1455: in wrapper_async
+    result = await original_function(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+litellm/main.py:577: in acompletion
+    raise exception_type(
+litellm/litellm_core_utils/exception_mapping_utils.py:2314: in exception_type
+    raise e  # it's already mapped
+    ^^^^^^^
+litellm/litellm_core_utils/exception_mapping_utils.py:539: in exception_type
+    raise APIConnectionError(
+E   litellm.exceptions.APIConnectionError: litellm.APIConnectionError: APIConnectionError: OpenAIException - cannot access local variable 'custom_llm_provider' where it is not associated with a value. Received Model Group=a
+E   Available Model Group Fallbacks=None LiteLLM Retried: 1 times, LiteLLM Max Retries: 2</failure></testcase><testcase classname="tests.smoke_optional.test_router_streaming_parity" name="test_router_streaming_parity" time="18.319"><failure message="litellm.exceptions.APIConnectionError: litellm.APIConnectionError: APIConnectionError: OpenAIException - cannot access local variable 'custom_llm_provider' where it is not associated with a value. Received Model Group=a&#10;Available Model Group Fallbacks=None LiteLLM Retried: 1 times, LiteLLM Max Retries: 2">litellm/main.py:1145: in completion
+    custom_llm_provider=custom_llm_provider,
+                        ^^^^^^^^^^^^^^^^^^^
+E   UnboundLocalError: cannot access local variable 'custom_llm_provider' where it is not associated with a value
+
+During handling of the above exception, another exception occurred:
+litellm/main.py:550: in acompletion
+    init_response = await loop.run_in_executor(None, func_with_context)
+                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+../../../.local/share/uv/python/cpython-3.12.10-linux-x86_64-gnu/lib/python3.12/concurrent/futures/thread.py:59: in run
+    result = self.fn(*self.args, **self.kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+litellm/utils.py:1078: in wrapper
+    result = original_function(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+litellm/main.py:3678: in completion
+    custom_llm_provider=custom_llm_provider,
+                        ^^^^^^^^^^^^^^^^^^^
+E   UnboundLocalError: cannot access local variable 'custom_llm_provider' where it is not associated with a value
+
+During handling of the above exception, another exception occurred:
+tests/smoke_optional/test_router_streaming_parity.py:69: in test_router_streaming_parity
+    legacy = run("legacy")
+             ^^^^^^^^^^^^^
+tests/smoke_optional/test_router_streaming_parity.py:48: in run
+    stream = asyncio.get_event_loop().run_until_complete(
+../../../.local/share/uv/python/cpython-3.12.10-linux-x86_64-gnu/lib/python3.12/asyncio/base_events.py:691: in run_until_complete
+    return future.result()
+           ^^^^^^^^^^^^^^^
+litellm/router.py:229: in _wrapped
+    return await target(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+litellm/router.py:1703: in acompletion
+    raise e
+litellm/router.py:1590: in acompletion
+    response = await self.async_function_with_fallbacks(**kwargs)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+litellm/router.py:4561: in async_function_with_fallbacks
+    return await self.async_function_with_fallbacks_common_utils(
+litellm/router.py:4519: in async_function_with_fallbacks_common_utils
+    raise original_exception
+litellm/router.py:4553: in async_function_with_fallbacks
+    response = await self.async_function_with_retries(*args, **kwargs)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+litellm/router.py:5003: in async_function_with_retries
+    raise original_exception
+litellm/router.py:4680: in async_function_with_retries
+    response = await self.make_call(original_function, *args, **kwargs)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+litellm/router.py:5012: in make_call
+    response = await response
+               ^^^^^^^^^^^^^^
+litellm/router.py:2007: in _acompletion
+    raise e
+litellm/router.py:1950: in _acompletion
+    response = await _response
+               ^^^^^^^^^^^^^^^
+litellm/utils.py:1604: in wrapper_async
+    raise e
+litellm/utils.py:1455: in wrapper_async
+    result = await original_function(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+litellm/main.py:577: in acompletion
+    raise exception_type(
+litellm/litellm_core_utils/exception_mapping_utils.py:2314: in exception_type
+    raise e  # it's already mapped
+    ^^^^^^^
+litellm/litellm_core_utils/exception_mapping_utils.py:539: in exception_type
+    raise APIConnectionError(
+E   litellm.exceptions.APIConnectionError: litellm.APIConnectionError: APIConnectionError: OpenAIException - cannot access local variable 'custom_llm_provider' where it is not associated with a value. Received Model Group=a
+E   Available Model Group Fallbacks=None LiteLLM Retried: 1 times, LiteLLM Max Retries: 2</failure></testcase><testcase classname="tests.smoke_optional.test_router_streaming_smoke" name="test_router_streaming_smoke[legacy]" time="0.003" /><testcase classname="tests.smoke_optional.test_router_streaming_smoke" name="test_router_streaming_smoke[extracted]" time="0.002"><failure message="assert False&#10; +  where False = isinstance(&lt;litellm.litellm_core_utils.streaming_handler.CustomStreamWrapper object at 0x772ae2a71ca0&gt;, CustomStreamWrapper)">tests/smoke_optional/test_router_streaming_smoke.py:75: in test_router_streaming_smoke
+    assert isinstance(stream, CustomStreamWrapper)
+E   assert False
+E    +  where False = isinstance(&lt;litellm.litellm_core_utils.streaming_handler.CustomStreamWrapper object at 0x772ae2a71ca0&gt;, CustomStreamWrapper)</failure></testcase><testcase classname="tests.smoke_optional.test_router_teardown" name="test_router_teardown_no_errors" time="0.001" /><testcase classname="tests.smoke_optional.test_router_teardown_smoke" name="test_router_teardown_smoke" time="0.001" /><testcase classname="tests.smoke_optional.test_router_timeout_param_enforced" name="test_router_timeout_param_enforced" time="0.051" /><testcase classname="tests.smoke_optional.test_storage_hook_schema_minimal" name="test_storage_hook_schema_minimal" time="0.003" /><testcase classname="tests.smoke_optional.test_storage_hook_smoke" name="test_storage_hook_jsonl" time="0.002" /></testsuite></testsuites>

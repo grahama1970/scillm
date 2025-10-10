@@ -928,10 +928,10 @@ class Usage(CompletionUsage):
     server_tool_use: Optional[ServerToolUse] = None
     cost: Optional[float] = None
 
-    completion_tokens_details: Optional[CompletionTokensDetailsWrapper] = None
+    completion_tokens_details: Optional[CompletionTokensDetails] = None
     """Breakdown of tokens used in a completion."""
 
-    prompt_tokens_details: Optional[PromptTokensDetailsWrapper] = None
+    prompt_tokens_details: Optional[PromptTokensDetails] = None
     """Breakdown of tokens used in the prompt."""
 
     def __init__(
@@ -2398,7 +2398,9 @@ class LlmProviders(str, Enum):
     AUTO_ROUTER = "auto_router"
     VERCEL_AI_GATEWAY = "vercel_ai_gateway"
     DOTPROMPT = "dotprompt"
+    CHUTES = "chutes"
     OVHCLOUD = "ovhcloud"
+    CODEX_AGENT = "codex-agent"
 
 
 # Create a set of all provider values for quick lookup
