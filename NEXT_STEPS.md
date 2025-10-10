@@ -1,7 +1,7 @@
 Next steps to align Mini‑Agent, Codex‑Agent, and Parallel Accomplations with the Happy Path
 
 Goal
-- Wire the experimental features into the paved “init → run → open → replay” flow with strict defaults, env‑gated experiments, and deterministic smokes.
+- Wire the experimental features into the paved “init → run → open → replay” flow with strict defaults, env‑gated experiments, and deterministic scenarios.
 
 1) Spec contract (extend v1 minimally; no option sprawl)
 - Map existing fields to behavior:
@@ -35,15 +35,15 @@ Goal
   - Save spec snapshot under workspace/runs/<run_id>/manifests/spec.yaml (unchanged).
   - Attach run_id into Router request metadata. Expose scoreboard URL + dashboard URL same as guide.
 
-3) Deterministic smokes (wire under local/tests/smoke; fast/offline first)
-- Spec → Run smoke
+3) Deterministic scenarios (wire under tests/; fast/offline first)
+- Spec → Run scenario
   - A minimal gamified.yaml with execution.concurrency: 2, codex_exec: false, agent.tool_backend: "local".
   - Assert: run prints URLs, saves snapshot, and persists run documents; “final_answer” exists from Mini‑Agent.
-- Mini‑Agent HTTP tools smoke (optional dep)
+ - Mini‑Agent HTTP tools scenario (optional dep)
   - Skip if httpx missing. With tool_http_base_url pointing to a tiny local test handler, assert agent returns an answer and stays within max_iterations.
-- Codex‑Agent smoke (env‑guarded)
+ - Codex‑Agent scenario (env‑guarded)
   - Skip if LITELLM_ENABLE_CODEX_AGENT!=1 or no CODEX binary. Short acompletion run (plan → echo → stop) per [docs usage](docs/my-website/docs/providers/codex_agent.md:56).
-- Parallel fan‑out smoke
+ - Parallel fan‑out scenario
   - Build 2–3 RouterParallelRequest to the same model. Run [Router.parallel_acompletions()](litellm/router.py:638) with preserve_order True/False; assert tuple format (index, response|error) and that failure in one does not fail all when return_exceptions=True.
 
 4) CLI integration (no new verbs)
@@ -72,7 +72,7 @@ Goal
 - A: “init → run” with default spec (Mini‑Agent local, concurrency=1) finishes with saved snapshot and prints both URLs.
 - B: “run” with execution.concurrency=3 executes three approaches via [Router.parallel_acompletions()](litellm/router.py:638), returns three results, and artifacts list three approach outputs.
 - C: “run” with execution.codex_exec=true succeeds when flags/binary present; prints a preflight error otherwise without crashing the CLI.
-- D: Smokes are deterministic and green on CI (skip appropriately when optional deps/flags absent).
+- D: Scenarios are deterministic and green on CI (skip appropriately when optional deps/flags absent).
 
 8) Guardrails and defaults (no regressions)
 - Codex‑Agent and Parallel Accomplations remain opt‑in; no default behavior changes in core paths.
@@ -86,4 +86,4 @@ Key implementation anchors
   - [run_parallel_requests()](litellm/router_utils/parallel_acompletion.py:18)
   - [Router.parallel_acompletions()](litellm/router.py:638)
 
-This plan keeps the Happy Path verbs unchanged, introduces only two small spec switches (codex_exec, concurrency), and relies on preflight checks and deterministic smokes to guarantee first‑run success. Once these steps are implemented and the smokes are green on CI, the fork is ready for broader adoption with paved‑road defaults and guarded experiments.
+This plan keeps the Happy Path verbs unchanged, introduces only two small spec switches (codex_exec, concurrency), and relies on preflight checks and deterministic scenarios to guarantee first‑run success. Once these steps are implemented and the scenarios are green on CI, the fork is ready for broader adoption with paved‑road defaults and guarded experiments.

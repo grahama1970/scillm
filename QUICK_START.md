@@ -1,6 +1,6 @@
 # Quick Start (Fork)
 
-This fork adds an opt-in Mini-Agent, an env-gated `codex-agent` provider, and a standardized readiness/smoke harness. The sections below mirror the runnable assets in `scenarios/` so you can reproduce a green run end-to-end.
+This fork adds an opt-in Mini-Agent, an env-gated `codex-agent` provider, and a standardized readiness harness. The sections below mirror the runnable assets in `scenarios/` so you can reproduce a green run end-to-end.
 
 ## 1) Prereqs
 - Python 3.10+
@@ -28,7 +28,7 @@ Notes:
 
 > Verification mindset: LLMs are fallible. In SciLLM, you collaborate with LLMs but demand determinism—CodeWorld executes and scores code under limits; Certainly compiles and proves Lean4 obligations; manifests capture every run for replay.
 
-## 3) One-command smoke run
+## 3) One-command scenario run
 
 ```bash
 make run-scenarios
@@ -177,8 +177,8 @@ Showcases the router’s fan-out helper and verifies ordering/metadata. Useful f
 
 ## 14) Ready checks & tests
 
-- Deterministic/local smokes: `make project-ready`
-- Strict deploy-ready (live smokes, no skips): `make project-ready-live`
+- Deterministic/local scenarios: `make project-ready`
+- Strict deploy-ready (live scenarios, no skips): `make project-ready-live`
 - After touching router/agent code, rerun `make run-scenarios` to confirm all live demos still pass.
 
 ## 15) Extras (optional helpers)
