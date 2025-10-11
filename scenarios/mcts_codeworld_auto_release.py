@@ -10,7 +10,7 @@ Behavior
 - Exits non-zero if the live call returns but required fields are missing.
 
 Env
-- CODEWORLD_BASE (default http://127.0.0.1:8887)
+- CODEWORLD_BASE (default http://127.0.0.1:8888)
 - CODEWORLD_ENABLE_MCTS_GENERATE=1 to enable :auto generation
 """
 from __future__ import annotations
@@ -40,7 +40,7 @@ def _require(cond: bool, msg: str) -> None:
 
 
 def main() -> None:
-    base = os.getenv("CODEWORLD_BASE", "http://127.0.0.1:8887").rstrip("/")
+    base = os.getenv("CODEWORLD_BASE", "http://127.0.0.1:8888").rstrip("/")
     if not _probe(base):
         print(f"[skip] CodeWorld bridge not reachable at {base}; skipping live :auto scenario.")
         sys.exit(0)
@@ -93,7 +93,8 @@ def main() -> None:
                 },
             },
         }
-        with httpx.Client(timeout=45.0) as c:
+        tmo = float(os.getenv("CODEWORLD_ONEPOST_TIMEOUT_S", "60") or "60")
+        with httpx.Client(timeout=tmo) as c:
             r2 = c.post(base + "/bridge/complete", json=one_post)
         if r2.status_code == 200:
             extra_auto = r2.json()

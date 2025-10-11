@@ -317,20 +317,20 @@ CodeWorld quickstart (bridge vs Router)
 
 Bridge
 ```bash
-PYTHONPATH=src uvicorn codeworld.bridge.server:app --port 8887
-CODEWORLD_BASE=http://127.0.0.1:8887 python scenarios/codeworld_bridge_release.py
+PYTHONPATH=src uvicorn codeworld.bridge.server:app --port 8888
+CODEWORLD_BASE=http://127.0.0.1:8888 python scenarios/codeworld_bridge_release.py
 ```
 
 Router
 ```bash
-CODEWORLD_BASE=http://127.0.0.1:8887 python scenarios/codeworld_router_release.py
+CODEWORLD_BASE=http://127.0.0.1:8888 python scenarios/codeworld_router_release.py
 ```
 
 Bridge (Docker, no Redis required)
 ```bash
 make codeworld-bridge-up-only
 # Health probe
-curl -sSf http://127.0.0.1:8887/healthz
+curl -sSf http://127.0.0.1:8888/healthz
 ```
 
 ### MCTS quick calls (CodeWorld)
@@ -338,7 +338,7 @@ curl -sSf http://127.0.0.1:8887/healthz
 ```python
 from litellm import completion
 import os
-os.environ["CODEWORLD_BASE"] = os.getenv("CODEWORLD_BASE", "http://127.0.0.1:8887")
+os.environ["CODEWORLD_BASE"] = os.getenv("CODEWORLD_BASE", "http://127.0.0.1:8888")
 
 items = [{"task":"t","context":{"code_variants":{"a":"def solve(ctx): return 1","b":"def solve(ctx): return 2"}}}]
 
@@ -364,8 +364,11 @@ One‑POST autogenerate (HTTP)
 # Ensure the bridge can reach your codex‑agent:
 #   - Local sidecar on host: export CODEX_AGENT_API_BASE=http://127.0.0.1:8089
 #   - Docker bridge uses http://host.docker.internal:8089 by default (see local/docker/compose.codeworld.bridge.yml)
+#     On many Linux hosts, host.docker.internal is not present by default — compose adds:
+#       extra_hosts: ["host.docker.internal:host-gateway"]
+#     Override with: CODEX_AGENT_API_BASE=http://<your-host-ip>:8089
 
-BASE=${CODEWORLD_BASE:-http://127.0.0.1:8887}
+BASE=${CODEWORLD_BASE:-http://127.0.0.1:8888}
 curl -sS "$BASE/bridge/complete" -H 'Content-Type: application/json' -d '{
   "messages": [{"role":"user","content":"Autogenerate variants then search"}],
   "items": [{"task":"mcts-live-auto","context":{}}],
@@ -374,6 +377,13 @@ curl -sS "$BASE/bridge/complete" -H 'Content-Type: application/json' -d '{
     "strategy_config": {"autogenerate": {"enabled": true, "n": 3}, "rollouts": 24, "depth": 6, "uct_c": 1.25}
   }}
 }' | jq '.run_manifest.mcts_stats'
+
+Notes:
+- Timeout: default one‑POST client timeout is 60s; override with CODEWORLD_ONEPOST_TIMEOUT_S.
+- Autogen defaults: n=3, temperature=0, max_tokens=2000. Override with:
+  CODEWORLD_MCTS_AUTO_N, CODEWORLD_MCTS_AUTO_TEMPERATURE, CODEWORLD_MCTS_AUTO_MAX_TOKENS.
+- Model discovery: “gpt‑5” in examples is illustrative; always use ids from GET $CODEX_AGENT_API_BASE/v1/models.
+- Reasoning: examples use reasoning={"effort":"high"} to demonstrate capability; it is optional, not required.
 ```
 
 

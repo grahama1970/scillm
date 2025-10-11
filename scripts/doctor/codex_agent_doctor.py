@@ -6,13 +6,22 @@ import sys
 import json
 import time
 import httpx
+import argparse
 
 
 def main() -> None:
-    base = os.getenv("CODEX_AGENT_API_BASE", "http://127.0.0.1:8089").rstrip("/")
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--base", default=os.getenv("CODEX_AGENT_API_BASE", "http://127.0.0.1:8089"))
+    parser.add_argument("--timeout", type=float, default=float(os.getenv("CODEX_DOCTOR_TIMEOUT_S", "10") or "10"))
+    args = parser.parse_args()
+
+    base = (args.base or "http://127.0.0.1:8089").rstrip("/")
+    if base.endswith("/v1"):
+        print("[doctor] note: stripping trailing /v1 from base")
+        base = base[:-3]
     model = os.getenv("CODEX_AGENT_MODEL")
     errs = 0
-    with httpx.Client(timeout=10.0) as c:
+    with httpx.Client(timeout=args.timeout) as c:
         # /healthz
         try:
             r = c.get(base + "/healthz")
@@ -35,6 +44,8 @@ def main() -> None:
                 print("[doctor] models:", ", ".join(ids) or "<none>")
                 if not model and ids:
                     model = ids[0]
+                if model and model not in ids:
+                    print(f"[doctor] note: requested model '{model}' not in /v1/models; prefer a returned id")
             else:
                 print(f"[doctor] models: FAIL {r.status_code}")
                 errs += 1
@@ -42,7 +53,7 @@ def main() -> None:
             print(f"[doctor] models: EXC {e}")
             errs += 1
 
-        # chat ping (reasoning high)
+        # chat ping (reasoning high; optional)
         if model:
             try:
                 body = {
@@ -70,4 +81,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
