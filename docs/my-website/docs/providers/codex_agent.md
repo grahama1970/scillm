@@ -1,5 +1,12 @@
 # Codex Agent (Experimental, Env‑Gated)
 
+Happy Path (copy/paste)
+- Start ONE runtime: local mini‑agent (uvicorn on 127.0.0.1:8788) or Docker sidecar (compose on 127.0.0.1:8077).
+- Set base WITHOUT '/v1': `export CODEX_AGENT_API_BASE=http://127.0.0.1:8788` (or `:8077`).
+- Discover a model: `curl -sS "$CODEX_AGENT_API_BASE/v1/models" | jq -r '.data[].id'`.
+- Quick HTTP (high reasoning):
+  `curl -sS "$CODEX_AGENT_API_BASE/v1/chat/completions" -H 'Content-Type: application/json' -d '{"model":"gpt-5","reasoning":{"effort":"high"},"messages":[{"role":"user","content":"ping"}]}' | jq -r '.choices[0].message.content'`
+
 Integrate an experimental “codex‑agent” via the LiteLLM Router for iterative, tool‑using workflows.
 It is opt‑in and disabled by default. Use through Router like any other model.
 

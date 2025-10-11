@@ -60,6 +60,8 @@ LITELLM_ENABLE_CERTAINLY=1 CERTAINLY_BRIDGE_BASE=http://127.0.0.1:8787 \
 - Router call: `completion(model="gpt-5", custom_llm_provider="codex-agent", api_base=$CODEX_AGENT_API_BASE, messages=[...], reasoning_effort="high")`
 - Optional cache: `from litellm.extras import initialize_litellm_cache; initialize_litellm_cache()`
 
+Doctor (one-shot): `make project-agent-doctor`
+
 ## codex‑agent (OpenAI‑compatible) — Local or Docker
 
 Use either local (mini‑agent) or Docker (sidecar). Both expose the same API; do NOT append `/v1` to the base.
