@@ -49,6 +49,17 @@ LITELLM_ENABLE_CERTAINLY=1 CERTAINLY_BRIDGE_BASE=http://127.0.0.1:8787 \
   python scenarios/certainly_router_release.py
 ```
 
+### Happy Path for Project Agents (codex‑agent)
+- Choose one runtime:
+  - Local: `uvicorn litellm.experimental_mcp_client.mini_agent.agent_proxy:app --host 127.0.0.1 --port 8788`
+  - Docker: `docker compose -f local/docker/compose.agents.yml up --build -d codex-sidecar`
+- Set base (no `/v1`): `export CODEX_AGENT_API_BASE=http://127.0.0.1:8788` (or `:8077` for Docker)
+- Discover a model id: `curl -sS "$CODEX_AGENT_API_BASE/v1/models" | jq -r '.data[].id'`
+- Quick call (high reasoning):
+  `curl -sS "$CODEX_AGENT_API_BASE/v1/chat/completions" -H 'Content-Type: application/json' -d '{"model":"gpt-5","reasoning":{"effort":"high"},"messages":[{"role":"user","content":"ping"}]}' | jq -r '.choices[0].message.content'`
+- Router call: `completion(model="gpt-5", custom_llm_provider="codex-agent", api_base=$CODEX_AGENT_API_BASE, messages=[...], reasoning_effort="high")`
+- Optional cache: `from litellm.extras import initialize_litellm_cache; initialize_litellm_cache()`
+
 ## codex‑agent (OpenAI‑compatible) — Local or Docker
 
 Use either local (mini‑agent) or Docker (sidecar). Both expose the same API; do NOT append `/v1` to the base.

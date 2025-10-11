@@ -22,6 +22,12 @@ cp env.example .env  # optional, enables cached Lean/LiteLLM settings
 
 ## Mini‑Agent & codex‑agent (OpenAI‑compatible) — 60‑sec local setup
 
+Happy Path (copy/paste):
+- Run ONE of these: local mini‑agent or Docker sidecar
+- Set `CODEX_AGENT_API_BASE` without `/v1`
+- Discover a model id via `/v1/models`
+- Make a high‑reasoning cURL, or call via Router
+
 Use this if you want an OpenAI‑style endpoint for agent/router tests without any external gateway.
 
 1) Start the mini‑agent shim (default 127.0.0.1:8788)

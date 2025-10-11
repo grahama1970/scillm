@@ -21,6 +21,8 @@ pytestmark = [pytest.mark.mini_agent]
 
 @pytest.mark.asyncio
 async def test_local_finalize_without_tools(monkeypatch):
+    # Ensure dummy fast-path is disabled so the monkeypatched acompletion is used
+    monkeypatch.setenv("MINI_AGENT_ALLOW_DUMMY", "0")
     async def fake_acompletion(*, model, messages, **kw):
         return {"choices": [{"message": {"role": "assistant", "content": "ok"}}]}
 

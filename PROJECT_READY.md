@@ -11,7 +11,7 @@ Resolved endpoints:
 - ✅ deterministic_local
 - ✅ mini_agent_e2e_low
 - ✅ codex_agent_router_shim
-- ✅ deterministic_local
+- ❌ deterministic_local
 - ⏭ mini_agent_e2e_low
 - ✅ codex_agent_router_shim
 - ✅ mini_agent_api_live_minimal
