@@ -13,6 +13,7 @@ import os
 import sys
 import shutil
 import uuid
+import logging
 try:
     from common.bridge.schemas import (
         ProviderArgs as CanonProviderArgs,
@@ -133,6 +134,26 @@ async def bridge_complete(req: CodeWorldBridgeRequest, request: Request):
         if isinstance(tid, str) and tid.strip():
             track_id = tid.strip()
 
+    # Strategy detection (supports provider.args.strategy or strategy_config.name)
+    strategy_name = ""
+    try:
+        _cfg = provider_args.get("strategy_config") if isinstance(provider_args, dict) else None
+        strategy_name = (provider_args.get("strategy") or (_cfg.get("name") if isinstance(_cfg, dict) else "") or "").lower()
+    except Exception:
+        strategy_name = ""
+
+    # exploration_constant alias normalization (provider-level)
+    try:
+        if isinstance(provider_args, dict):
+            cfg = provider_args.get("strategy_config") if isinstance(provider_args.get("strategy_config"), dict) else {}
+            if "uct_c" not in cfg and "exploration_constant" in cfg:
+                cfg["uct_c"] = cfg.get("exploration_constant")
+                provider_args["strategy_config"] = cfg
+            elif "uct_c" in cfg and "exploration_constant" in cfg and cfg["uct_c"] != cfg["exploration_constant"]:
+                logging.warning("[codeworld][warn] exploration_constant and uct_c differ; using uct_c (canonical)")
+    except Exception:
+        pass
+
     results = []
     for idx, item in enumerate(items):
         task = (item.get("task") or item.get("spec") or "").strip()
@@ -145,7 +166,34 @@ async def bridge_complete(req: CodeWorldBridgeRequest, request: Request):
         outputs: Dict[str, Any] = {}
         timings: Dict[str, Any] = {}
         t0 = time.perf_counter()
-        if code_variants:
+        mcts_out = None
+        if code_variants and strategy_name == "mcts":
+            # MCTS phase-1: deterministic pseudo-reward, no code execution
+            try:
+                from codeworld.engine.mcts import run_mcts  # local import for optional dep
+            except Exception:
+                run_mcts = None  # type: ignore
+            if run_mcts is None:
+                outputs["result"] = _score_hash(json.dumps(ctx, sort_keys=True))
+                timings["duration_ms"] = int((time.perf_counter() - t0) * 1000)
+            else:
+                cfg = provider_args.get("strategy_config") if isinstance(provider_args.get("strategy_config"), dict) else {}
+                # Top-level sugar fallbacks
+                rollouts = int(cfg.get("rollouts", provider_args.get("rollouts", 64))) if isinstance(provider_args, dict) else 64
+                depth_v = int(cfg.get("depth", provider_args.get("depth", 8))) if isinstance(provider_args, dict) else 8
+                uct_c_v = cfg.get("uct_c", provider_args.get("uct_c", 1.4)) if isinstance(provider_args, dict) else 1.4
+                if "exploration_constant" in (cfg or {}) and "uct_c" not in (cfg or {}):
+                    uct_c_v = cfg.get("exploration_constant")
+                seed_v = (cfg.get("seed") if isinstance(cfg, dict) else None) or (provider_args.get("seed") if isinstance(provider_args, dict) else None)
+                timeout_ms_v = int(cfg.get("timeout_ms", provider_args.get("timeout_ms", 50))) if isinstance(provider_args, dict) else 50
+                try:
+                    mcts_out = run_mcts(task=task, context=ctx, code_variants=code_variants, rollouts=rollouts, depth=depth_v, uct_c=float(uct_c_v), seed=seed_v, timeout_ms=timeout_ms_v)
+                except Exception as e:  # noqa: BLE001
+                    logging.exception("run_mcts failed")
+                    mcts_out = {"error": str(e), "rollouts": 0, "depth": depth_v, "uct_c": float(uct_c_v), "visits": 0, "explored": 0, "seed": None}
+                outputs["result"] = mcts_out.get("best_value")
+                timings["duration_ms"] = int((time.perf_counter() - t0) * 1000)
+        elif code_variants:
             # Evaluate the first variant only (alpha) via sandboxed strategy runner
             try:
                 vname, vcode = next(iter(code_variants.items()))
@@ -260,6 +308,21 @@ async def bridge_complete(req: CodeWorldBridgeRequest, request: Request):
                 scores["aggregate"] = round(agg, 3)
 
         entry = {"index": idx, "item_id": item_id, "status": "ok", "scores": scores, "item": item, "outputs": {"result": outputs.get("result")}, "timings": timings}
+        if mcts_out is not None:
+            try:
+                entry["mcts"] = {
+                    "best_variant": mcts_out.get("best_variant"),
+                    "best_value": mcts_out.get("best_value"),
+                    "rollouts": mcts_out.get("rollouts"),
+                    "depth": mcts_out.get("depth"),
+                    "uct_c": mcts_out.get("uct_c"),
+                    "visits": mcts_out.get("visits"),
+                    "explored": mcts_out.get("explored"),
+                    "seed": mcts_out.get("seed"),
+                    "error": mcts_out.get("error"),
+                }
+            except Exception:
+                pass
 
         if judge_flag:
             try:
@@ -343,6 +406,16 @@ async def bridge_complete(req: CodeWorldBridgeRequest, request: Request):
         },
         "signals": signals,
     }
+    # Mirror strategy info if MCTS was requested
+    try:
+        if strategy_name == "mcts":
+            m0 = next((r.get("mcts") for r in results if isinstance(r, dict) and r.get("mcts")), None)
+            if isinstance(m0, dict):
+                response["run_manifest"]["strategy_name"] = "mcts"
+                response["run_manifest"]["strategy_seed"] = m0.get("seed")
+                response["run_manifest"]["strategy_params"] = {k: m0.get(k) for k in ("rollouts", "depth", "uct_c")}
+    except Exception:
+        pass
     # Persist artifact
     try:
         from pathlib import Path as _P

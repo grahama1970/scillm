@@ -72,6 +72,15 @@ class CodeWorldLLM(CustomLLM):
         args_block = provider.get("args") if isinstance(provider.get("args"), dict) else {}
         merged_args = dict(args_block)
 
+        # Model alias support: "codeworld/mcts" injects strategy="mcts" unless caller set one
+        try:
+            if isinstance(_model, str) and _model.lower().startswith("codeworld/") and "/" in _model:
+                alias = _model.split("/", 1)[1].strip().lower()
+                if alias == "mcts" and "strategy" not in merged_args and "strategy" not in optional_params:
+                    merged_args["strategy"] = "mcts"
+        except Exception:
+            pass
+
         # Accept exploration_constant as a friendlier alias for uct_c
         if "exploration_constant" in optional_params and "uct_c" not in optional_params:
             try:
