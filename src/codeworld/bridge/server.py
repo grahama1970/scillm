@@ -430,3 +430,193 @@ async def bridge_complete(req: CodeWorldBridgeRequest, request: Request):
 @app.get("/healthz")
 async def healthz():
     return JSONResponse({"ok": True, "details": {"engine": "alpha@py-runner+dynamic-scoring+judge", "defaults": {"metrics": ["correctness", "speed", "brevity"], "languages": ["python"]}}})
+
+
+# ===== Optional: MCTS autogeneration helper path (unit-testable) =====
+
+def _mcts_hash_text(s: str) -> str:
+    try:
+        import hashlib as _hh
+        return _hh.sha256(s.encode("utf-8")).hexdigest()
+    except Exception:
+        return ""
+
+
+def _mcts_build_generation_prompt(task: Any, context: Optional[Dict[str, Any]], n: int) -> str:
+    try:
+        ctx = json.dumps(context or {}, ensure_ascii=False, sort_keys=True)
+    except Exception:
+        ctx = repr(context)
+    if isinstance(task, str):
+        task_str = task
+    else:
+        try:
+            task_str = json.dumps(task, ensure_ascii=False)
+        except Exception:
+            task_str = repr(task)
+    return f"Generate exactly {n} JSON variants for the task below with fields id,title,complexity_tier,rationale,code,notes. Return STRICT JSON with top-level key 'variants'.\nTask:\n{task_str}\nContext:\n{ctx}"
+
+
+def _mcts_call_llm_for_variants(prompt: str, *, n: int, model: str, temperature: float = 0.0, max_tokens: int = 2000,
+                                 base_url: Optional[str] = None, api_key: Optional[str] = None) -> Dict[str, Any]:
+    from urllib import request as _urlreq
+    base = base_url or os.getenv("OPENAI_BASE_URL") or os.getenv("CODEX_AGENT_API_BASE") or "http://127.0.0.1:8089"
+    key = api_key or os.getenv("OPENAI_API_KEY") or "none"
+    payload = {"model": model, "messages": [{"role": "system", "content": "You produce strict JSON only."}, {"role": "user", "content": prompt}],
+               "temperature": temperature, "max_tokens": max_tokens}
+    data = json.dumps(payload).encode("utf-8")
+    headers = {"Content-Type": "application/json", "Authorization": f"Bearer {key}"}
+    for path in ("/v1/chat/completions", "/chat/completions"):
+        url = base.rstrip("/") + path
+        try:
+            req = _urlreq.Request(url=url, data=data, headers=headers, method="POST")
+            with _urlreq.urlopen(req, timeout=30) as resp:
+                rsp = json.loads(resp.read().decode("utf-8"))
+            content = rsp.get("choices", [{}])[0].get("message", {}).get("content", "")
+            return {"raw": content}
+        except Exception as e:  # noqa: BLE001
+            logging.warning("mcts variant llm call failed at %s: %s", url, e)
+            continue
+    return {"raw": ""}
+
+
+def _mcts_extract_variants_from_raw(raw: str) -> list[dict[str, Any]]:
+    if not raw:
+        return []
+    try:
+        obj = json.loads(raw)
+    except Exception:
+        first, last = raw.find("{"), raw.rfind("}")
+        if first == -1 or last == -1 or last <= first:
+            return []
+        try:
+            obj = json.loads(raw[first:last + 1])
+        except Exception:
+            return []
+    variants = obj.get("variants", []) if isinstance(obj, dict) else []
+    return variants if isinstance(variants, list) else []
+
+
+def apply_mcts_strategy(entry: Dict[str, Any], provider_args: Optional[Dict[str, Any]], task: Any, context: Optional[Dict[str, Any]]) -> None:
+    """
+    Unit-testable helper that optionally autogenerates variants, then runs MCTS and
+    populates entry["mcts"] and mirrors generator + strategy info into entry["run_manifest"].
+    """
+    if not isinstance(entry, dict):
+        return
+    args = provider_args or {}
+    args_block = args.get("args") if isinstance(args.get("args"), dict) else args
+    strategy = (args_block.get("strategy") or "").lower()
+    if strategy != "mcts":
+        return
+
+    # Generator: only when enabled and code_variants empty
+    cfg = args_block.get("strategy_config") or {}
+    if not isinstance(cfg, dict):
+        cfg = {}
+    autogen = cfg.get("autogenerate", args_block.get("autogenerate"))
+    enabled = False
+    gen_cfg: Dict[str, Any] = {}
+    if isinstance(autogen, bool):
+        enabled = autogen
+    elif isinstance(autogen, dict):
+        enabled = bool(autogen.get("enabled", False))
+        gen_cfg = dict(autogen)
+    if "n_variants" in args_block:
+        gen_cfg["n"] = int(args_block["n_variants"])  # type: ignore[index]
+    if "generator_model" in args_block:
+        gen_cfg["generator_model"] = args_block["generator_model"]
+    if "temperature" in args_block:
+        gen_cfg["temperature"] = args_block["temperature"]
+    if "max_tokens" in args_block:
+        gen_cfg["max_tokens"] = args_block["max_tokens"]
+
+    env_gate = os.getenv("CODEWORLD_ENABLE_MCTS_GENERATE", "1").lower()
+    gate_allowed = env_gate not in ("0", "false", "no")
+
+    manifest = entry.get("run_manifest")
+    if not isinstance(manifest, dict):
+        manifest = {}
+        entry["run_manifest"] = manifest
+
+    gen_meta = {
+        "enabled": bool(enabled),
+        "skipped_by_env": not gate_allowed if enabled else False,
+        "n": int(gen_cfg.get("n", 6)),
+        "model": gen_cfg.get("generator_model", "gpt-4o-mini"),
+        "temperature": float(gen_cfg.get("temperature", 0.0)),
+        "max_tokens": int(gen_cfg.get("max_tokens", 2000)),
+        "prompt_hash": None,
+        "response_hash": None,
+        "error": None,
+    }
+
+    if enabled and gate_allowed and not entry.get("code_variants"):
+        prompt = _mcts_build_generation_prompt(task, context, gen_meta["n"])  # type: ignore[arg-type]
+        gen_meta["prompt_hash"] = _mcts_hash_text(prompt)
+        try:
+            llm = _mcts_call_llm_for_variants(prompt, n=gen_meta["n"], model=str(gen_meta["model"]),
+                                              temperature=float(gen_meta["temperature"]), max_tokens=int(gen_meta["max_tokens"]))
+            raw = llm.get("raw", "")
+            gen_meta["response_hash"] = _mcts_hash_text(raw) if raw else None
+            variants = _mcts_extract_variants_from_raw(raw)
+            norm: list[dict[str, Any]] = []
+            for v in variants:
+                if not isinstance(v, dict):
+                    continue
+                vid = v.get("id") or f"v{len(norm)+1}"
+                norm.append({
+                    "id": vid,
+                    "title": v.get("title"),
+                    "complexity_tier": v.get("complexity_tier"),
+                    "rationale": v.get("rationale"),
+                    "code": v.get("code") if isinstance(v.get("code"), str) else "",
+                    "notes": v.get("notes"),
+                })
+            if norm:
+                entry["code_variants"] = norm
+            else:
+                gen_meta["error"] = "generation_empty_or_unparseable"
+        except Exception as e:  # noqa: BLE001
+            logging.exception("mcts variant generation failed")
+            gen_meta["error"] = str(e)
+
+    manifest["strategy_generator"] = gen_meta
+
+    # If no variants after generation, bail
+    code_variants = entry.get("code_variants")
+    if not code_variants:
+        return
+
+    # Map knobs and run engine
+    depth_v = int(cfg.get("depth", args_block.get("depth", 8)))
+    uct_c_v = cfg.get("uct_c", args_block.get("uct_c", 1.4))
+    if "exploration_constant" in cfg and "uct_c" not in cfg:
+        uct_c_v = cfg.get("exploration_constant")
+    rollouts_v = int(cfg.get("rollouts", args_block.get("rollouts", 64)))
+    seed_v = cfg.get("seed") or args_block.get("seed")
+    timeout_ms_v = int(cfg.get("timeout_ms", args_block.get("timeout_ms", 50)))
+    try:
+        try:
+            from src.codeworld.engine.mcts import run_mcts  # tests path
+        except Exception:
+            from codeworld.engine.mcts import run_mcts  # runtime path
+        mcts_out = run_mcts(task=task, context=context, code_variants=code_variants, rollouts=rollouts_v, depth=depth_v, uct_c=float(uct_c_v), seed=seed_v, timeout_ms=timeout_ms_v)
+    except Exception as e:  # noqa: BLE001
+        logging.exception("run_mcts failed")
+        mcts_out = {"error": str(e), "rollouts": 0, "depth": depth_v, "uct_c": float(uct_c_v), "visits": 0, "explored": 0, "seed": None}
+
+    entry["mcts"] = {
+        "best_variant": mcts_out.get("best_variant"),
+        "best_value": mcts_out.get("best_value"),
+        "rollouts": mcts_out.get("rollouts"),
+        "depth": mcts_out.get("depth"),
+        "uct_c": mcts_out.get("uct_c"),
+        "visits": mcts_out.get("visits"),
+        "explored": mcts_out.get("explored"),
+        "seed": mcts_out.get("seed"),
+        "error": mcts_out.get("error"),
+    }
+    manifest["strategy_name"] = "mcts"
+    manifest["strategy_seed"] = mcts_out.get("seed")
+    manifest["strategy_params"] = {"rollouts": rollouts_v, "depth": depth_v, "uct_c": float(uct_c_v), "timeout_ms": timeout_ms_v}
