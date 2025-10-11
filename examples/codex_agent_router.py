@@ -32,10 +32,10 @@ def main() -> None:
     out = r.completion(
         model="codex-agent-1",
         messages=[{"role": "user", "content": "Say hello and finish."}],
+        reasoning_effort="high",
     )
     print(getattr(out.choices[0].message, "content", "").strip())
 
 
 if __name__ == "__main__":
     main()
-
