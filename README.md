@@ -238,6 +238,13 @@ Future backends (e.g., Coq) will plug into the same surface, but are out of scop
 - mini‑agent (local tools, deterministic): fast, reproducible tool‑use loop for experiments. Expect final answer + metrics + parsed tool calls.
 - codex‑agent (code‑centric provider): OpenAI‑compatible sidecar with MCP tools and multi‑iteration plans; health‑checkable and Router‑native.
 
+Mini‑Agent (MCP)
+- Start the MCP‑style mini‑agent locally:
+  - `uvicorn litellm.experimental_mcp_client.mini_agent.agent_proxy:app --host 127.0.0.1 --port 8788`
+- Probe: `curl -sSf http://127.0.0.1:8788/ready`
+- In‑process sample: `python examples/mini_agent_inprocess.py` (uses LocalMCPInvoker)
+- See also: feature_recipes/MINI_AGENT.md and CONTEXT.md runbook pointers.
+
 ## When To Use CodeWorld
 
 Use CodeWorld when you want to evaluate and rank code strategies under your own metrics, with a reproducible manifest and simple HTTP/Router calls.
