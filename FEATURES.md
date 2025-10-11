@@ -31,6 +31,7 @@ This file is a quick, practical map of SciLLM’s capabilities, what they do, an
   - Health: `curl -sSf http://127.0.0.1:8788/healthz`
   - Models: `curl -sS http://127.0.0.1:8788/v1/models | jq .`
   - High reasoning chat: `curl -sS -H 'content-type: application/json' -d '{"model":"gpt-5","reasoning":{"effort":"high"},"messages":[{"role":"user","content":"say hello"}]}' http://127.0.0.1:8788/v1/chat/completions | jq -r '.choices[0].message.content'`
+  - Doctor (one‑shot): `make codex-agent-doctor` (checks /healthz, /v1/models, and a high‑reasoning ping)
 - Router usage (copy/paste, high reasoning):
   - `export LITELLM_ENABLE_CODEX_AGENT=1`
   - `export CODEX_AGENT_API_BASE=http://127.0.0.1:8788`
