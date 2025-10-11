@@ -14,7 +14,7 @@
   <a href="https://github.com/grahama1970/scillm/actions/workflows/manual-stress.yml"><img src="https://img.shields.io/badge/SciLLM%20Manual%20Stress-%E2%86%92-blue" alt="SciLLM: Manual Stress"></a>
 </p>
 
-<p align="center"><i>API‑compatible with LiteLLM. Adds optional modules for: (1) formal methods via a prover bridge (“Certainly”, Lean4 in beta), (2) code strategy orchestration with dynamic scoring (“CodeWorld”), and (3) small live agent flows (mini‑agent, codex‑agent). See the root <a href="../QUICK_START.md">QUICK_START.md</a> and scenarios/ for runnable demos. Enable with SCILLM_ENABLE_* or LITELLM_ENABLE_*.</i></p>
+<p align="center"><i>API‑compatible with LiteLLM. Adds optional modules for: (1) formal methods via a prover bridge (“Certainly”, Lean4 in beta), (2) code strategy orchestration with dynamic scoring (“CodeWorld”), and (3) small live agent flows (mini‑agent, codex‑agent). See the root <a href="../QUICKSTART.md">QUICKSTART.md</a> and scenarios/ for runnable demos. Enable with SCILLM_ENABLE_* or LITELLM_ENABLE_*.</i></p>
 
 ## TL;DR (30 seconds)
 
@@ -67,7 +67,7 @@ SciLLM targets practitioners who need reproducible, inspectable end‑to‑end w
 - Inner‑loop bug fix (mini‑agent): run tool invocations deterministically; capture final answer + telemetry.
 - Code refactor planning (codex‑agent): code‑centric agent via OpenAI‑compatible provider; health‑checkable sidecar.
 
-See <a href="../QUICK_START.md">QUICK_START.md</a> for runnable commands.
+See <a href="../QUICKSTART.md">QUICKSTART.md</a> for runnable commands.
 
 ---
 
@@ -82,7 +82,7 @@ See <a href="../QUICK_START.md">QUICK_START.md</a> for runnable commands.
 
 ## Quick Start
 
-See the root quick start: <a href="../QUICK_START.md">QUICK_START.md</a>
+See the root quick start: <a href="../QUICKSTART.md">QUICKSTART.md</a>
 
 ---
 

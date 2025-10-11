@@ -1,11 +1,19 @@
 # Codex Agent (Experimental, Env‑Gated)
 
-Happy Path (copy/paste)
-- Start ONE runtime: local mini‑agent (uvicorn on 127.0.0.1:8788) or Docker sidecar (compose on 127.0.0.1:8077).
-- Set base WITHOUT '/v1': `export CODEX_AGENT_API_BASE=http://127.0.0.1:8788` (or `:8077`).
-- Discover a model: `curl -sS "$CODEX_AGENT_API_BASE/v1/models" | jq -r '.data[].id'`.
+Zero‑ambiguity Happy Path (copy/paste)
+- Choose ONE runtime:
+  - Local: `uvicorn litellm.experimental_mcp_client.mini_agent.agent_proxy:app --host 127.0.0.1 --port 8788`
+  - Docker: `docker compose -f local/docker/compose.agents.yml up --build -d codex-sidecar`
+- Set base WITHOUT `/v1`: `export CODEX_AGENT_API_BASE=http://127.0.0.1:8788` (or `:8077`)
+- Discover a model id: `curl -sS "$CODEX_AGENT_API_BASE/v1/models" | jq -r '.data[].id'`
 - Quick HTTP (high reasoning):
   `curl -sS "$CODEX_AGENT_API_BASE/v1/chat/completions" -H 'Content-Type: application/json' -d '{"model":"gpt-5","reasoning":{"effort":"high"},"messages":[{"role":"user","content":"ping"}]}' | jq -r '.choices[0].message.content'`
+
+Extractor client mapping (if your client expects OpenAI envs)
+```bash
+export OPENAI_BASE_URL="$CODEX_AGENT_API_BASE"   # do NOT append /v1
+export OPENAI_API_KEY="${CODEX_AGENT_API_KEY:-none}"
+```
 
 Integrate an experimental “codex‑agent” via the LiteLLM Router for iterative, tool‑using workflows.
 It is opt‑in and disabled by default. Use through Router like any other model.
@@ -55,9 +63,9 @@ This provider is **HTTP-only**. Point it at an OpenAI-compatible Chat Completion
 
 ```bash
 export LITELLM_ENABLE_CODEX_AGENT=1
-export CODEX_AGENT_API_BASE=http://127.0.0.1:8788    # e.g., mini-agent shim /v1/chat/completions
+export CODEX_AGENT_API_BASE=http://127.0.0.1:8788    # base, no /v1
 export CODEX_AGENT_API_KEY=sk-your-key               # optional; becomes Authorization: Bearer ...
-curl -sS "$CODEX_AGENT_API_BASE/v1/models" | jq .   # fetch valid model ids (e.g., "gpt-5")
+curl -sS "$CODEX_AGENT_API_BASE/v1/models" | jq -r '.data[].id'   # fetch valid model ids (e.g., "gpt-5")
 ```
 
 For a local stack with the bundled toolchains (mini-agent shim + codex sidecar + Ollama), run:
@@ -80,7 +88,7 @@ import os
 os.environ["LITELLM_ENABLE_CODEX_AGENT"] = "1"
 router = Router(model_list=[
   {"model_name":"codex-agent-1","litellm_params":{
-      "model":"codex-agent/gpt-5",
+      "model":"codex-agent/gpt-5",  # or whatever /v1/models returns
       "api_base": os.getenv("CODEX_AGENT_API_BASE"),
       "api_key":  os.getenv("CODEX_AGENT_API_KEY","")
   }},
@@ -89,7 +97,7 @@ router = Router(model_list=[
 resp = await router.acompletion(
   model="codex-agent-1",
   messages=[{"role":"user","content":"Plan steps and finish."}],
-  reasoning_effort="high",
+  reasoning={"effort":"high"},
 )
 print(resp.choices[0].message.content)
 ```
@@ -103,6 +111,11 @@ print(resp.choices[0].message.content)
   - Local mini‑agent: `uvicorn litellm.experimental_mcp_client.mini_agent.agent_proxy:app --host 127.0.0.1 --port 8788`
   - Docker sidecar: `docker compose -f local/docker/compose.agents.yml up --build -d codex-sidecar` (base `http://127.0.0.1:8077`)
   - Always set `CODEX_AGENT_API_BASE` without `/v1` and fetch a model id via `/v1/models`.
+
+### Troubleshooting
+- 404 on `/v1/chat/completions` → wrong `model` id. Use one returned by `/v1/models`.
+- 400/502 on sidecar → upstream provider not configured; enable echo or wire a real backend.
+- Missing base → set `CODEX_AGENT_API_BASE` (no `/v1`).
 
 ### Disable
 

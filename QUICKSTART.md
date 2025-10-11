@@ -28,6 +28,38 @@ Happy Path (copy/paste):
 - Discover a model id via `/v1/models`
 - Make a high‑reasoning cURL, or call via Router
 
+Extractor pipeline — zero‑ambiguity checklist (copy/paste)
+
+```bash
+# 0) Activate env and load .env if present
+source .venv/bin/activate
+set -a; [ -f .env ] && source .env; set +a
+
+# 1) Choose ONE base (no /v1): mini‑agent (8788) or sidecar (8077)
+export CODEX_AGENT_API_BASE=http://127.0.0.1:8788   # or http://127.0.0.1:8077
+
+# 2) Map to OpenAI envs expected by the extractor HTTP client
+export OPENAI_BASE_URL="$CODEX_AGENT_API_BASE"     # do NOT append /v1
+export OPENAI_API_KEY="${CODEX_AGENT_API_KEY:-none}"
+
+# 3) Sanity probes
+curl -sSf "$CODEX_AGENT_API_BASE/healthz"
+curl -sS  "$CODEX_AGENT_API_BASE/v1/models" | jq -r '.data[].id'
+
+# 4) High‑reasoning chat (pick a valid MODEL from the line above, e.g., gpt-5)
+curl -sS "$CODEX_AGENT_API_BASE/v1/chat/completions" \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"gpt-5","reasoning":{"effort":"high"},"messages":[{"role":"user","content":"ping"}]}' \
+  | jq -r '.choices[0].message.content'
+```
+
+Provider name and model id — avoid confusion
+- Canonical provider is `codex-agent`. Aliases like `code-agent`/`code_agent` are discouraged.
+- You can call with either:
+  - `model="codex-agent/<id>"` (e.g., `codex-agent/gpt-5`), or
+  - `model="<id>", custom_llm_provider="codex-agent"`.
+- Always discover a valid `<id>` via `GET $CODEX_AGENT_API_BASE/v1/models`.
+
 Extractor pipeline (HTTP client) env mapping
 
 ```bash
@@ -155,6 +187,12 @@ r = Router(model_list=[{"model_name":"gpt-5","litellm_params":{"model":"gpt-5","
 ```
 
 Port busy? Run on another port (e.g., 8789) and set `CODEX_AGENT_API_BASE=http://127.0.0.1:8789`.
+
+Troubleshooting — fastest fixes
+- 404 on `/v1/chat/completions`: model id is not registered → use one from `/v1/models`.
+- 400/502 from sidecar: upstream provider not wired → enable echo or configure a real backend.
+- `Skipping codex-agent scenario (...)`: set `CODEX_AGENT_API_BASE` and retry.
+- Base includes `/v1`: remove it; the adapter expects a base without the suffix.
 
 ## 2) Run release scenarios (fast confidence)
 
@@ -317,4 +355,4 @@ uv run scripts/viewers/make_synthetic_graph.py prototypes/lemma-graph-viewer/pub
 - `docs/readiness/FINAL_MANUAL_CHECKLIST.md`—manual gate after `mvp_check`
 - `feature_recipes/`—sample LiteLLM bridge showing how Router calls could invoke
   Lean4 via the `/bridge` surface
-> Looking for the full SciLLM stack (Lean4/Certainly + CodeWorld + proxy)? See `QUICK_START.md` for Docker bring‑up (`deploy/docker/compose.scillm.stack.yml`) and scenarios covering both bridges.
+> Looking for the full SciLLM stack (Lean4/Certainly + CodeWorld + proxy)? See `QUICKSTART.md` for Docker bring‑up (`deploy/docker/compose.scillm.stack.yml`) and scenarios covering both bridges.
