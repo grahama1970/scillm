@@ -28,6 +28,14 @@ Happy Path (copy/paste):
 - Discover a model id via `/v1/models`
 - Make a high‑reasoning cURL, or call via Router
 
+Extractor pipeline (HTTP client) env mapping
+
+```bash
+# If your client expects OpenAI envs, map them to codex‑agent
+export OPENAI_BASE_URL="$CODEX_AGENT_API_BASE"     # do NOT append /v1
+export OPENAI_API_KEY="${CODEX_AGENT_API_KEY:-none}"
+```
+
 Use this if you want an OpenAI‑style endpoint for agent/router tests without any external gateway.
 
 1) Start the mini‑agent shim (default 127.0.0.1:8788)
@@ -69,6 +77,45 @@ Doctor (one‑shot):
 
 ```bash
 make project-agent-doctor
+```
+
+Capabilities and expectations
+
+- Mini‑agent (local shim):
+  - Text‑only, non‑streaming; images are ignored
+  - No server‑side caching; no token usage fields
+  - Great for transport sanity and Router demos
+- Sidecar (Docker):
+  - OpenAI‑compatible pass‑through; streaming/usage/vision depend on the upstream provider
+
+Strict JSON and stop tokens
+
+- Gateway does not enforce strict JSON. Enforce client‑side and validate:
+
+```python
+from openai import OpenAI
+client = OpenAI(base_url=os.environ["OPENAI_BASE_URL"], api_key=os.getenv("OPENAI_API_KEY","none"))
+resp = client.chat.completions.create(
+    model="gpt-5",
+    response_format={"type":"json_object"},
+    stop=["```","END_JSON"],
+    messages=[{"role":"user","content":"Return {\\"ok\\": true} as JSON only."}],
+)
+data = resp.choices[0].message.content
+# validate/strip here per your pipeline
+```
+
+Client cache (optional; LiteLLM)
+
+```python
+from litellm.extras import initialize_litellm_cache
+initialize_litellm_cache()  # uses REDIS_HOST/PORT if available, else in‑memory
+
+# Optional: run‑scoped namespace (advanced)
+import litellm
+from litellm.caching.caching import Cache, LiteLLMCacheType
+litellm.cache = Cache(type=LiteLLMCacheType.REDIS, host=os.getenv("REDIS_HOST","localhost"), port=os.getenv("REDIS_PORT","6379"), namespace=f"run:{os.getenv('RUN_ID','dev')}")
+litellm.enable_cache()
 ```
 
 Auth for codex‑agent sidecar (when echo is disabled)
