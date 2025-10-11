@@ -64,6 +64,11 @@ LITELLM_ENABLE_CERTAINLY=1 CERTAINLY_BRIDGE_BASE=http://127.0.0.1:8787 \
   - Router call: `completion(model="gpt-5", custom_llm_provider="codex-agent", api_base=$CODEX_AGENT_API_BASE, messages=[...], reasoning_effort="high")`
   - Optional cache: `from litellm.extras import initialize_litellm_cache; initialize_litellm_cache()`
 
+MCTS (CodeWorld) one‑POST live check
+- Start bridge: `PYTHONPATH=src uvicorn codeworld.bridge.server:app --port 8888 --log-level warning`
+- One‑POST autogen+MCTS: `CODEWORLD_BASE=http://127.0.0.1:8888 curl -sS "$CODEWORLD_BASE/bridge/complete" -H 'Content-Type: application/json' -d '{"messages":[{"role":"user","content":"Autogenerate then search"}],"items":[{"task":"t","context":{}}],"provider":{"name":"codeworld","args":{"strategy":"mcts","strategy_config":{"autogenerate":{"enabled":true,"n":3},"rollouts":24,"depth":6,"uct_c":1.25}}}}' | jq '.run_manifest.mcts_stats'`
+- Or just run: `CODEWORLD_BASE=http://127.0.0.1:8888 make mcts-live`
+
 Troubleshooting
 - 404 → wrong model id; use one from `/v1/models`.
 - 400/502 (sidecar) → upstream provider not wired; enable echo or add credentials.
@@ -232,6 +237,7 @@ Future backends (e.g., Coq) will plug into the same surface, but are out of scop
 
 - `tests/` are strictly deterministic and offline (no network). Example: Lean4 CLI contract tests in `tests/lean4/`.
 - `scenarios/` are live end-to-end demos that may call HTTP bridges or external services. They are skip-friendly when deps aren’t running.
+- New: `scenarios/mcts_codeworld_auto_release.py` prefers a single POST to `/bridge/complete` with `strategy_config.autogenerate`; falls back to a two‑step flow if generation isn’t available.
 
 ## mini‑agent and codex‑agent (one‑liners)
 

@@ -1,92 +1,73 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
-import argparse
-import json
 import os
 import sys
-from typing import Any, Dict, List
-
+import json
+import time
 import httpx
 
 
-def eprint(*args: Any) -> None:
-    print(*args, file=sys.stderr)
+def main() -> None:
+    base = os.getenv("CODEX_AGENT_API_BASE", "http://127.0.0.1:8089").rstrip("/")
+    model = os.getenv("CODEX_AGENT_MODEL")
+    errs = 0
+    with httpx.Client(timeout=10.0) as c:
+        # /healthz
+        try:
+            r = c.get(base + "/healthz")
+            ok = r.status_code == 200
+            print(f"[doctor] healthz: {r.status_code} {'OK' if ok else 'FAIL'}")
+            if not ok:
+                errs += 1
+        except Exception as e:  # noqa: BLE001
+            print(f"[doctor] healthz: EXC {e}")
+            errs += 1
 
-
-def main() -> int:
-    p = argparse.ArgumentParser(description="codex-agent doctor: health, models, ping")
-    p.add_argument("--base", default=os.getenv("CODEX_AGENT_API_BASE", "http://127.0.0.1:8788"), help="OpenAI-compatible base URL (no /v1)")
-    p.add_argument("--model", default=os.getenv("CODEX_AGENT_MODEL", ""), help="Model id (if empty, fetch first from /v1/models)")
-    p.add_argument("--timeout", type=float, default=8.0, help="Timeout seconds per call")
-    args = p.parse_args()
-
-    base = args.base.rstrip("/")
-    headers = {"Content-Type": "application/json"}
-    api_key = os.getenv("CODEX_AGENT_API_KEY", "")
-    if api_key:
-        headers["Authorization"] = f"Bearer {api_key}"
-
-    ok = True
-    summary: Dict[str, Any] = {"base": base, "steps": []}
-
-    try:
-        with httpx.Client(timeout=args.timeout, headers=headers) as c:
-            # health
-            h = c.get(f"{base}/healthz")
-            summary["steps"].append({"healthz": h.status_code, "body": _safe_json(h)})
-            if h.status_code >= 400:
-                ok = False
-
-            # models
-            m = c.get(f"{base}/v1/models")
-            body = _safe_json(m)
-            ids: List[str] = []
-            if isinstance(body, dict) and isinstance(body.get("data"), list):
-                ids = [str(x.get("id")) for x in body["data"] if isinstance(x, dict) and x.get("id")]
-            summary["steps"].append({"models": m.status_code, "ids": ids})
-            if m.status_code >= 400 or not ids:
-                ok = False
-
-            model = args.model or (ids[0] if ids else "")
-            summary["model"] = model
-            if not model:
-                ok = False
+        # /v1/models
+        try:
+            r = c.get(base + "/v1/models")
+            ok = r.status_code == 200
+            ids: list[str] = []
+            if ok:
+                data = r.json()
+                ids = [d.get("id") for d in (data.get("data") or []) if isinstance(d, dict)]
+                print("[doctor] models:", ", ".join(ids) or "<none>")
+                if not model and ids:
+                    model = ids[0]
             else:
-                # quick ping with high reasoning
-                payload = {
+                print(f"[doctor] models: FAIL {r.status_code}")
+                errs += 1
+        except Exception as e:  # noqa: BLE001
+            print(f"[doctor] models: EXC {e}")
+            errs += 1
+
+        # chat ping (reasoning high)
+        if model:
+            try:
+                body = {
                     "model": model,
-                    "messages": [{"role": "user", "content": "Say hello."}],
                     "reasoning": {"effort": "high"},
+                    "messages": [{"role": "user", "content": "ping"}],
                 }
-                r = c.post(f"{base}/v1/chat/completions", json=payload)
-                rb = _safe_json(r)
-                out = None
-                try:
-                    out = rb["choices"][0]["message"]["content"]
-                except Exception:
-                    out = str(rb)[:200]
-                summary["steps"].append({"chat": r.status_code, "sample": out})
-                if r.status_code >= 400:
-                    ok = False
-    except httpx.HTTPError as e:
-        eprint("HTTP error:", e)
-        ok = False
-    except Exception as e:
-        eprint("unexpected error:", e)
-        ok = False
+                r = c.post(base + "/v1/chat/completions", json=body)
+                ok = r.status_code == 200
+                content = None
+                if ok:
+                    content = r.json()["choices"][0]["message"]["content"]
+                    print("[doctor] chat: OK —", (content or "").strip()[:60])
+                else:
+                    print(f"[doctor] chat: FAIL {r.status_code}")
+                    errs += 1
+            except Exception as e:  # noqa: BLE001
+                print(f"[doctor] chat: EXC {e}")
+                errs += 1
+        else:
+            print("[doctor] chat: SKIP — no model id")
 
-    print(json.dumps(summary, indent=2))
-    return 0 if ok else 2
-
-
-def _safe_json(resp: httpx.Response) -> Any:
-    try:
-        return resp.json()
-    except Exception:
-        return {"text": resp.text[:200]}
+    sys.exit(0 if errs == 0 else 2)
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    main()
 
