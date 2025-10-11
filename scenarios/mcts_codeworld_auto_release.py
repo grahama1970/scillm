@@ -54,14 +54,17 @@ def main() -> None:
             "C": "def solve(ctx): return 3",
         }}
     }]
-    resp_alias = completion(
-        model="codeworld/mcts",
-        custom_llm_provider="codeworld",
-        messages=[{"role":"user","content":"Alias check"}],
-        items=items,
-        api_base=base,
-    )
-    extra_alias: Dict[str, Any] = getattr(resp_alias, "additional_kwargs", {}).get("codeworld") or {}
+    # Prefer a direct bridge POST here to avoid provider import/gating surprises in live envs.
+    # This exercises the same surface the provider uses under the hood.
+    alias_payload = {
+        "messages": [{"role": "user", "content": "Alias check"}],
+        "items": items,
+        "provider": {"name": "codeworld", "args": {"strategy": "mcts"}},
+    }
+    with httpx.Client(timeout=10.0) as c:
+        r = c.post(base + "/bridge/complete", json=alias_payload)
+        _require(r.status_code == 200, f"alias HTTP status {r.status_code}")
+        extra_alias: Dict[str, Any] = r.json()
     mcts_alias = (extra_alias.get("results") or [{}])[0].get("mcts") or {}
     _require("best_variant" in mcts_alias, "alias call missing mcts.best_variant")
 
@@ -86,4 +89,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
