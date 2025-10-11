@@ -67,7 +67,7 @@ items = [{
 
 resp = completion(
   model="codeworld/mcts",  # alias injects strategy="mcts"
-  custom_llm_provider="codeworld/mcts",
+  custom_llm_provider="codeworld",
   messages=[{"role": "user", "content": "Alias test"}],
   items=items,
   options={"session_id":"alias-run","track_id":"trial-2"},
@@ -78,12 +78,12 @@ resp = completion(
 ## Determinism
 
 - Set `SCILLM_DETERMINISTIC_SEED` or pass `seed=` or `strategy_config={"seed": N}`.
-- Seed is recorded in `results[i].mcts.seed` and `run_manifest.mcts_stats`.
+- Seed is recorded in `results[i].mcts.seed` and mirrored to `run_manifest.strategy_seed`.
  - See determinism policy and seed precedence: `docs/policies/DETERMINISM.md`.
 
 ## Output
 
-`results[i].mcts`:
+`results[i].mcts` (per-item detail):
 ```jsonc
 {
   "best_variant": "algo_b",
@@ -91,14 +91,20 @@ resp = completion(
   "rollouts": 48,
   "depth": 6,
   "uct_c": 1.25,
-  "visits": {"algo_a":14,"algo_b":20,"algo_c":14},
+  "visits": 48,
   "explored": 3,
   "seed": 7,
   "error": null
 }
 ```
 
-`run_manifest.mcts_stats` duplicates the summary for quick indexing.
+`run_manifest.mcts_stats` provides a run-level summary for quick indexing:
+```jsonc
+{
+  "rollouts": 48, "depth": 6, "uct_c": 1.25,
+  "visits": 48, "explored": 3, "best_value": 0.74231, "error": null
+}
+```
 
 ## Autogenerate Variants (optional)
 
@@ -115,6 +121,9 @@ resp = completion(
   uct_c=1.25,
   temperature=0.0,
 )
+
+# Env overrides supported: CODEWORLD_MCTS_AUTO_N, CODEWORLD_MCTS_AUTO_TEMPERATURE,
+# CODEWORLD_MCTS_AUTO_MODEL, CODEWORLD_MCTS_AUTO_MAX_TOKENS
 ```
 
 Generator details are mirrored into the manifest:

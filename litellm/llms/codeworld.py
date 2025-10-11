@@ -78,13 +78,31 @@ class CodeWorldLLM(CustomLLM):
                 alias = _model.split("/", 1)[1].strip().lower()
                 if alias == "mcts" and "strategy" not in merged_args and "strategy" not in optional_params:
                     merged_args["strategy"] = "mcts"
-                if alias == "mcts:auto":
+                if alias in ("mcts:auto", "mcts+auto"):
                     if "strategy" not in merged_args and "strategy" not in optional_params:
                         merged_args["strategy"] = "mcts"
                     # enable autogeneration defaults (can be overridden)
                     merged_args.setdefault("autogenerate", True)
-                    merged_args.setdefault("n_variants", 6)
-                    merged_args.setdefault("temperature", 0.0)
+                    # Allow env overrides while keeping safe defaults
+                    try:
+                        n_env = int(os.getenv("CODEWORLD_MCTS_AUTO_N", "6"))
+                    except Exception:
+                        n_env = 6
+                    merged_args.setdefault("n_variants", n_env)
+                    try:
+                        t_env = float(os.getenv("CODEWORLD_MCTS_AUTO_TEMPERATURE", "0.0"))
+                    except Exception:
+                        t_env = 0.0
+                    merged_args.setdefault("temperature", t_env)
+                    gen_model = os.getenv("CODEWORLD_MCTS_AUTO_MODEL")
+                    if gen_model:
+                        merged_args.setdefault("generator_model", gen_model)
+                    max_tokens_env = os.getenv("CODEWORLD_MCTS_AUTO_MAX_TOKENS")
+                    if max_tokens_env:
+                        try:
+                            merged_args.setdefault("max_tokens", int(max_tokens_env))
+                        except Exception:
+                            pass
         except Exception:
             pass
 
@@ -132,6 +150,12 @@ class CodeWorldLLM(CustomLLM):
                                 if not warn_once["exploration"]:
                                     print("[codeworld][warn] exploration_constant and uct_c differ; using uct_c (canonical). Set SCILLM_SUPPRESS_EXPLORATION_ALIAS_WARNING=1 to suppress.")
                                     warn_once["exploration"] = True
+                except Exception:
+                    pass
+            # If both made it into merged_args, drop exploration_constant to avoid ambiguity downstream
+            if merged_args.get("strategy") == "mcts" and "uct_c" in merged_args and "exploration_constant" in merged_args:
+                try:
+                    merged_args.pop("exploration_constant", None)
                 except Exception:
                     pass
 
