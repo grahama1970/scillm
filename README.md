@@ -242,6 +242,11 @@ Future backends (e.g., Coq) will plug into the same surface, but are out of scop
 
 Use CodeWorld when you want to evaluate and rank code strategies under your own metrics, with a reproducible manifest and simple HTTP/Router calls.
 
+- MCTS quick calls
+  - Alias sugar: `model="codeworld/mcts"` injects `strategy="mcts"`.
+  - Autogenerate + MCTS: `model="codeworld/mcts:auto"` (synonym `mcts+auto`) to generate N approaches, then run MCTS. Env overrides: `CODEWORLD_MCTS_AUTO_N`, `CODEWORLD_MCTS_AUTO_TEMPERATURE`, `CODEWORLD_MCTS_AUTO_MODEL`, `CODEWORLD_MCTS_AUTO_MAX_TOKENS`.
+  - See [MCTS_CODEWORLD.md](feature_recipes/MCTS_CODEWORLD.md) for details and determinism notes.
+
 - Typical problems
   - Compare competing algorithms (e.g., heuristics vs DP) with identical inputs.
   - Validate repair loops (generate → run → score → keep best) using a deterministic judge.

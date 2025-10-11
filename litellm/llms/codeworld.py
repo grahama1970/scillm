@@ -42,6 +42,23 @@ class CodeWorldLLM(CustomLLM):
     def __init__(self) -> None:
         super().__init__()
 
+    def _normalize_model_string(self, model: str) -> str:
+        """
+        Normalize provider alias strings so responses/manifests are canonical.
+        - codeworld/mcts+auto -> codeworld/mcts:auto
+        - other forms left as-is
+        """
+        try:
+            if isinstance(model, str) and model.lower().startswith("codeworld/"):
+                prefix, alias = model.split("/", 1)
+                a = alias.strip().lower()
+                if a == "mcts+auto":
+                    a = "mcts:auto"
+                return f"{prefix}/{a}"
+        except Exception:
+            pass
+        return model
+
     def _resolve_base(self, api_base: Optional[str]) -> str:
         return (api_base or DEFAULT_BASE).rstrip("/")
 
@@ -196,6 +213,13 @@ class CodeWorldLLM(CustomLLM):
             p["temperature"] = float(optional_params["temperature"])
         if optional_params.get("seed") is not None:
             p["seed"] = int(optional_params["seed"])
+        # Avoid duplicate seed surfaces: prefer provider.args for MCTS (engine owns determinism)
+        try:
+            if isinstance(merged_args, dict) and merged_args.get("strategy") == "mcts" and "seed" in merged_args:
+                # remove top-level seed to reduce ambiguity; provider.args['seed'] is the source of truth for strategy
+                p.pop("seed", None)
+        except Exception:
+            pass
         if optional_params.get("return_artifacts") is not None:
             p["return_artifacts"] = bool(optional_params["return_artifacts"])
         return p
@@ -248,6 +272,7 @@ class CodeWorldLLM(CustomLLM):
         client: Optional[HTTPHandler] = None,
     ) -> ModelResponse:
         base = self._resolve_base(api_base)
+        normalized_model = self._normalize_model_string(model)
         payload = self._build_payload(model, messages, optional_params or {})
         hdr = {**headers, **self._headers(api_key)} if headers else self._headers(api_key)
         budget = float(payload.get("request_timeout", 60.0))
@@ -267,7 +292,7 @@ class CodeWorldLLM(CustomLLM):
             raise CustomLLMError(status_code=500, message=str(e)[:400])
 
         if status == 200:
-            return self._map_response(model_response, data, model)
+            return self._map_response(model_response, data, normalized_model)
         if status == 202:
             # Poll with exponential backoff up to 10s
             result_url = data.get("result_url") or ""
@@ -282,7 +307,7 @@ class CodeWorldLLM(CustomLLM):
                         if rr is None:
                             raise CustomLLMError(status_code=500, message="bridge result_url is invalid")
                         if rr.status_code == 200:
-                            return self._map_response(model_response, rr.json(), model)
+                            return self._map_response(model_response, rr.json(), normalized_model)
                         if rr.status_code != 202:
                             try:
                                 payload = rr.json()
@@ -322,6 +347,7 @@ class CodeWorldLLM(CustomLLM):
         client: Optional[AsyncHTTPHandler] = None,
     ) -> ModelResponse:
         base = self._resolve_base(api_base)
+        normalized_model = self._normalize_model_string(model)
         payload = self._build_payload(model, messages, optional_params or {})
         hdr = {**headers, **self._headers(api_key)} if headers else self._headers(api_key)
         budget = float(payload.get("request_timeout", 60.0))
@@ -341,7 +367,7 @@ class CodeWorldLLM(CustomLLM):
             raise CustomLLMError(status_code=500, message=str(e)[:400])
 
         if status == 200:
-            return self._map_response(model_response, data, model)
+            return self._map_response(model_response, data, normalized_model)
         if status == 202:
             result_url = data.get("result_url") or ""
             t_end = time.time() + budget + 30.0
@@ -353,7 +379,7 @@ class CodeWorldLLM(CustomLLM):
                     try:
                         rr = await c.get(base + result_url)
                         if rr.status_code == 200:
-                            return self._map_response(model_response, rr.json(), model)
+                            return self._map_response(model_response, rr.json(), normalized_model)
                         if rr.status_code != 202:
                             try:
                                 payload = rr.json()

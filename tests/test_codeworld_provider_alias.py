@@ -68,3 +68,23 @@ def test_exploration_alias_dropped_when_uct_c_present():
     assert "uct_c" in args
     assert "exploration_constant" not in args
 
+
+def test_normalizes_model_alias_in_response_string():
+    llm = CodeWorldLLM()
+    assert llm._normalize_model_string("codeworld/mcts+auto") == "codeworld/mcts:auto"
+    assert llm._normalize_model_string("codeworld/mcts") == "codeworld/mcts"
+    assert llm._normalize_model_string("codeworld") == "codeworld"
+
+
+def test_no_top_level_seed_when_mcts_seed_set():
+    llm = CodeWorldLLM()
+    payload = llm._build_payload(
+        "codeworld/mcts",
+        [{"role": "user", "content": "x"}],
+        {"strategy": "mcts", "seed": 42},
+    )
+    # Provider.args is source of truth for strategy seed
+    args = payload["provider"]["args"]
+    assert args.get("seed") == 42
+    # Top-level 'seed' is not present to avoid ambiguity
+    assert "seed" not in payload
