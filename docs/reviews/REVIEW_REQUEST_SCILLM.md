@@ -35,7 +35,7 @@ This review covers the integrated stack: providers, bridges, scenarios, readines
   - `.github/workflows/scenarios-live.yml` — optional + strict health gates; always upload artifacts
 - Docs:
   - `README.md` — “Certainly (Lean4 only, alpha)” section; logo usage
-  - `QUICK_START.md` — compose bring‑up; session_id/track_id; judge demo
+  - `QUICKSTART.md` — compose bring‑up; session_id/track_id; judge demo
   - `feature_recipes/SIDE_BY_SIDE.md` — Router examples for codeworld/lean4/certainly
 
 ## Architecture

@@ -50,15 +50,24 @@ LITELLM_ENABLE_CERTAINLY=1 CERTAINLY_BRIDGE_BASE=http://127.0.0.1:8787 \
 ```
 
 ### Happy Path for Project Agents (codex‑agent)
-- Choose one runtime:
-  - Local: `uvicorn litellm.experimental_mcp_client.mini_agent.agent_proxy:app --host 127.0.0.1 --port 8788`
-  - Docker: `docker compose -f local/docker/compose.agents.yml up --build -d codex-sidecar`
-- Set base (no `/v1`): `export CODEX_AGENT_API_BASE=http://127.0.0.1:8788` (or `:8077` for Docker)
-- Discover a model id: `curl -sS "$CODEX_AGENT_API_BASE/v1/models" | jq -r '.data[].id'`
-- Quick call (high reasoning):
-  `curl -sS "$CODEX_AGENT_API_BASE/v1/chat/completions" -H 'Content-Type: application/json' -d '{"model":"gpt-5","reasoning":{"effort":"high"},"messages":[{"role":"user","content":"ping"}]}' | jq -r '.choices[0].message.content'`
-- Router call: `completion(model="gpt-5", custom_llm_provider="codex-agent", api_base=$CODEX_AGENT_API_BASE, messages=[...], reasoning_effort="high")`
-- Optional cache: `from litellm.extras import initialize_litellm_cache; initialize_litellm_cache()`
+- Zero‑ambiguity checklist (copy/paste)
+  - Choose ONE runtime:
+    - Local: `uvicorn litellm.experimental_mcp_client.mini_agent.agent_proxy:app --host 127.0.0.1 --port 8788`
+    - Docker: `docker compose -f local/docker/compose.agents.yml up --build -d codex-sidecar`
+  - Set base (no `/v1`): `export CODEX_AGENT_API_BASE=http://127.0.0.1:8788` (or `:8077` for Docker)
+  - Map OpenAI envs (for HTTP clients):
+    - `export OPENAI_BASE_URL="$CODEX_AGENT_API_BASE"`
+    - `export OPENAI_API_KEY="${CODEX_AGENT_API_KEY:-none}"`
+  - Discover a model id: `curl -sS "$CODEX_AGENT_API_BASE/v1/models" | jq -r '.data[].id'`
+  - Quick HTTP (high reasoning):
+    `curl -sS "$CODEX_AGENT_API_BASE/v1/chat/completions" -H 'Content-Type: application/json' -d '{"model":"gpt-5","reasoning":{"effort":"high"},"messages":[{"role":"user","content":"ping"}]}' | jq -r '.choices[0].message.content'`
+  - Router call: `completion(model="gpt-5", custom_llm_provider="codex-agent", api_base=$CODEX_AGENT_API_BASE, messages=[...], reasoning_effort="high")`
+  - Optional cache: `from litellm.extras import initialize_litellm_cache; initialize_litellm_cache()`
+
+Troubleshooting
+- 404 → wrong model id; use one from `/v1/models`.
+- 400/502 (sidecar) → upstream provider not wired; enable echo or add credentials.
+- Base includes `/v1` → remove it; use the base only.
 
 Doctor (one-shot): `make project-agent-doctor`
 
@@ -292,7 +301,7 @@ Fork Status (our fork)
 Fork Quick Start
 - Run `make run-scenarios` for the live scenario suite (mini-agent, codex-agent, router fan-out, Chutes, code-agent).
 - Bring up both local agents (mini + codex) with `docker compose -f local/docker/compose.agents.yml up --build -d` if you want HTTP endpoints available.
-- See QUICK_START.md for the per-scenario commands lifted directly from `scenarios/`.
+- See QUICKSTART.md for the per-scenario commands lifted directly from `scenarios/`.
 - Mini-agent usage + troubleshooting: docs/my-website/docs/experimental/mini-agent.md
 - Project status and guardrails: docs/archive/STATE_OF_PROJECT.md
 
