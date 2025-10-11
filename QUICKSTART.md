@@ -308,6 +308,29 @@ Router
 CODEWORLD_BASE=http://127.0.0.1:8887 python scenarios/codeworld_router_release.py
 ```
 
+### MCTS quick calls (CodeWorld)
+
+```python
+from litellm import completion
+import os
+os.environ["CODEWORLD_BASE"] = os.getenv("CODEWORLD_BASE", "http://127.0.0.1:8887")
+
+items = [{"task":"t","context":{"code_variants":{"a":"def solve(ctx): return 1","b":"def solve(ctx): return 2"}}}]
+
+# 1) Explicit strategy
+resp = completion(model="codeworld", custom_llm_provider="codeworld", items=items,
+                  strategy="mcts", rollouts=24, depth=5, uct_c=1.25, api_base=os.environ["CODEWORLD_BASE"])
+
+# 2) Alias sugar
+resp = completion(model="codeworld/mcts", custom_llm_provider="codeworld", items=items,
+                  api_base=os.environ["CODEWORLD_BASE"])
+
+# 3) Autogenerate N variants then MCTS
+resp = completion(model="codeworld/mcts:auto", custom_llm_provider="codeworld",
+                  n_variants=6, depth=6, uct_c=1.25, temperature=0.0, api_base=os.environ["CODEWORLD_BASE"])
+# Env overrides supported: CODEWORLD_MCTS_AUTO_N, CODEWORLD_MCTS_AUTO_TEMPERATURE, CODEWORLD_MCTS_AUTO_MODEL, CODEWORLD_MCTS_AUTO_MAX_TOKENS
+```
+
 
 ## 4) Deterministic tests and readiness
 

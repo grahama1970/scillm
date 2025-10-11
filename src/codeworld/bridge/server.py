@@ -415,6 +415,15 @@ async def bridge_complete(req: CodeWorldBridgeRequest, request: Request):
                 response["run_manifest"]["strategy_seed"] = m0.get("seed")
                 response["run_manifest"]["strategy_params"] = {k: m0.get(k) for k in ("rollouts", "depth", "uct_c")}
                 # Add compact run-level mcts_stats for quick indexing
+                _bv = m0.get("best_variant")
+                _bv_id = None
+                try:
+                    if isinstance(_bv, dict):
+                        _bv_id = _bv.get("id") or _bv.get("name")
+                    elif isinstance(_bv, str):
+                        _bv_id = _bv
+                except Exception:
+                    _bv_id = None
                 response["run_manifest"]["mcts_stats"] = {
                     "rollouts": m0.get("rollouts"),
                     "depth": m0.get("depth"),
@@ -422,6 +431,8 @@ async def bridge_complete(req: CodeWorldBridgeRequest, request: Request):
                     "visits": m0.get("visits"),
                     "explored": m0.get("explored"),
                     "best_value": m0.get("best_value"),
+                    "best_variant": _bv_id,
+                    "seed": m0.get("seed"),
                     "error": m0.get("error"),
                 }
     except Exception:
@@ -630,3 +641,25 @@ def apply_mcts_strategy(entry: Dict[str, Any], provider_args: Optional[Dict[str,
     manifest["strategy_name"] = "mcts"
     manifest["strategy_seed"] = mcts_out.get("seed")
     manifest["strategy_params"] = {"rollouts": rollouts_v, "depth": depth_v, "uct_c": float(uct_c_v), "timeout_ms": timeout_ms_v}
+    # Run-level aggregate block for quick indexing
+    # Derive a compact best_variant id when possible
+    _best = mcts_out.get("best_variant")
+    best_id = None
+    try:
+        if isinstance(_best, dict):
+            best_id = _best.get("id") or _best.get("name")
+        elif isinstance(_best, str):
+            best_id = _best
+    except Exception:
+        best_id = None
+    manifest["mcts_stats"] = {
+        "rollouts": mcts_out.get("rollouts"),
+        "depth": mcts_out.get("depth"),
+        "uct_c": mcts_out.get("uct_c"),
+        "visits": mcts_out.get("visits"),
+        "explored": mcts_out.get("explored"),
+        "best_value": mcts_out.get("best_value"),
+        "best_variant": best_id,
+        "seed": mcts_out.get("seed"),
+        "error": mcts_out.get("error"),
+    }

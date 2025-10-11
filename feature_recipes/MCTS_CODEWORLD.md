@@ -49,6 +49,9 @@ print("MCTS block:", details["results"][0]["mcts"])
 
 ## Alias Call (No Explicit Param)
 
+Note
+- Canonical alias is `codeworld/mcts:auto`. The synonym `codeworld/mcts+auto` is accepted for convenience but normalized to the canonical form in responses/manifests.
+
 ```python
 from litellm import completion
 import os
@@ -102,7 +105,8 @@ resp = completion(
 ```jsonc
 {
   "rollouts": 48, "depth": 6, "uct_c": 1.25,
-  "visits": 48, "explored": 3, "best_value": 0.74231, "error": null
+  "visits": 48, "explored": 3, "best_value": 0.74231,
+  "best_variant": "algo_b", "seed": 7, "error": null
 }
 ```
 
@@ -124,6 +128,9 @@ resp = completion(
 
 # Env overrides supported: CODEWORLD_MCTS_AUTO_N, CODEWORLD_MCTS_AUTO_TEMPERATURE,
 # CODEWORLD_MCTS_AUTO_MODEL, CODEWORLD_MCTS_AUTO_MAX_TOKENS
+
+Environment gate
+- The bridge honors `CODEWORLD_ENABLE_MCTS_GENERATE=1|0` to allow/skip autogeneration while still mirroring generator metadata to the manifest.
 ```
 
 Generator details are mirrored into the manifest:
