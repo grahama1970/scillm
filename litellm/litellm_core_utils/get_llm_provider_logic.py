@@ -105,7 +105,7 @@ def get_llm_provider(  # noqa: PLR0915
     try:
         # Fast-path: honor explicit ad-hoc custom providers that should not touch OpenAI client init
         _clp = (custom_llm_provider or "").strip().lower()
-        if _clp in ("codex-agent",):
+        if _clp in ("codex-agent", "code-agent", "code_agent"):
             # Normalize model to provider/model form for downstream paths
             if "/" not in model:
                 model = f"{_clp}/{model}"

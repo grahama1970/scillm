@@ -36,6 +36,7 @@ help:
 	@echo "  make project-ready        - Run deterministic + local readiness (no network)"
 	@echo "  make project-ready-live   - Run strict/live readiness (enforces required providers)"
 	@echo "  make project-ready-summary- Print last readiness PASS/FAIL/SKIP summary"
+	@echo "  make review-run           - Run codex-agent review + comparison (uses mini-agent by default)"
 
 # --- Logo exports -------------------------------------------------------------
 .PHONY: logo-export
@@ -310,6 +311,11 @@ project-ready-live:
 .PHONY: project-ready-summary
 project-ready-summary:
 	@python scripts/print_ready_summary.py || true
+
+.PHONY: review-run
+review-run:
+	@chmod +x scripts/review/run_review_e2e.zsh || true
+	@DRY_RUN?=0 scripts/review/run_review_e2e.zsh
 
 bridge-watch:
 	@python scripts/watch_bridges.py --loop 30

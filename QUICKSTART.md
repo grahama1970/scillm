@@ -45,6 +45,7 @@ curl -sSf http://127.0.0.1:8788/healthz
 curl -sS -H 'content-type: application/json' \
   -d '{"model":"gpt-5","messages":[{"role":"user","content":"say hello"}]}' \
   http://127.0.0.1:8788/v1/chat/completions | jq -r '.choices[0].message.content'
+```
 
 Also available (sidecar 8077):
 
@@ -54,9 +55,8 @@ export CODEX_AGENT_API_BASE=http://127.0.0.1:8077   # no /v1
 curl -sSf http://127.0.0.1:8077/healthz
 curl -sS  http://127.0.0.1:8077/v1/models | jq .
 curl -sS -H 'content-type: application/json' \
-  -d '{"model":"gpt-5","messages":[{"role":"system","content":"Return STRICT JSON only: {"ok":true}"}]}' \
+  -d '{"model":"gpt-5","reasoning":{"effort":"high"},"messages":[{"role":"system","content":"Return STRICT JSON only: {\"ok\": true}"}]}' \
   http://127.0.0.1:8077/v1/chat/completions | jq -r '.choices[0].message.content'
-```
 ```
 
 Auth for codex‑agent sidecar (when echo is disabled)
@@ -83,6 +83,7 @@ out = r.completion(
     model="gpt-5",
     custom_llm_provider="codex-agent",
     messages=[{"role":"user","content":"Return STRICT JSON only: {\"ok\":true}"}],
+    reasoning_effort="high",
     response_format={"type":"json_object"}
 )
 print(out.choices[0].message["content"])  # OpenAI‑format
@@ -92,7 +93,6 @@ Optional: one‑time model_list mapping for a cleaner judge call
 ```python
 from litellm import Router
 r = Router(model_list=[{"model_name":"gpt-5","litellm_params":{"model":"gpt-5","custom_llm_provider":"codex-agent","api_base":os.getenv("CODEX_AGENT_API_BASE"),"api_key":os.getenv("CODEX_AGENT_API_KEY")}}])
-```
 ```
 
 Port busy? Run on another port (e.g., 8789) and set `CODEX_AGENT_API_BASE=http://127.0.0.1:8789`.
@@ -129,6 +129,24 @@ Environment flags (preferred)
 - SCILLM_ENABLE_LEAN4=1 (alias: LITELLM_ENABLE_LEAN4=1)
 - SCILLM_ENABLE_CODEWORLD=1 (alias: LITELLM_ENABLE_CODEWORLD=1)
 - SCILLM_ENABLE_MINI_AGENT=1 (alias: LITELLM_ENABLE_MINI_AGENT=1)
+- SCILLM_ENABLE_CODEX_AGENT=1 (alias: LITELLM_ENABLE_CODEX_AGENT=1)
+
+## Any Project Agent: codex‑agent in 3 steps (copy/paste)
+
+```bash
+# 1) Pick a base (no /v1)
+export CODEX_AGENT_API_BASE=http://127.0.0.1:8788   # or 8077 if using sidecar
+
+# 2) Sanity checks
+curl -sSf "$CODEX_AGENT_API_BASE/healthz"
+curl -sS  "$CODEX_AGENT_API_BASE/v1/models" | jq .
+
+# 3) OpenAI‑compatible call with high reasoning (HTTP clients use the exact id from /v1/models)
+curl -sS "$CODEX_AGENT_API_BASE/v1/chat/completions" \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"gpt-5","reasoning":{"effort":"high"},"messages":[{"role":"user","content":"ping"}]}' \
+  | jq -r '.choices[0].message.content'
+```
 
 ## Bridge API (optional)
 
