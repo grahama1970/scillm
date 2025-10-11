@@ -54,6 +54,12 @@ make run-scenarios
 - Live E2E: calls CodeWorld through LiteLLM Router using a custom provider (`LITELLM_ENABLE_CODEWORLD=1`).
 - Env: `CODEWORLD_BASE` (bridge URL). Usage mirrors Lean4’s Router pattern.
 
+### `mcts_codeworld_auto_release.py`
+
+- Live E2E: exercises MCTS alias (`model="codeworld/mcts"`) and autogeneration alias (`model="codeworld/mcts:auto"`).
+- Skip‑friendly: skips if the bridge at `CODEWORLD_BASE` isn’t reachable. For `:auto`, enable `CODEWORLD_ENABLE_MCTS_GENERATE=1`.
+- Fails (non‑zero exit) if the live call returns but required MCTS fields are missing.
+
 ### `mini_agent_live.py`
 
 - **Purpose**: Ensures the env-gated `mini-agent` provider can execute local

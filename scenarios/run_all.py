@@ -23,6 +23,7 @@ SCENARIOS: List[Tuple[str, List[str]]] = [
     ("codeworld_bridge_release.py", [PYTHON, str(SCENARIO_DIR / "codeworld_bridge_release.py")]),
     ("codeworld_judge_live.py", [PYTHON, str(SCENARIO_DIR / "codeworld_judge_live.py")]),
     ("codeworld_router_release.py", [PYTHON, str(SCENARIO_DIR / "codeworld_router_release.py")]),
+    ("mcts_codeworld_auto_release.py", [PYTHON, str(SCENARIO_DIR / "mcts_codeworld_auto_release.py")]),
     ("coq_bridge_release.py", [PYTHON, str(SCENARIO_DIR / "coq_bridge_release.py")]),
     ("mini_agent_live.py", [PYTHON, str(SCENARIO_DIR / "mini_agent_live.py")]),
     (
