@@ -65,6 +65,12 @@ curl -sS -H 'content-type: application/json' \
   http://127.0.0.1:8077/v1/chat/completions | jq -r '.choices[0].message.content'
 ```
 
+Doctor (one‑shot):
+
+```bash
+make project-agent-doctor
+```
+
 Auth for codex‑agent sidecar (when echo is disabled)
 
 - The compose sets `CODEX_SIDECAR_ECHO=1` by default (no creds required). To run with real creds:
