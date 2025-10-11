@@ -65,9 +65,32 @@ This document captures the exact state of our work so we can resume smoothly.
 ## Environment — Quick Exports
 - Codex‑Agent (local sidecar):
   - `export LITELLM_ENABLE_CODEX_AGENT=1`
-  - `export CODEX_AGENT_API_BASE=http://127.0.0.1:8077`   # no `/v1`
+  - `export CODEX_AGENT_API_BASE=http://127.0.0.1:8077`   # no `/v1` (use actual printed port; e.g., 8089)
   - `# export CODEX_AGENT_API_KEY=…` (if gateway enforces)
   - Optional (retries): `export SCILLM_RETRY_META=1 CODEX_AGENT_ENABLE_METRICS=1`
+
+### Extractor Pipeline — Zero‑Ambiguity Mapping
+
+Use codex‑agent as an OpenAI‑compatible base with no `/v1` in the URL.
+
+```bash
+# Map envs expected by OpenAI clients (HTTP extractor)
+export OPENAI_BASE_URL="$CODEX_AGENT_API_BASE"    # do NOT append /v1
+export OPENAI_API_KEY="${CODEX_AGENT_API_KEY:-none}"
+
+# Discover a model id and make a high‑reasoning call
+curl -sS "$OPENAI_BASE_URL/healthz" || true
+curl -sS "$OPENAI_BASE_URL/v1/models" | jq -r '.data[].id'
+curl -sS "$OPENAI_BASE_URL/v1/chat/completions" \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"gpt-5","reasoning":{"effort":"high"},"messages":[{"role":"user","content":"ping"}]}' \
+  | jq -r '.choices[0].message.content'
+```
+
+Troubleshooting
+- 404 on chat → wrong `model`; use one from `/v1/models`.
+- Connection refused → check actual sidecar port with `docker ps` (common: 8089).
+- Base contains `/v1` → remove it.
 - Bridges:
   - CodeWorld up: `docker compose -f deploy/docker/compose.scillm.stack.yml up -d codeworld-bridge`
   - Lean4 up: `docker compose -f deploy/docker/compose.scillm.stack.yml up -d lean4-bridge`
