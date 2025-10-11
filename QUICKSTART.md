@@ -358,6 +358,25 @@ resp = completion(model="codeworld/mcts:auto", custom_llm_provider="codeworld",
 ```
 
 
+One‑POST autogenerate (HTTP)
+
+```bash
+# Ensure the bridge can reach your codex‑agent:
+#   - Local sidecar on host: export CODEX_AGENT_API_BASE=http://127.0.0.1:8089
+#   - Docker bridge uses http://host.docker.internal:8089 by default (see local/docker/compose.codeworld.bridge.yml)
+
+BASE=${CODEWORLD_BASE:-http://127.0.0.1:8887}
+curl -sS "$BASE/bridge/complete" -H 'Content-Type: application/json' -d '{
+  "messages": [{"role":"user","content":"Autogenerate variants then search"}],
+  "items": [{"task":"mcts-live-auto","context":{}}],
+  "provider": {"name":"codeworld", "args":{
+    "strategy":"mcts",
+    "strategy_config": {"autogenerate": {"enabled": true, "n": 3}, "rollouts": 24, "depth": 6, "uct_c": 1.25}
+  }}
+}' | jq '.run_manifest.mcts_stats'
+```
+
+
 ## 4) Deterministic tests and readiness
 
 ```bash

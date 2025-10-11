@@ -102,6 +102,13 @@ Recommended defaults for long runs: `retry_enabled=True, honor_retry_after=True,
 | CodeWorld | MCTS Strategy | Adaptive variant selection (root UCT) | `strategy="mcts"` or model alias `codeworld/mcts` | Scenarios: scenarios/mcts_codeworld_demo.py |
 | CodeWorld | Seed determinism | Reproducible MCTS runs | `SCILLM_DETERMINISTIC_SEED=<int>` or per‑request | One‑time warnings on mismatches |
 
+One‑POST (HTTP) autogenerate + MCTS
+- Ensure bridge can reach your codex‑agent sidecar: set `CODEX_AGENT_API_BASE` where the bridge runs.
+- Local bridge:
+  - `PYTHONPATH=src uvicorn codeworld.bridge.server:app --port 8888`
+  - `BASE=http://127.0.0.1:8888 curl -sS "$BASE/bridge/complete" -H 'Content-Type: application/json' -d '{"messages":[{"role":"user","content":"Autogenerate"}],"items":[{"task":"t","context":{}}],"provider":{"name":"codeworld","args":{"strategy":"mcts","strategy_config":{"autogenerate":{"enabled":true,"n":3}}}}}' | jq '.run_manifest.mcts_stats'`
+- Docker bridge only: `make codeworld-bridge-up-only` (defaults `CODEX_AGENT_API_BASE=http://host.docker.internal:8089`).
+
 ## Certainly (Lean4)
 
 | Area | Feature | What It Does | How To Use | Notes |

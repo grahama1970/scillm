@@ -68,21 +68,59 @@ def main() -> None:
     mcts_alias = (extra_alias.get("results") or [{}])[0].get("mcts") or {}
     _require("best_variant" in mcts_alias, "alias call missing mcts.best_variant")
 
-    # 2) :auto generation path (gate must be enabled by env)
-    if str(os.getenv("CODEWORLD_ENABLE_MCTS_GENERATE", "1")).lower() in ("0", "false", "no"):
-        print("[info] CODEWORLD_ENABLE_MCTS_GENERATE is disabled; skipping :auto call.")
-        sys.exit(0)
+    # 2) Preferred: one-POST :auto (bridge generates variants via codex-agent and runs MCTS)
+    if str(os.getenv("CODEWORLD_ENABLE_MCTS_GENERATE", "1")).lower() not in ("0", "false", "no"):
+        one_post = {
+            "messages": [{"role": "user", "content": "Autogenerate variants then search"}],
+            "items": [{"task": "mcts-live-auto", "context": {}}],
+            "provider": {
+                "name": "codeworld",
+                "args": {
+                    "strategy": "mcts",
+                    "strategy_config": {
+                        "autogenerate": {
+                            "enabled": True,
+                            "n": 3,
+                            # Allow bridge to read CODEX_AGENT_* env; callers may override:
+                            # "generator_model": os.getenv("CODEX_AGENT_MODEL", "gpt-5"),
+                            # "temperature": 0.0,
+                            # "max_tokens": 2000,
+                        },
+                        "rollouts": 24,
+                        "depth": 6,
+                        "uct_c": 1.25,
+                    },
+                },
+            },
+        }
+        with httpx.Client(timeout=45.0) as c:
+            r2 = c.post(base + "/bridge/complete", json=one_post)
+        if r2.status_code == 200:
+            extra_auto = r2.json()
+            stats = (extra_auto.get("run_manifest") or {}).get("mcts_stats") or {}
+            if stats.get("best_variant") is not None and "seed" in stats:
+                print("mcts_stats (one-POST):", json.dumps(stats, indent=2))
+                sys.exit(0)
+            else:
+                print("[warn] one-POST :auto returned 200 but missing mcts_stats; falling back to two-step.")
 
-    # Generate variants via codex-agent, then call the bridge with explicit code_variants
+    # 2b) Fallback: two-step (generate via codex-agent from this process, then MCTS on bridge)
     cab = os.getenv("CODEX_AGENT_API_BASE", "http://127.0.0.1:8089").rstrip("/")
-    prompt = "Generate exactly 3 JSON variants with fields id,title,complexity_tier,rationale,code,notes. Return STRICT JSON with top-level key 'variants'."
-    req = {"model": os.getenv("CODEX_AGENT_MODEL", "gpt-5"),
-           "messages": [{"role":"system","content":"You produce strict JSON only."}, {"role":"user","content": prompt}]}
+    prompt = (
+        "Generate exactly 3 JSON variants with fields id,title,complexity_tier,rationale,code,notes. "
+        "Return STRICT JSON with top-level key 'variants'."
+    )
+    req = {
+        "model": os.getenv("CODEX_AGENT_MODEL", "gpt-5"),
+        "messages": [
+            {"role": "system", "content": "You produce strict JSON only."},
+            {"role": "user", "content": prompt},
+        ],
+    }
     with httpx.Client(timeout=30.0) as c:
         rr = c.post(cab + "/v1/chat/completions", json=req)
         _require(rr.status_code == 200, f"codex-agent status {rr.status_code}")
         content = rr.json()["choices"][0]["message"]["content"]
-    # Extract variants JSON from content
     from src.codeworld.bridge.server import _mcts_extract_variants_from_raw
     vars = _mcts_extract_variants_from_raw(content)
     _require(isinstance(vars, list) and vars, "codex-agent returned no variants")
@@ -95,7 +133,6 @@ def main() -> None:
         mapping[vid] = code
     _require(mapping, "variants mapping empty")
 
-    # Call the bridge with explicit variants and run MCTS
     payload2 = {
         "messages": [{"role": "user", "content": "Search over generated variants"}],
         "items": [{"task": "mcts-live-auto", "context": {"code_variants": mapping}}],
@@ -106,7 +143,7 @@ def main() -> None:
         _require(r3.status_code == 200, f":auto(MCTS) HTTP status {r3.status_code}")
         extra_auto = r3.json()
     stats = (extra_auto.get("run_manifest") or {}).get("mcts_stats") or {}
-    print("mcts_stats:", json.dumps(stats, indent=2))
+    print("mcts_stats (two-step):", json.dumps(stats, indent=2))
     _require("best_variant" in stats and stats.get("best_variant") is not None, ":auto missing run_manifest.mcts_stats.best_variant")
     _require("seed" in stats, ":auto missing run_manifest.mcts_stats.seed")
     sys.exit(0)
