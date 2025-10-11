@@ -73,13 +73,15 @@ def main() -> None:
         print("[info] CODEWORLD_ENABLE_MCTS_GENERATE is disabled; skipping :auto call.")
         sys.exit(0)
 
-    resp_auto = completion(
-        model="codeworld/mcts:auto",
-        custom_llm_provider="codeworld",
-        messages=[{"role":"user","content":"Generate approaches then search"}],
-        api_base=base,
-    )
-    extra_auto: Dict[str, Any] = getattr(resp_auto, "additional_kwargs", {}).get("codeworld") or {}
+    auto_payload = {
+        "messages": [{"role": "user", "content": "Generate approaches then search"}],
+        "items": [{"task": "mcts-live-auto", "context": {}}],
+        "provider": {"name": "codeworld", "args": {"strategy": "mcts", "strategy_config": {"autogenerate": {"enabled": True}}}},
+    }
+    with httpx.Client(timeout=15.0) as c:
+        r2 = c.post(base + "/bridge/complete", json=auto_payload)
+        _require(r2.status_code == 200, f":auto HTTP status {r2.status_code}")
+        extra_auto: Dict[str, Any] = r2.json()
     stats = (extra_auto.get("run_manifest") or {}).get("mcts_stats") or {}
     print("mcts_stats:", json.dumps(stats, indent=2))
     _require("best_variant" in stats and stats.get("best_variant") is not None, ":auto missing run_manifest.mcts_stats.best_variant")
