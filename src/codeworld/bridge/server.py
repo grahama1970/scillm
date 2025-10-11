@@ -414,6 +414,16 @@ async def bridge_complete(req: CodeWorldBridgeRequest, request: Request):
                 response["run_manifest"]["strategy_name"] = "mcts"
                 response["run_manifest"]["strategy_seed"] = m0.get("seed")
                 response["run_manifest"]["strategy_params"] = {k: m0.get(k) for k in ("rollouts", "depth", "uct_c")}
+                # Add compact run-level mcts_stats for quick indexing
+                response["run_manifest"]["mcts_stats"] = {
+                    "rollouts": m0.get("rollouts"),
+                    "depth": m0.get("depth"),
+                    "uct_c": m0.get("uct_c"),
+                    "visits": m0.get("visits"),
+                    "explored": m0.get("explored"),
+                    "best_value": m0.get("best_value"),
+                    "error": m0.get("error"),
+                }
     except Exception:
         pass
     # Persist artifact
