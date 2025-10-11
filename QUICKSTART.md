@@ -326,6 +326,13 @@ Router
 CODEWORLD_BASE=http://127.0.0.1:8887 python scenarios/codeworld_router_release.py
 ```
 
+Bridge (Docker, no Redis required)
+```bash
+make codeworld-bridge-up-only
+# Health probe
+curl -sSf http://127.0.0.1:8887/healthz
+```
+
 ### MCTS quick calls (CodeWorld)
 
 ```python

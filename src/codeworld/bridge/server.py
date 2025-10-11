@@ -163,6 +163,38 @@ async def bridge_complete(req: CodeWorldBridgeRequest, request: Request):
 
         # Alpha runner: Python strategy variants (optional), else simulate an output
         code_variants = (ctx.get("code_variants") or {}) if isinstance(ctx, dict) else {}
+        # If MCTS requested but no variants provided, attempt autogeneration via codex-agent
+        if strategy_name == "mcts" and (not code_variants) and isinstance(provider_args, dict):
+            try:
+                cfg = provider_args.get("strategy_config") if isinstance(provider_args.get("strategy_config"), dict) else {}
+                autogen = cfg.get("autogenerate", provider_args.get("autogenerate"))
+                enabled = (autogen is True) or (isinstance(autogen, dict) and autogen.get("enabled") is True)
+                env_gate = str(os.getenv("CODEWORLD_ENABLE_MCTS_GENERATE", "1")).lower()
+                gate_allowed = env_gate not in ("0", "false", "no")
+                if enabled and gate_allowed:
+                    n = int((autogen.get("n") if isinstance(autogen, dict) else 6) or 6)
+                    gen_model = str((autogen.get("generator_model") if isinstance(autogen, dict) else os.getenv("CODEX_AGENT_MODEL", "gpt-5")) or "gpt-5")
+                    temperature = float((autogen.get("temperature") if isinstance(autogen, dict) else 0.0) or 0.0)
+                    max_tokens = int((autogen.get("max_tokens") if isinstance(autogen, dict) else 2000) or 2000)
+                    prompt = _mcts_build_generation_prompt(task, ctx, n)
+                    llm = _mcts_call_llm_for_variants(prompt, n=n, model=gen_model, temperature=temperature, max_tokens=max_tokens)
+                    raw = llm.get("raw", "")
+                    vars = _mcts_extract_variants_from_raw(raw)
+                    if isinstance(vars, list) and vars:
+                        # Normalize to mapping id->code for engine
+                        mapping = {}
+                        for i, v in enumerate(vars, 1):
+                            if not isinstance(v, dict):
+                                continue
+                            vid = v.get("id") or f"v{i}"
+                            code = v.get("code") if isinstance(v.get("code"), str) else ""
+                            mapping[vid] = code
+                        if mapping:
+                            if isinstance(ctx, dict):
+                                ctx["code_variants"] = mapping
+                                code_variants = mapping
+            except Exception:
+                pass
         outputs: Dict[str, Any] = {}
         timings: Dict[str, Any] = {}
         t0 = time.perf_counter()
