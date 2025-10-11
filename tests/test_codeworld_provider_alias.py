@@ -57,6 +57,21 @@ def test_env_overrides_defaults_for_auto():
     assert args["max_tokens"] == 1024
 
 
+def test_env_overrides_non_numeric_fallbacks():
+    llm = CodeWorldLLM()
+    # Non-numeric env values should be ignored and fall back to safe defaults
+    with _env(
+        CODEWORLD_MCTS_AUTO_N="bogus",
+        CODEWORLD_MCTS_AUTO_TEMPERATURE="oops",
+        CODEWORLD_MCTS_AUTO_MAX_TOKENS="NaN",
+    ):
+        payload = llm._build_payload("codeworld/mcts:auto", [{"role": "user", "content": "x"}], {})
+    args = payload["provider"]["args"]
+    assert args["n_variants"] == 6
+    assert args["temperature"] == 0.0
+    assert "max_tokens" not in args  # ignored on invalid input
+
+
 def test_exploration_alias_dropped_when_uct_c_present():
     llm = CodeWorldLLM()
     payload = llm._build_payload(

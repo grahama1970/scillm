@@ -329,6 +329,7 @@ resp = completion(model="codeworld/mcts", custom_llm_provider="codeworld", items
 resp = completion(model="codeworld/mcts:auto", custom_llm_provider="codeworld",
                   n_variants=6, depth=6, uct_c=1.25, temperature=0.0, api_base=os.environ["CODEWORLD_BASE"])
 # Env overrides supported: CODEWORLD_MCTS_AUTO_N, CODEWORLD_MCTS_AUTO_TEMPERATURE, CODEWORLD_MCTS_AUTO_MODEL, CODEWORLD_MCTS_AUTO_MAX_TOKENS
+# Note: The synonym model="codeworld/mcts+auto" is accepted; responses/manifests normalize to the canonical "codeworld/mcts:auto".
 ```
 
 

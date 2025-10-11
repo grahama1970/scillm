@@ -15,6 +15,10 @@ def _mock_call_llm_for_variants(prompt: str, **kwargs):
     return {"raw": raw}
 
 
+def _mock_call_llm_for_variants_bad(prompt: str, **kwargs):
+    return {"raw": "not-json at all"}
+
+
 @pytest.mark.parametrize("env_gate", [None, "1"])  # allowed
 def test_autogen_creates_variants_then_mcts(monkeypatch, env_gate):
     monkeypatch.setattr(server, "_mcts_call_llm_for_variants", _mock_call_llm_for_variants)
@@ -58,3 +62,20 @@ def test_mcts_stats_includes_seed_and_best_variant(monkeypatch):
     assert "best_variant" in stats and isinstance(stats["best_variant"], str)
     assert stats.get("seed") == 7
     assert all(k in stats for k in ("rollouts", "depth", "uct_c", "visits", "explored", "best_value"))
+
+
+def test_autogen_malformed_json_sets_error(monkeypatch):
+    # Malformed generator output should be detected, recorded, and skip MCTS
+    monkeypatch.setattr(server, "_mcts_call_llm_for_variants", _mock_call_llm_for_variants_bad)
+    os.environ["CODEWORLD_ENABLE_MCTS_GENERATE"] = "1"
+
+    entry = {"run_manifest": {}}
+    provider_args = {"args": {"strategy": "mcts", "strategy_config": {"autogenerate": {"enabled": True, "n": 2}}}}
+    server.apply_mcts_strategy(entry, provider_args, task="t", context=None)
+
+    gen = entry["run_manifest"].get("strategy_generator", {})
+    assert gen.get("enabled") is True
+    assert gen.get("skipped_by_env") is False
+    assert gen.get("error") == "generation_empty_or_unparseable"
+    assert not entry.get("code_variants")
+    assert "mcts" not in entry
