@@ -312,6 +312,11 @@ project-ready-live:
 project-ready-summary:
 	@python scripts/print_ready_summary.py || true
 
+.PHONY: project-agent-doctor
+project-agent-doctor:
+	@chmod +x scripts/project_agent_doctor.zsh || true
+	@./scripts/project_agent_doctor.zsh
+
 .PHONY: review-run
 review-run:
 	@chmod +x scripts/review/run_review_e2e.zsh || true
