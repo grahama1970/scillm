@@ -37,6 +37,7 @@ help:
 	@echo "  make project-ready-live   - Run strict/live readiness (enforces required providers)"
 	@echo "  make project-ready-summary- Print last readiness PASS/FAIL/SKIP summary"
 	@echo "  make review-run           - Run codex-agent review + comparison (uses mini-agent by default)"
+	@echo "  make codex-agent-doctor   - Check codex-agent health, /v1/models, and a high-reasoning ping"
 
 # --- Logo exports -------------------------------------------------------------
 .PHONY: logo-export
@@ -120,6 +121,10 @@ run-stress-tests:
 	@. .venv/bin/activate && python stress_tests/codex_agent_rate_limit_backoff.py
 	@echo "Running mini-agent concurrency test"
 	@. .venv/bin/activate && python stress_tests/mini_agent_concurrency.py
+
+.PHONY: codex-agent-doctor
+codex-agent-doctor:
+	uv run python scripts/doctor/codex_agent_doctor.py
 
 check-circular-imports: install-dev
 	cd litellm && uv run python ../tests/documentation_tests/test_circular_imports.py && cd ..
