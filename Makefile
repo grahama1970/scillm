@@ -15,7 +15,7 @@ help:
 	@echo "  make format             - Apply Black code formatting"
 	@echo "  make format-check       - Check Black code formatting (matches CI)"
 	@echo "  make lint               - Run all linting (Ruff, MyPy, Black check, circular imports, import safety)"
-	@echo "  make run-scenarios      - Run live scenarios (mini-agent, router demos, chutes, code-agent)"
+	@echo "  make run-scenarios      - Run live scenarios (mini-agent, router demos, chutes, codex-agent)"
 	@echo "  make lean4-bridge       - Start Lean4 bridge on :8787"
 	@echo "  make lean4-live        - Probe Lean4 bridge (live scenario)"
 	@echo "  make codeworld-bridge   - Start CodeWorld bridge on :8887"
@@ -110,7 +110,7 @@ lean4-bridge:
 	PYTHONPATH=src uvicorn lean4_prover.bridge.server:app --port 8787 --log-level warning
 
 codeworld-bridge:
-	PYTHONPATH=src uvicorn codeworld.bridge.server:app --port 8887 --log-level warning
+	PYTHONPATH=src uvicorn codeworld.bridge.server:app --port 8888 --log-level warning
 
 codeworld-live:
 	PYTHONPATH=$(PWD) python scenarios/codeworld_bridge_release.py
@@ -119,7 +119,7 @@ codeworld-live:
 codeworld-bridge-up-only:
 	docker compose -f local/docker/compose.codeworld.bridge.yml up -d --build
 	@echo "Waiting 2s for health..." && sleep 2
-	@curl -sSf http://127.0.0.1:8887/healthz || true
+	@curl -sSf http://127.0.0.1:8888/healthz || true
 
 codeworld-bridge-down-only:
 	docker compose -f local/docker/compose.codeworld.bridge.yml down
@@ -127,8 +127,8 @@ codeworld-bridge-down-only:
 .PHONY: mcts-live
 mcts-live:
 	@if ! curl -sf $${CODEX_AGENT_API_BASE:-http://127.0.0.1:8089}/healthz >/dev/null; then echo "codex-agent not healthy; set CODEX_AGENT_API_BASE and start sidecar" && exit 2; fi
-	@if ! curl -sf $${CODEWORLD_BASE:-http://127.0.0.1:8887}/healthz >/dev/null; then echo "CodeWorld bridge not healthy; run 'make codeworld-bridge-up-only'" && exit 2; fi
-	@echo "Running live MCTS (:auto) with codex-agent=$${CODEX_AGENT_API_BASE:-http://127.0.0.1:8089} and codeworld=$${CODEWORLD_BASE:-http://127.0.0.1:8887}"
+	@if ! curl -sf $${CODEWORLD_BASE:-http://127.0.0.1:8888}/healthz >/dev/null; then echo "CodeWorld bridge not healthy; run 'make codeworld-bridge-up-only'" && exit 2; fi
+	@echo "Running live MCTS (:auto) with codex-agent=$${CODEX_AGENT_API_BASE:-http://127.0.0.1:8089} and codeworld=$${CODEWORLD_BASE:-http://127.0.0.1:8888}"
 	@python scenarios/mcts_codeworld_auto_release.py
 
 run-stress-tests:
@@ -144,6 +144,10 @@ run-stress-tests:
 .PHONY: codex-agent-doctor
 codex-agent-doctor:
 	uv run python scripts/doctor/codex_agent_doctor.py
+
+.PHONY: codeworld-bridge-doctor
+codeworld-bridge-doctor:
+	@curl -sSf $${CODEWORLD_BASE:-http://127.0.0.1:8888}/healthz | jq . || (echo "Bridge not healthy at $${CODEWORLD_BASE:-http://127.0.0.1:8888}"; exit 2)
 
 check-circular-imports: install-dev
 	cd litellm && uv run python ../tests/documentation_tests/test_circular_imports.py && cd ..

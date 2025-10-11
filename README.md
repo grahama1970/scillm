@@ -61,8 +61,8 @@ LITELLM_ENABLE_CERTAINLY=1 CERTAINLY_BRIDGE_BASE=http://127.0.0.1:8787 \
   - Discover a model id: `curl -sS "$CODEX_AGENT_API_BASE/v1/models" | jq -r '.data[].id'`
   - Quick HTTP (high reasoning):
     `curl -sS "$CODEX_AGENT_API_BASE/v1/chat/completions" -H 'Content-Type: application/json' -d '{"model":"gpt-5","reasoning":{"effort":"high"},"messages":[{"role":"user","content":"ping"}]}' | jq -r '.choices[0].message.content'`
-  - Router call: `completion(model="gpt-5", custom_llm_provider="codex-agent", api_base=$CODEX_AGENT_API_BASE, messages=[...], reasoning_effort="high")`
-  - Optional cache: `from litellm.extras import initialize_litellm_cache; initialize_litellm_cache()`
+- Router call: `completion(model="gpt-5", custom_llm_provider="codex-agent", api_base=$CODEX_AGENT_API_BASE, messages=[...], reasoning_effort="high")`
+- Optional cache: `from litellm.extras import initialize_litellm_cache; initialize_litellm_cache()`
 
 MCTS (CodeWorld) one‑POST live check
 - Start bridge: `PYTHONPATH=src uvicorn codeworld.bridge.server:app --port 8888 --log-level warning`
@@ -794,3 +794,5 @@ Scientists and engineers are rightly skeptical of hallucinations. SciLLM is desi
 - Check `/healthz` and `/metrics` on both bridges.
 - Find run artifacts under `local/artifacts/runs/` (includes `run_id`, `request_id`, `item_id`s, session/track, provider info).
 - Gate CI on judge thresholds (% proved, correctness/speed) and return artifacts for review.
+  - Model discovery: example ids like “gpt‑5” may not be present; always choose an id from `GET $CODEX_AGENT_API_BASE/v1/models`.
+  - The reasoning flag (`reasoning={"effort":"high"}`) is optional; examples include it to demonstrate high‑reasoning flows.

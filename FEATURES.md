@@ -107,7 +107,10 @@ One‑POST (HTTP) autogenerate + MCTS
 - Local bridge:
   - `PYTHONPATH=src uvicorn codeworld.bridge.server:app --port 8888`
   - `BASE=http://127.0.0.1:8888 curl -sS "$BASE/bridge/complete" -H 'Content-Type: application/json' -d '{"messages":[{"role":"user","content":"Autogenerate"}],"items":[{"task":"t","context":{}}],"provider":{"name":"codeworld","args":{"strategy":"mcts","strategy_config":{"autogenerate":{"enabled":true,"n":3}}}}}' | jq '.run_manifest.mcts_stats'`
-- Docker bridge only: `make codeworld-bridge-up-only` (defaults `CODEX_AGENT_API_BASE=http://host.docker.internal:8089`).
+- Docker bridge only: `make codeworld-bridge-up-only` (defaults `CODEX_AGENT_API_BASE=http://host.docker.internal:8089`). On Linux, compose adds:
+  `extra_hosts: ["host.docker.internal:host-gateway"]`. Override via `CODEX_AGENT_API_BASE=http://<host-ip>:8089`.
+- Knobs: `CODEWORLD_ONEPOST_TIMEOUT_S` (default 60s), `CODEWORLD_MCTS_AUTO_N` (default 3), `CODEWORLD_MCTS_AUTO_TEMPERATURE` (default 0), `CODEWORLD_MCTS_AUTO_MAX_TOKENS` (default 2000), `CODEX_AGENT_MODEL`.
+- Examples use `reasoning={"effort":"high"}` to showcase the path, but it’s optional.
 
 ## Certainly (Lean4)
 

@@ -28,7 +28,7 @@ except Exception:  # pragma: no cover - fallback
 app = FastAPI(
     title="CodeWorld Bridge",
     description="CodeWorld bridge endpoint compatible with LiteLLM bridge/provider calls.",
-    version="0.2.0",
+    version="0.2.1",
 )
 
 # Minimal in-process session history for plateau signals (alpha).
@@ -65,6 +65,10 @@ class CodeWorldBridgeRequest(CanonicalBridgeRequest):
 SCORING_NONET = str(os.getenv("CODEWORLD_SCORING_NONET", "")).lower() in {"1", "true", "yes"}
 STRATEGY_NONET = str(os.getenv("CODEWORLD_STRATEGY_NONET", "")).lower() in {"1", "true", "yes"}
 REDIS_URL = os.getenv("CODEWORLD_REDIS_URL")
+AUTOGEN_DEFAULT_N = int(os.getenv("CODEWORLD_MCTS_AUTO_N", "3") or "3")
+AUTOGEN_DEFAULT_TEMPERATURE = float(os.getenv("CODEWORLD_MCTS_AUTO_TEMPERATURE", "0.0") or "0.0")
+AUTOGEN_DEFAULT_MAX_TOKENS = int(os.getenv("CODEWORLD_MCTS_AUTO_MAX_TOKENS", "2000") or "2000")
+AUTOGEN_HTTP_TIMEOUT_S = float(os.getenv("CODEWORLD_AUTOGEN_HTTP_TIMEOUT_S", "45") or "45")
 _redis = None
 if REDIS_URL:
     try:
@@ -172,10 +176,10 @@ async def bridge_complete(req: CodeWorldBridgeRequest, request: Request):
                 env_gate = str(os.getenv("CODEWORLD_ENABLE_MCTS_GENERATE", "1")).lower()
                 gate_allowed = env_gate not in ("0", "false", "no")
                 if enabled and gate_allowed:
-                    n = int((autogen.get("n") if isinstance(autogen, dict) else 6) or 6)
+                    n = int((autogen.get("n") if isinstance(autogen, dict) else AUTOGEN_DEFAULT_N) or AUTOGEN_DEFAULT_N)
                     gen_model = str((autogen.get("generator_model") if isinstance(autogen, dict) else os.getenv("CODEX_AGENT_MODEL", "gpt-5")) or "gpt-5")
-                    temperature = float((autogen.get("temperature") if isinstance(autogen, dict) else 0.0) or 0.0)
-                    max_tokens = int((autogen.get("max_tokens") if isinstance(autogen, dict) else 2000) or 2000)
+                    temperature = float((autogen.get("temperature") if isinstance(autogen, dict) else AUTOGEN_DEFAULT_TEMPERATURE) or AUTOGEN_DEFAULT_TEMPERATURE)
+                    max_tokens = int((autogen.get("max_tokens") if isinstance(autogen, dict) else AUTOGEN_DEFAULT_MAX_TOKENS) or AUTOGEN_DEFAULT_MAX_TOKENS)
                     prompt = _mcts_build_generation_prompt(task, ctx, n)
                     llm = _mcts_call_llm_for_variants(prompt, n=n, model=gen_model, temperature=temperature, max_tokens=max_tokens)
                     raw = llm.get("raw", "")
@@ -523,7 +527,7 @@ def _mcts_call_llm_for_variants(prompt: str, *, n: int, model: str, temperature:
         url = base.rstrip("/") + path
         try:
             req = _urlreq.Request(url=url, data=data, headers=headers, method="POST")
-            with _urlreq.urlopen(req, timeout=30) as resp:
+            with _urlreq.urlopen(req, timeout=AUTOGEN_HTTP_TIMEOUT_S) as resp:
                 rsp = json.loads(resp.read().decode("utf-8"))
             content = rsp.get("choices", [{}])[0].get("message", {}).get("content", "")
             return {"raw": content}
@@ -595,10 +599,10 @@ def apply_mcts_strategy(entry: Dict[str, Any], provider_args: Optional[Dict[str,
     gen_meta = {
         "enabled": bool(enabled),
         "skipped_by_env": not gate_allowed if enabled else False,
-        "n": int(gen_cfg.get("n", 6)),
-        "model": gen_cfg.get("generator_model", "gpt-4o-mini"),
-        "temperature": float(gen_cfg.get("temperature", 0.0)),
-        "max_tokens": int(gen_cfg.get("max_tokens", 2000)),
+        "n": int(gen_cfg.get("n", AUTOGEN_DEFAULT_N)),
+        "model": gen_cfg.get("generator_model", os.getenv("CODEX_AGENT_MODEL", "gpt-5")),
+        "temperature": float(gen_cfg.get("temperature", AUTOGEN_DEFAULT_TEMPERATURE)),
+        "max_tokens": int(gen_cfg.get("max_tokens", AUTOGEN_DEFAULT_MAX_TOKENS)),
         "prompt_hash": None,
         "response_hash": None,
         "error": None,
@@ -608,8 +612,13 @@ def apply_mcts_strategy(entry: Dict[str, Any], provider_args: Optional[Dict[str,
         prompt = _mcts_build_generation_prompt(task, context, gen_meta["n"])  # type: ignore[arg-type]
         gen_meta["prompt_hash"] = _mcts_hash_text(prompt)
         try:
-            llm = _mcts_call_llm_for_variants(prompt, n=gen_meta["n"], model=str(gen_meta["model"]),
-                                              temperature=float(gen_meta["temperature"]), max_tokens=int(gen_meta["max_tokens"]))
+            llm = _mcts_call_llm_for_variants(
+                prompt,
+                n=gen_meta["n"],
+                model=str(gen_meta["model"]),
+                temperature=float(gen_meta["temperature"]),
+                max_tokens=int(gen_meta["max_tokens"]),
+            )
             raw = llm.get("raw", "")
             gen_meta["response_hash"] = _mcts_hash_text(raw) if raw else None
             variants = _mcts_extract_variants_from_raw(raw)
