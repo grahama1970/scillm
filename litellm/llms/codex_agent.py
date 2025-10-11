@@ -84,6 +84,18 @@ class CodexAgentLLM(CustomLLM):
         for key, value in extras.items():
             if key not in ("model", "messages"):
                 payload[key] = value
+        # Normalize reasoning parameter shapes for OpenAI-compatible backends
+        try:
+            reffort = (payload.get("reasoning_effort") or extras.get("reasoning_effort"))
+            if isinstance(reffort, str):
+                # Ensure both forms are present for maximum compatibility
+                payload["reasoning_effort"] = reffort
+                if not isinstance(payload.get("reasoning"), dict):
+                    payload["reasoning"] = {"effort": reffort}
+                else:
+                    payload["reasoning"].setdefault("effort", reffort)
+        except Exception:
+            pass
         # Compose headers; honor provided headers but add Authorization if api_key is present
         _hdr = dict(headers or {})
         if api_key and not any(k.lower() == "authorization" for k in _hdr.keys()):
@@ -262,6 +274,17 @@ class CodexAgentLLM(CustomLLM):
         for key, value in extras.items():
             if key not in ("model", "messages"):
                 payload[key] = value
+        # Normalize reasoning parameter shapes for OpenAI-compatible backends (async)
+        try:
+            reffort = (payload.get("reasoning_effort") or extras.get("reasoning_effort"))
+            if isinstance(reffort, str):
+                payload["reasoning_effort"] = reffort
+                if not isinstance(payload.get("reasoning"), dict):
+                    payload["reasoning"] = {"effort": reffort}
+                else:
+                    payload["reasoning"].setdefault("effort", reffort)
+        except Exception:
+            pass
         _hdr = dict(headers or {})
         if api_key and not any(k.lower() == "authorization" for k in _hdr.keys()):
             _hdr["Authorization"] = f"Bearer {api_key}"
@@ -415,12 +438,17 @@ try:
             from litellm.llms import PROVIDER_REGISTRY  # type: ignore
             PROVIDER_REGISTRY["codex-agent"] = CodexAgentLLM
             PROVIDER_REGISTRY["codex_cli_agent"] = CodexAgentLLM
+            # Friendly aliases used by teams/scripts
+            PROVIDER_REGISTRY["code-agent"] = CodexAgentLLM
+            PROVIDER_REGISTRY["code_agent"] = CodexAgentLLM
         except Exception:
             # Fall back to a helper registration function if available
             try:
                 from litellm.llms.custom_llm import register_custom_provider  # type: ignore
                 register_custom_provider("codex-agent", CodexAgentLLM)
                 register_custom_provider("codex_cli_agent", CodexAgentLLM)
+                register_custom_provider("code-agent", CodexAgentLLM)
+                register_custom_provider("code_agent", CodexAgentLLM)
             except Exception:
                 pass
 except Exception:

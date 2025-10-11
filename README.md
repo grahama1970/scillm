@@ -49,9 +49,9 @@ LITELLM_ENABLE_CERTAINLY=1 CERTAINLY_BRIDGE_BASE=http://127.0.0.1:8787 \
   python scenarios/certainly_router_release.py
 ```
 
-## Mini‑Agent + codex‑agent (local, OpenAI‑compatible)
+## codex‑agent (OpenAI‑compatible) — Local or Docker
 
-Fast local endpoint for agent workflows — no external gateway required.
+Use either local (mini‑agent) or Docker (sidecar). Both expose the same API; do NOT append `/v1` to the base.
 
 - Start shim (default 127.0.0.1:8788):
   - `uvicorn litellm.experimental_mcp_client.mini_agent.agent_proxy:app --host 127.0.0.1 --port 8788`
@@ -61,9 +61,11 @@ Fast local endpoint for agent workflows — no external gateway required.
   - `# export CODEX_AGENT_API_KEY=...` (usually unset for local)
 - Verify:
   - `curl -sSf http://127.0.0.1:8788/healthz`
-  - `curl -sS -H 'content-type: application/json' -d '{"model":"gpt-5","messages":[{"role":"user","content":"say hello"}]}' http://127.0.0.1:8788/v1/chat/completions | jq -r '.choices[0].message.content'`
-- Router usage:
-  - `from litellm import Router; out = Router().completion(model="gpt-5", custom_llm_provider="codex-agent", messages=[{"role":"user","content":"Return STRICT JSON only: {\"ok\":true}"}], response_format={"type":"json_object"}); print(out.choices[0].message["content"])`
+  - `curl -sS  http://127.0.0.1:8788/v1/models | jq .`
+  - High‑reasoning chat:
+    `curl -sS -H 'content-type: application/json' -d '{"model":"gpt-5","reasoning":{"effort":"high"},"messages":[{"role":"user","content":"say hello"}]}' http://127.0.0.1:8788/v1/chat/completions | jq -r '.choices[0].message.content'`
+- Router usage (high reasoning):
+  - `from litellm import Router; out = Router().completion(model="gpt-5", custom_llm_provider="codex-agent", messages=[{"role":"user","content":"Return STRICT JSON only: {\"ok\":true}"}], reasoning_effort="high", response_format={"type":"json_object"}); print(out.choices[0].message["content"])`
 
 Docker option: `docker compose -f local/docker/compose.agents.yml up --build -d` exposes mini‑agent on `127.0.0.1:8788` and the codex sidecar on `127.0.0.1:8077`. Point `CODEX_AGENT_API_BASE` at the one you want (no `/v1`).
 
