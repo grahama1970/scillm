@@ -108,7 +108,7 @@ curl -sS -H 'content-type: application/json' \
 Doctor (one‑shot):
 
 ```bash
-make project-agent-doctor
+make codex-agent-doctor
 ```
 
 Capabilities and expectations

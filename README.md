@@ -69,7 +69,7 @@ Troubleshooting
 - 400/502 (sidecar) → upstream provider not wired; enable echo or add credentials.
 - Base includes `/v1` → remove it; use the base only.
 
-Doctor (one-shot): `make project-agent-doctor`
+Doctor (one-shot): `make codex-agent-doctor`
 
 ## codex‑agent (OpenAI‑compatible) — Local or Docker
 
