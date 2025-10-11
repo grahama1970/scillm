@@ -18,6 +18,12 @@ This file is a quick, practical map of SciLLM’s capabilities, what they do, an
 | Providers | Certainly (Lean4) | Lean4 bridge for formal proofs/checks | `completion(model="certainly", custom_llm_provider="certainly", api_base=..., items=...)` | litellm/llms/lean4.py |
 | Agent | mini‑agent (experimental) | Deterministic local tool‑use loop | `completion(model="mini-agent/...", custom_llm_provider="mini-agent")` | docs/my-website/docs/experimental/mini-agent.md |
 
+MCP (Model Context Protocol) — Mini‑Agent
+- Start: `uvicorn litellm.experimental_mcp_client.mini_agent.agent_proxy:app --host 127.0.0.1 --port 8788`
+- Probe: `curl -sSf http://127.0.0.1:8788/ready`
+- In‑process example: `python examples/mini_agent_inprocess.py` (uses LocalMCPInvoker with a safe allowlist)
+- Notes: The agent proxy exposes an HTTP contract for tool calls; see MINI_AGENT.md for request/response shape and limits.
+
 ## codex‑agent — Local or Docker, Exact Values
 
 - Start the mini‑agent shim (OpenAI‑compatible):

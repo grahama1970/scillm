@@ -68,6 +68,24 @@ export OPENAI_BASE_URL="$CODEX_AGENT_API_BASE"     # do NOT append /v1
 export OPENAI_API_KEY="${CODEX_AGENT_API_KEY:-none}"
 ```
 
+Mini‑Agent (MCP) quickstart
+
+```bash
+# Start the MCP-style mini‑agent locally (OpenAI‑compatible shim for tools)
+uvicorn litellm.experimental_mcp_client.mini_agent.agent_proxy:app \
+  --host 127.0.0.1 --port 8788 --log-level warning
+
+# Probe
+curl -sSf http://127.0.0.1:8788/ready || true
+
+# In‑process (deterministic) variant example
+python examples/mini_agent_inprocess.py
+```
+
+Notes
+- Mini‑Agent uses MCP semantics for tool execution. For HTTP usage, point clients at 127.0.0.1:8788 (no /v1 path) using the provided agent proxy schema.
+- For lessons learned and limits, see CONTEXT.md (Extractor Pipeline and runbook pointers).
+
 Use this if you want an OpenAI‑style endpoint for agent/router tests without any external gateway.
 
 1) Start the mini‑agent shim (default 127.0.0.1:8788)
