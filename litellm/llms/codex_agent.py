@@ -37,7 +37,11 @@ class CodexAgentLLM(CustomLLM):
     def _resolve_base(self, api_base: Optional[str]) -> str:
         base = api_base or os.getenv("CODEX_AGENT_API_BASE")
         if base:
-            return base.rstrip("/")
+            b = base.strip()
+            # Guard: users sometimes set a base ending with '/v1'. Normalize to root.
+            if b.endswith("/v1"):
+                b = b[:-3]
+            return b.rstrip("/")
 
         try:
             sidecar_base = ensure_sidecar()

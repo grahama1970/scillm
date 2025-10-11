@@ -109,6 +109,13 @@ def get_llm_provider(  # noqa: PLR0915
             # Normalize model to provider/model form for downstream paths
             if "/" not in model:
                 model = f"{_clp}/{model}"
+            # Soft deprecation notice for aliases
+            if _clp in ("code-agent", "code_agent"):
+                try:
+                    import warnings
+                    warnings.warn("Use 'codex-agent' provider name; 'code-agent' is a compatibility alias.")
+                except Exception:
+                    pass
             return model.split("/",1)[1] if "/" in model else model, _clp, api_key, api_base
         if litellm.LiteLLMProxyChatConfig._should_use_litellm_proxy_by_default(
             litellm_params=litellm_params
