@@ -38,6 +38,8 @@ help:
 	@echo "  make project-ready-summary- Print last readiness PASS/FAIL/SKIP summary"
 	@echo "  make review-run           - Run codex-agent review + comparison (uses mini-agent by default)"
 	@echo "  make codex-agent-doctor   - Check codex-agent health, /v1/models, and a high-reasoning ping"
+	@echo "  make codeworld-bridge-up-only   - Start CodeWorld bridge only on :8887 (no Redis)"
+	@echo "  make codeworld-bridge-down-only - Stop CodeWorld bridge-only container"
 
 # --- Logo exports -------------------------------------------------------------
 .PHONY: logo-export
@@ -111,6 +113,15 @@ codeworld-bridge:
 
 codeworld-live:
 	PYTHONPATH=$(PWD) python scenarios/codeworld_bridge_release.py
+
+.PHONY: codeworld-bridge-up-only codeworld-bridge-down-only
+codeworld-bridge-up-only:
+	docker compose -f local/docker/compose.codeworld.bridge.yml up -d --build
+	@echo "Waiting 2s for health..." && sleep 2
+	@curl -sSf http://127.0.0.1:8887/healthz || true
+
+codeworld-bridge-down-only:
+	docker compose -f local/docker/compose.codeworld.bridge.yml down
 
 run-stress-tests:
 	@echo "Running throughput benchmark"

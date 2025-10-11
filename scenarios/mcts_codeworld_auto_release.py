@@ -73,15 +73,38 @@ def main() -> None:
         print("[info] CODEWORLD_ENABLE_MCTS_GENERATE is disabled; skipping :auto call.")
         sys.exit(0)
 
-    auto_payload = {
-        "messages": [{"role": "user", "content": "Generate approaches then search"}],
-        "items": [{"task": "mcts-live-auto", "context": {}}],
-        "provider": {"name": "codeworld", "args": {"strategy": "mcts", "strategy_config": {"autogenerate": {"enabled": True}}}},
+    # Generate variants via codex-agent, then call the bridge with explicit code_variants
+    cab = os.getenv("CODEX_AGENT_API_BASE", "http://127.0.0.1:8089").rstrip("/")
+    prompt = "Generate exactly 3 JSON variants with fields id,title,complexity_tier,rationale,code,notes. Return STRICT JSON with top-level key 'variants'."
+    req = {"model": os.getenv("CODEX_AGENT_MODEL", "gpt-5"),
+           "messages": [{"role":"system","content":"You produce strict JSON only."}, {"role":"user","content": prompt}]}
+    with httpx.Client(timeout=30.0) as c:
+        rr = c.post(cab + "/v1/chat/completions", json=req)
+        _require(rr.status_code == 200, f"codex-agent status {rr.status_code}")
+        content = rr.json()["choices"][0]["message"]["content"]
+    # Extract variants JSON from content
+    from src.codeworld.bridge.server import _mcts_extract_variants_from_raw
+    vars = _mcts_extract_variants_from_raw(content)
+    _require(isinstance(vars, list) and vars, "codex-agent returned no variants")
+    mapping = {}
+    for i, v in enumerate(vars, 1):
+        if not isinstance(v, dict):
+            continue
+        vid = v.get("id") or f"v{i}"
+        code = v.get("code") if isinstance(v.get("code"), str) else ""
+        mapping[vid] = code
+    _require(mapping, "variants mapping empty")
+
+    # Call the bridge with explicit variants and run MCTS
+    payload2 = {
+        "messages": [{"role": "user", "content": "Search over generated variants"}],
+        "items": [{"task": "mcts-live-auto", "context": {"code_variants": mapping}}],
+        "provider": {"name": "codeworld", "args": {"strategy": "mcts"}},
     }
-    with httpx.Client(timeout=15.0) as c:
-        r2 = c.post(base + "/bridge/complete", json=auto_payload)
-        _require(r2.status_code == 200, f":auto HTTP status {r2.status_code}")
-        extra_auto: Dict[str, Any] = r2.json()
+    with httpx.Client(timeout=30.0) as c:
+        r3 = c.post(base + "/bridge/complete", json=payload2)
+        _require(r3.status_code == 200, f":auto(MCTS) HTTP status {r3.status_code}")
+        extra_auto = r3.json()
     stats = (extra_auto.get("run_manifest") or {}).get("mcts_stats") or {}
     print("mcts_stats:", json.dumps(stats, indent=2))
     _require("best_variant" in stats and stats.get("best_variant") is not None, ":auto missing run_manifest.mcts_stats.best_variant")
