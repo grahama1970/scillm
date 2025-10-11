@@ -40,6 +40,7 @@ help:
 	@echo "  make codex-agent-doctor   - Check codex-agent health, /v1/models, and a high-reasoning ping"
 	@echo "  make codeworld-bridge-up-only   - Start CodeWorld bridge only on :8887 (no Redis)"
 	@echo "  make codeworld-bridge-down-only - Stop CodeWorld bridge-only container"
+	@echo "  make mcts-live              - Run live MCTS (:auto) end-to-end via codex-agent + CodeWorld"
 
 # --- Logo exports -------------------------------------------------------------
 .PHONY: logo-export
@@ -122,6 +123,13 @@ codeworld-bridge-up-only:
 
 codeworld-bridge-down-only:
 	docker compose -f local/docker/compose.codeworld.bridge.yml down
+
+.PHONY: mcts-live
+mcts-live:
+	@if ! curl -sf $${CODEX_AGENT_API_BASE:-http://127.0.0.1:8089}/healthz >/dev/null; then echo "codex-agent not healthy; set CODEX_AGENT_API_BASE and start sidecar" && exit 2; fi
+	@if ! curl -sf $${CODEWORLD_BASE:-http://127.0.0.1:8887}/healthz >/dev/null; then echo "CodeWorld bridge not healthy; run 'make codeworld-bridge-up-only'" && exit 2; fi
+	@echo "Running live MCTS (:auto) with codex-agent=$${CODEX_AGENT_API_BASE:-http://127.0.0.1:8089} and codeworld=$${CODEWORLD_BASE:-http://127.0.0.1:8887}"
+	@python scenarios/mcts_codeworld_auto_release.py
 
 run-stress-tests:
 	@echo "Running throughput benchmark"
