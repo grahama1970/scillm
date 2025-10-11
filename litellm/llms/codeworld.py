@@ -78,6 +78,13 @@ class CodeWorldLLM(CustomLLM):
                 alias = _model.split("/", 1)[1].strip().lower()
                 if alias == "mcts" and "strategy" not in merged_args and "strategy" not in optional_params:
                     merged_args["strategy"] = "mcts"
+                if alias == "mcts:auto":
+                    if "strategy" not in merged_args and "strategy" not in optional_params:
+                        merged_args["strategy"] = "mcts"
+                    # enable autogeneration defaults (can be overridden)
+                    merged_args.setdefault("autogenerate", True)
+                    merged_args.setdefault("n_variants", 6)
+                    merged_args.setdefault("temperature", 0.0)
         except Exception:
             pass
 
@@ -90,7 +97,9 @@ class CodeWorldLLM(CustomLLM):
 
         # Unified sugar parameters (top-level) → fold into provider.args
         # Users can pass either strategy/strategy_config or individual knobs.
-        for k in ("strategy", "strategy_config", "rollouts", "depth", "uct_c", "seed", "exploration_constant"):
+        for k in ("strategy", "strategy_config", "rollouts", "depth", "uct_c", "seed", "exploration_constant",
+                  # autogeneration sugar
+                  "autogenerate", "n_variants", "generator_model", "temperature", "max_tokens"):
             if k in optional_params and k not in merged_args:
                 merged_args[k] = optional_params[k]
 

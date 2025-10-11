@@ -100,6 +100,43 @@ resp = completion(
 
 `run_manifest.mcts_stats` duplicates the summary for quick indexing.
 
+## Autogenerate Variants (optional)
+
+You can have the provider generate N approaches from the prompt, then run MCTS over them. Enable via alias or config:
+
+```python
+from litellm import completion
+
+resp = completion(
+  model="codeworld/mcts:auto",      # implies strategy="mcts" + autogenerate enabled
+  custom_llm_provider="codeworld",
+  n_variants=6,                      # how many approaches
+  depth=6,
+  uct_c=1.25,
+  temperature=0.0,
+)
+```
+
+Generator details are mirrored into the manifest:
+
+```jsonc
+{
+  "run_manifest": {
+    "strategy_generator": {
+      "enabled": true,
+      "skipped_by_env": false,
+      "n": 6,
+      "model": "gpt-4o-mini",
+      "temperature": 0.0,
+      "max_tokens": 2000,
+      "prompt_hash": "…",
+      "response_hash": "…",
+      "error": null
+    }
+  }
+}
+```
+
 ## Disable
 
 ```bash
