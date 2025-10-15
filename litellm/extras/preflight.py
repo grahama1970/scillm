@@ -2,13 +2,14 @@ from __future__ import annotations
 
 import os
 import time
-from typing import Dict, Optional, Set
+from typing import Dict, Optional, Set, Any
 
 import json
 from urllib import request as _urlreq
 
 # In-memory, process-scoped model catalog per API base
 _CATALOG: Dict[str, Dict[str, object]] = {}
+_CACHE_PATH = os.path.expanduser("~/.cache/scillm/catalog.json")
 
 
 def _now() -> float:
@@ -58,17 +59,32 @@ def preflight_models(
             data = json.loads(resp.read().decode("utf-8"))
         ids = {d.get("id") for d in (data.get("data") or []) if isinstance(d, dict) and d.get("id")}
         _CATALOG[base] = {"ts": _now(), "ids": ids, "ttl": ttl}
+        try:
+            _persist_catalog(base, _CATALOG[base])
+        except Exception:
+            pass
         return set(ids)
     except Exception:
         if soft:
             # keep existing (possibly empty or expired)
-            return set(cur.get("ids", set())) if cur else set()
+            if cur:
+                return set(cur.get("ids", set()))
+            snap = _load_persisted_catalog(base)
+            if snap:
+                _CATALOG[base] = snap
+                return set(snap.get("ids", set()))
+            return set()
         raise
 
 
 def catalog_for(api_base: str) -> Set[str]:
     base = _normalize_base(api_base)
     cur = _CATALOG.get(base)
+    if not cur:
+        snap = _load_persisted_catalog(base)
+        if snap:
+            _CATALOG[base] = snap
+            cur = snap
     return set(cur.get("ids", set())) if cur else set()
 
 
@@ -80,3 +96,29 @@ def check_model_available(api_base: str, model: str, *, soft: bool = False) -> b
     if not ok and not soft:
         raise ValueError(f"Unknown model '{model}' for base '{base}'. Run preflight_models() or disable SCILLM_MODEL_PREFLIGHT.")
     return ok
+
+
+def _persist_catalog(base: str, snap: Dict[str, Any]) -> None:
+    os.makedirs(os.path.dirname(_CACHE_PATH), exist_ok=True)
+    data: Dict[str, Any] = {}
+    if os.path.exists(_CACHE_PATH):
+        try:
+            with open(_CACHE_PATH, 'r', encoding='utf-8') as r:
+                data = json.load(r)
+        except Exception:
+            data = {}
+    data[base] = snap
+    with open(_CACHE_PATH, 'w', encoding='utf-8') as w:
+        json.dump(data, w)
+
+
+def _load_persisted_catalog(base: str) -> Optional[Dict[str, Any]]:
+    try:
+        with open(_CACHE_PATH, 'r', encoding='utf-8') as r:
+            data = json.load(r)
+        snap = data.get(base)
+        if isinstance(snap, dict) and snap.get('ids'):
+            return snap
+    except Exception:
+        return None
+    return None

@@ -4,8 +4,9 @@ import json
 import os
 import re
 import time
-from typing import Iterable, Optional, Sequence, Tuple
+from typing import Iterable, Optional, Sequence, Tuple, List
 from urllib import request as _urlreq
+from dataclasses import dataclass
 
 from .preflight import catalog_for, _normalize_base
 from rapidfuzz import process, fuzz
@@ -187,3 +188,85 @@ def _resolve_with_llm(api_base: str, requested: str, candidates: Sequence[str]) 
         return None
     except Exception:
         return None
+
+
+
+# ---------- Batch resolver (public API) ----------
+
+@dataclass
+class ResolvedModel:
+    input: str
+    canonical: str
+    distance: float
+    exists: bool
+    source: str
+    reason: str
+
+
+@dataclass
+class ResolveResult:
+    ok: bool
+    resolved: List[ResolvedModel]
+    missing: List[str]
+    catalog_size: int
+    catalog_ts: Optional[str]
+
+
+def resolve_models(
+    models: List[str],
+    *,
+    api_base: str,
+    api_key: Optional[str] = None,
+    provider: str = "openai",
+    cutoff: float = 0.55,
+    prefer_live: bool = True,
+    allow_stale: bool = True,
+    timeout: float = 8.0,
+    catalog: Optional[List[dict]] = None,
+) -> ResolveResult:
+    """Resolve a list of model ids to canonical ids available on an OpenAI-compatible base.
+
+    Uses the session catalog (preflight) or a provided catalog.
+    Returns ordered results aligned with inputs; never performs completion calls.
+    """
+    base = _normalize_base(api_base)
+    # ensure a catalog is available
+    from .preflight import preflight_models, catalog_for
+    ids: Sequence[str]
+    ts_iso: Optional[str] = None
+    if catalog is not None:
+        ids = [d.get("id") for d in catalog if isinstance(d, dict) and d.get("id")]
+        source = "provided_catalog"
+    else:
+        source = "live"
+        try:
+            if prefer_live:
+                preflight_models(api_base=base, api_key=api_key, timeout_s=timeout, soft=allow_stale)
+            else:
+                preflight_models(api_base=base, api_key=api_key, timeout_s=timeout, soft=True)
+        except Exception:
+            if not allow_stale:
+                return ResolveResult(ok=False, resolved=[], missing=models, catalog_size=0, catalog_ts=None)
+        ids = list(catalog_for(base))
+        if not ids and not allow_stale:
+            return ResolveResult(ok=False, resolved=[], missing=models, catalog_size=0, catalog_ts=None)
+        if not ids:
+            source = "cache"
+
+    resolved: List[ResolvedModel] = []
+    missing: List[str] = []
+
+    idset = set(ids)
+    for inp in models:
+        can = inp if inp in idset else resolve_model_id(api_base=base, requested=inp, cutoff=cutoff)
+        if can is None:
+            missing.append(inp)
+            resolved.append(ResolvedModel(input=inp, canonical=inp, distance=1.0, exists=False, source=source, reason="no_match >= cutoff"))
+            continue
+        exists = can in idset
+        dist = 0.0 if can == inp else 0.5
+        reason = "exact" if can == inp else "fuzzy_match >= cutoff"
+        resolved.append(ResolvedModel(input=inp, canonical=can, distance=dist, exists=exists, source=source, reason=reason))
+
+    ok = bool(resolved) and (len(missing) < len(models) or bool(ids))
+    return ResolveResult(ok=ok, resolved=resolved, missing=missing, catalog_size=len(ids), catalog_ts=ts_iso)
