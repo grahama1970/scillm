@@ -35,7 +35,13 @@
 
 <p align="center"><i>This fork remains API‑compatible with LiteLLM while adding optional modules for formal methods (Lean4, exposed as "Certainly"), code orchestration (CodeWorld), and live agent flows. See QUICKSTART.md and scenarios/ for runnable demos. Use SCILLM_ENABLE_* or LITELLM_ENABLE_* flags to enable modules.</i></p>
 
-<p><b>Why SciLLM vs generic LLM stacks?</b> SciLLM provides specialized infrastructure for theorem proving, formal code automation, and experiment tracking—ideal for benchmarking proof‑aware agents, integrating with formal math libraries, and prototyping prove‑aware research tools efficiently.</p>
+<p><b>Why SciLLM?</b> SciLLM adds specialized infrastructure for theorem proving (Lean4 / “Certainly”), code orchestration (CodeWorld + MCTS), and agent/tool experimentation (mini‑agent, codex‑agent) — while retaining LiteLLM API compatibility.</p>
+
+<blockquote>
+<b>Environment Prefix Preference</b><br/>
+Use <code>SCILLM_</code> variables (e.g. <code>SCILLM_ENABLE_CODEX_AGENT=1</code>). Legacy <code>LITELLM_</code> aliases remain for backward compatibility.<br/>
+<b>Model IDs</b>: Replace <code><MODEL_ID></code> placeholders with a real ID from <code>GET $CODEX_AGENT_API_BASE/v1/models</code> (older examples used <code>gpt-5</code> illustratively).
+</blockquote>
 
 ## TL;DR (30 seconds)
 
@@ -61,7 +67,7 @@ LITELLM_ENABLE_CERTAINLY=1 CERTAINLY_BRIDGE_BASE=http://127.0.0.1:8787 \
   - Discover a model id: `curl -sS "$CODEX_AGENT_API_BASE/v1/models" | jq -r '.data[].id'`
   - Quick HTTP (high reasoning):
     `curl -sS "$CODEX_AGENT_API_BASE/v1/chat/completions" -H 'Content-Type: application/json' -d '{"model":"gpt-5","reasoning":{"effort":"high"},"messages":[{"role":"user","content":"ping"}]}' | jq -r '.choices[0].message.content'`
-- Router call: `completion(model="gpt-5", custom_llm_provider="codex-agent", api_base=$CODEX_AGENT_API_BASE, messages=[...], reasoning_effort="high")`
+- Router call: `completion(model="<MODEL_ID>", custom_llm_provider="codex-agent", api_base=$CODEX_AGENT_API_BASE, messages=[...], reasoning_effort="high")`
 - Optional cache: `from litellm.extras import initialize_litellm_cache; initialize_litellm_cache()`
 
 MCTS (CodeWorld) one‑POST live check
@@ -76,23 +82,66 @@ Troubleshooting
 
 Doctor (one-shot): `make codex-agent-doctor`
 
+---
+## Quick Links
+| Topic | File |
+|-------|------|
+| Feature matrix & patterns | [FEATURES.md](FEATURES.md) |
+| Multi‑Surface Quickstart | [QUICKSTART.md](QUICKSTART.md) |
+| Lean4 / Certainly specifics | `scenarios/lean4_*`, `scenarios/certainly_*` |
+| Parallel fan‑out example | `feature_recipes/parallel_acompletions.py` |
+| MCTS & autogen | `scenarios/mcts_codeworld_demo.py` |
+| Retry guide | `docs/guide/RATE_LIMIT_RETRIES.md` |
+| Batch helpers | `docs/guide/batch_helpers.md` |
+
+## Security & Isolation (Central Reference)
+| Area | Guidance |
+|------|----------|
+| codex‑agent echo mode | Development only (<code>CODEX_SIDECAR_ECHO=1</code>). Disable before real credentials. |
+| CodeWorld sandbox | Process RLIMITs + optional network namespace; containerize for production isolation. |
+| Mini‑Agent images | Detected but not processed (text‑only semantics). |
+| Mini‑Agent traces | Enable with <code>MINI_AGENT_STORE_TRACES=1</code> + <code>MINI_AGENT_STORE_PATH</code> to capture JSONL transcripts. |
+| Output trust | Treat LLM outputs as untrusted; verify via proofs, scoring, deterministic tests. |
+| Parallel fan‑out | Prefer ordered <code>parallel_acompletions</code>; <code>parallel_as_completed</code> is experimental/unordered. |
+
+---
+
 ## codex‑agent (OpenAI‑compatible) — Local or Docker
 
 Use either local (mini‑agent) or Docker (sidecar). Both expose the same API; do NOT append `/v1` to the base.
 
 - Start shim (default 127.0.0.1:8788):
   - `uvicorn litellm.experimental_mcp_client.mini_agent.agent_proxy:app --host 127.0.0.1 --port 8788`
-- Env (set before importing Router):
-  - `export LITELLM_ENABLE_CODEX_AGENT=1`
-  - `export CODEX_AGENT_API_BASE=http://127.0.0.1:8788`  (do NOT append `/v1`)
+- Env (set *before* importing Router):
+  - `export SCILLM_ENABLE_CODEX_AGENT=1` (alias: `LITELLM_ENABLE_CODEX_AGENT=1`)
+  - `export CODEX_AGENT_API_BASE=http://127.0.0.1:8788`  # no `/v1`
   - `# export CODEX_AGENT_API_KEY=...` (usually unset for local)
 - Verify:
   - `curl -sSf http://127.0.0.1:8788/healthz`
   - `curl -sS  http://127.0.0.1:8788/v1/models | jq .`
-  - High‑reasoning chat:
-    `curl -sS -H 'content-type: application/json' -d '{"model":"gpt-5","reasoning":{"effort":"high"},"messages":[{"role":"user","content":"say hello"}]}' http://127.0.0.1:8788/v1/chat/completions | jq -r '.choices[0].message.content'`
-- Router usage (high reasoning):
-  - `from litellm import Router; out = Router().completion(model="gpt-5", custom_llm_provider="codex-agent", messages=[{"role":"user","content":"Return STRICT JSON only: {\"ok\":true}"}], reasoning_effort="high", response_format={"type":"json_object"}); print(out.choices[0].message["content"])`
+  - (Optional) High reasoning chat:
+    ```bash
+    MODEL_ID=$(curl -sS $CODEX_AGENT_API_BASE/v1/models | jq -r '.data[0].id')
+    curl -sS -H 'content-type: application/json' \
+      -d "{\"model\":\"$MODEL_ID\",\"reasoning\":{\"effort\":\"high\"},\"messages\":[{\"role\":\"user\",\"content\":\"say hello\"}]}" \
+      $CODEX_AGENT_API_BASE/v1/chat/completions | jq -r '.choices[0].message.content'
+    ```
+- Router usage (strict JSON):
+  ```python
+  from litellm import Router
+  import os
+  router = Router()
+  MODEL_ID = os.getenv("CODEX_MODEL_ID","<MODEL_ID>")
+  out = router.completion(
+      model=MODEL_ID,
+      custom_llm_provider="codex-agent",
+      messages=[{"role":"user","content":"Return STRICT JSON only: {\"ok\":true}"}],
+      response_format={"type":"json_object"},
+      retry_enabled=True,
+      honor_retry_after=True
+  )
+  print(out.choices[0].message["content"])
+  ```
 
 Docker option: `docker compose -f local/docker/compose.agents.yml up --build -d` exposes mini‑agent on `127.0.0.1:8788` and the codex sidecar on `127.0.0.1:8077`. Point `CODEX_AGENT_API_BASE` at the one you want (no `/v1`).
 
@@ -118,8 +167,24 @@ from litellm import Router
 r = Router(model_list=[{"model_name":"gpt-5","litellm_params":{"model":"gpt-5","custom_llm_provider":"codex-agent","api_base":os.getenv("CODEX_AGENT_API_BASE"),"api_key":os.getenv("CODEX_AGENT_API_KEY")}}])
 ```
 
-Retry metadata (429 backoff)
-- Set `SCILLM_RETRY_META=1` to stamp `additional_kwargs["router"]["retries"] = {attempts,total_sleep_s,last_retry_after_s}`.
+### Retry metadata (429 backoff)
+Set:
+```
+SCILLM_RETRY_META=1
+SCILLM_LOG_JSON=1
+```
+Result snippet:
+```json
+"additional_kwargs": {
+  "router": {
+    "retries": {
+      "attempts": 2,
+      "total_sleep_s": 5.4,
+      "last_retry_after_s": 3.0
+    }
+  }
+}
+```
 
 ## Rate Limiting & Retries (429)
 
@@ -186,25 +251,12 @@ Design philosophy
 - Deterministic vs live separation: everything in `tests/` is offline; everything in `scenarios/` can touch the world.
 - Local‑first: the whole stack can run on your laptop with Docker; cloud providers are optional.
 
-## TL;DR (30 seconds)
-
-```bash
-# 1) Bring up the full stack (bridges + proxy + redis + ollama)
-docker compose -f deploy/docker/compose.scillm.stack.yml up --build -d
-
-# 2) Run two live scenarios (skip‑friendly when deps aren’t running)
-python scenarios/codeworld_judge_live.py      # compare strategies; slow path shows speed impact
-LITELLM_ENABLE_CERTAINLY=1 CERTAINLY_BRIDGE_BASE=http://127.0.0.1:8787 \
-  python scenarios/certainly_router_release.py  # Lean4 via the 'certainly' alias
-
-# 3) Everything else (mini‑agent, codex‑agent, Router demos)
-python scenarios/run_all.py
-```
+<!-- Removed duplicated TL;DR block to reduce ambiguity; canonical TL;DR lives near top. -->
 
 ### What you can do in 5 minutes
-- Prove‑aware pipelines: send natural language + structured requirements to **Certainly (Lean4)**; get proofs + diagnostics and a manifest you can replay.
-- Strategy benchmarking: run multiple concurrent algorithms with **CodeWorld**, add a domain‑specific `score()`, and rank winners with a judge.
-- Local agent loops: try **mini‑agent** (deterministic tools) or **codex‑agent** (OpenAI‑compatible sidecar with MCP tools) via the same Router calls.
+- Prove‑aware pipeline: `scenarios/certainly_router_release.py`
+- Strategy benchmark: `scenarios/codeworld_judge_live.py`
+- Agent loop experiment: mini‑agent or codex‑agent via Router with strict JSON + retries
 
 ## Certainly (Lean4 umbrella, beta)
 
@@ -233,13 +285,13 @@ Future backends (e.g., Coq) will plug into the same surface, but are out of scop
   <p>Use <code>make logo-export</code> to produce outlined SVGs and favicons in <code>local/artifacts/logo/</code>. The generated <code>favicon.ico</code> uses the icon only (no text).</p>
 </details>
 
-## Scenarios vs Tests
+## Scenarios vs Tests (Determinism Boundary)
 
 - `tests/` are strictly deterministic and offline (no network). Example: Lean4 CLI contract tests in `tests/lean4/`.
 - `scenarios/` are live end-to-end demos that may call HTTP bridges or external services. They are skip-friendly when deps aren’t running.
 - New: `scenarios/mcts_codeworld_auto_release.py` prefers a single POST to `/bridge/complete` with `strategy_config.autogenerate`; falls back to a two‑step flow if generation isn’t available.
 
-## mini‑agent and codex‑agent (one‑liners)
+## mini‑agent & codex‑agent (One‑liners)
 
 - mini‑agent (local tools, deterministic): fast, reproducible tool‑use loop for experiments. Expect final answer + metrics + parsed tool calls.
 - codex‑agent (code‑centric provider): OpenAI‑compatible sidecar with MCP tools and multi‑iteration plans; health‑checkable and Router‑native.
@@ -316,12 +368,12 @@ This repository has been renamed to **scillm** and branded as **SciLLM — a sci
 Fork Status (our fork)
 - See `docs/archive/STATE_OF_PROJECT.md` for a concise, operator‑friendly status of this fork, including the router_core seam (opt‑in), extras, mini‑agent helper, validation steps, CI, and roadmap.
 
-Fork Quick Start
-- Run `make run-scenarios` for the live scenario suite (mini-agent, codex-agent, router fan-out, Chutes, code-agent).
-- Bring up both local agents (mini + codex) with `docker compose -f local/docker/compose.agents.yml up --build -d` if you want HTTP endpoints available.
-- See QUICKSTART.md for the per-scenario commands lifted directly from `scenarios/`.
-- Mini-agent usage + troubleshooting: docs/my-website/docs/experimental/mini-agent.md
-- Project status and guardrails: docs/archive/STATE_OF_PROJECT.md
+Fork Quick Start (Recap)
+1. `make run-scenarios`
+2. (Optional) `docker compose -f local/docker/compose.agents.yml up --build -d` for mini + codex endpoints
+3. See [QUICKSTART.md](QUICKSTART.md) for scenario commands
+4. Mini‑Agent docs: `docs/my-website/docs/experimental/mini-agent.md`
+5. Project status: `docs/archive/STATE_OF_PROJECT.md`
 
 
 🚨 **Stable Release:** Use docker images with the `-stable` tag. These have undergone 12 hour load tests, before being published. [More information about the release cycle here](https://docs.litellm.ai/docs/proxy/release_cycle)
@@ -397,6 +449,45 @@ print(response)
 ```
 
 Call any model supported by a provider, with `model=<provider_name>/<model_name>`. There might be provider-specific details here, so refer to [provider docs for more information](https://docs.litellm.ai/docs/providers)
+
+OpenAI‑compatible endpoints (e.g., Chutes) — model IDs
+- Use vendor‑first IDs returned by `/v1/models` (e.g., `moonshotai/Kimi-K2-Instruct-0905`).
+- You may pass `custom_llm_provider="openai"`, but scillm now defaults to 'openai'
+  when `api_base` points at an OpenAI‑compatible gateway (e.g., `CHUTES_API_BASE`).
+- Avoid `openai/` prefixes for model names; if present, they are stripped automatically
+  for OpenAI‑compatible providers.
+
+
+Strict JSON (auto sanitize)
+- Set `SCILLM_JSON_SANITIZE=1` or pass `auto_json_sanitize=True` to normalize JSON-mode responses (removes fences/prose, validates JSON).
+- Recommended with `response_format={"type":"json_object"}` or `response_mime_type="application/json"`.
+Session preflight (optional)
+- Cache model IDs once and enable guard to validate IDs locally for the session (no extra network per call).
+```python
+from litellm.extras.preflight import preflight_models
+import os
+preflight_models(api_base=os.environ["CHUTES_API_BASE"], api_key=os.environ.get("CHUTES_API_KEY"))
+# export SCILLM_MODEL_PREFLIGHT=1
+# Optional: map doc-style names to live canonical IDs
+# export SCILLM_MODEL_ALIAS=1  # fail fast on unknown IDs using cached catalog
+```
+
+Python example (no prefix required):
+
+With aliasing (default) and cutoff override:
+```python
+from scillm import completion; import os
+print(completion(model='mistral-ai/Mistral-Small-3.2-24B', messages=[{'role':'user','content':'{}'}], response_format={'type':'json_object'}, api_base=os.environ['CHUTES_API_BASE'], api_key=os.environ.get('CHUTES_API_KEY',''), fallback_closest=True, fallback_closest_cutoff=0.58).choices[0].message.content)
+```
+```python
+from scillm import completion; import os
+r = completion(model='moonshotai/Kimi-K2-Instruct-0905',
+              messages=[{'role':'user','content':'{}'}],
+              response_format={'type':'json_object'},
+              api_base=os.environ['CHUTES_API_BASE'],
+              api_key=os.environ.get('CHUTES_API_KEY',''))
+print(r.choices[0].message.content)
+```
 
 ## Async ([Docs](https://docs.litellm.ai/docs/completion/stream#async-completion))
 
@@ -796,3 +887,38 @@ Scientists and engineers are rightly skeptical of hallucinations. SciLLM is desi
 - Gate CI on judge thresholds (% proved, correctness/speed) and return artifacts for review.
   - Model discovery: example ids like “gpt‑5” may not be present; always choose an id from `GET $CODEX_AGENT_API_BASE/v1/models`.
   - The reasoning flag (`reasoning={"effort":"high"}`) is optional; examples include it to demonstrate high‑reasoning flows.
+
+## Security & Isolation Notes
+- CodeWorld: process RLIMITs + optional `unshare -n`. Use containers for stronger isolation.
+- codex‑agent echo mode: for development only; disable before adding real credentials.
+- Validate outputs (proof artifacts, code variants) before trusting or executing downstream.
+
+## Parallel Fan‑Out (Advanced)
+Use `parallel_acompletions` (ordered) for stable batch results. Experimental `parallel_as_completed` yields as each finishes (unordered); prefer first in pipelines requiring deterministic mapping.
+
+```python
+from litellm import Router
+from litellm.router_utils.parallel_acompletion import RouterParallelRequest
+import os
+
+router = Router(model_list=[{
+  "model_name":"demo",
+  "litellm_params":{
+    "model":"<MODEL_ID>",
+    "custom_llm_provider":"codex-agent",
+    "api_base":os.getenv("CODEX_AGENT_API_BASE")
+  }
+}])
+
+reqs = [
+  RouterParallelRequest("demo", [{"role":"user","content":"List 3 primes"}]),
+  RouterParallelRequest("demo", [{"role":"user","content":"Say hi"}])
+]
+
+results = await router.parallel_acompletions(reqs, concurrency=2)
+for r in results:
+  print(r.index, bool(r.error), r.content)
+```
+
+---
+End of README refinements (duplicate TL;DR removed, placeholders clarified, security & parallel sections added).

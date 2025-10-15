@@ -146,6 +146,12 @@ codex-agent-doctor:
 	uv run python scripts/doctor/codex_agent_doctor.py
 
 .PHONY: codeworld-bridge-doctor
+
+.PHONY: model-alias-doctor
+model-alias-doctor:
+	@if [ -z "$$NAME" ]; then echo "Usage: NAME='<requested_model>' make model-alias-doctor"; exit 2; fi
+	uv run python scripts/doctor/model_alias_doctor.py --name "$$NAME"
+
 codeworld-bridge-doctor:
 	@curl -sSf $${CODEWORLD_BASE:-http://127.0.0.1:8888}/healthz | jq . || (echo "Bridge not healthy at $${CODEWORLD_BASE:-http://127.0.0.1:8888}"; exit 2)
 

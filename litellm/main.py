@@ -307,6 +307,36 @@ class Completions:
             )
         else:
             response = completion(model=model, messages=messages, **self.params)
+        # Auto JSON sanitize for JSON-mode responses (non-streaming)
+        try:
+            _auto_json = kwargs.get("auto_json_sanitize")
+            if _auto_json is None:
+                _auto_json = bool(
+                    (isinstance(response_format, dict) and response_format.get("type") == "json_object")
+                    or (kwargs.get("response_mime_type") == "application/json")
+                    or (_os.getenv("SCILLM_JSON_SANITIZE","0").lower() in {"1","true","yes"})
+                )
+            if _auto_json and not stream and isinstance(response, ModelResponse):
+                try:
+                    _msg = response.choices[0].message
+                    _content = getattr(_msg, "content", None)
+                    if isinstance(_content, str):
+                        import json as _json
+                        try:
+                            _ = _json.loads(_content)
+                        except Exception:
+                            from litellm.extras import clean_json_string as _clean
+                            _cleaned = _clean(_content)
+                            _json.loads(_cleaned)
+                            _msg.content = _cleaned
+                            if not hasattr(response, "_hidden_params") or response._hidden_params is None:
+                                response._hidden_params = {}
+                            response._hidden_params["json_sanitized"] = True
+                            response._hidden_params["json_sanitizer"] = "clean_json_string"
+                except Exception:
+                    pass
+        except Exception:
+            pass
         return response
 
 
@@ -325,6 +355,36 @@ class AsyncCompletions:
             )
         else:
             response = await acompletion(model=model, messages=messages, **self.params)
+        # Auto JSON sanitize for JSON-mode responses (non-streaming)
+        try:
+            _auto_json = kwargs.get("auto_json_sanitize")
+            if _auto_json is None:
+                _auto_json = bool(
+                    (isinstance(response_format, dict) and response_format.get("type") == "json_object")
+                    or (kwargs.get("response_mime_type") == "application/json")
+                    or (_os.getenv("SCILLM_JSON_SANITIZE","0").lower() in {"1","true","yes"})
+                )
+            if _auto_json and not stream and isinstance(response, ModelResponse):
+                try:
+                    _msg = response.choices[0].message
+                    _content = getattr(_msg, "content", None)
+                    if isinstance(_content, str):
+                        import json as _json
+                        try:
+                            _ = _json.loads(_content)
+                        except Exception:
+                            from litellm.extras import clean_json_string as _clean
+                            _cleaned = _clean(_content)
+                            _json.loads(_cleaned)
+                            _msg.content = _cleaned
+                            if not hasattr(response, "_hidden_params") or response._hidden_params is None:
+                                response._hidden_params = {}
+                            response._hidden_params["json_sanitized"] = True
+                            response._hidden_params["json_sanitizer"] = "clean_json_string"
+                except Exception:
+                    pass
+        except Exception:
+            pass
         return response
 
 
@@ -426,8 +486,98 @@ async def acompletion(
         await _handle_mock_timeout_async(mock_timeout, timeout, model)
 
     loop = asyncio.get_event_loop()
-    # Bind local variable early to avoid UnboundLocalError in downstream branches
-    custom_llm_provider = kwargs.get("custom_llm_provider", custom_llm_provider if 'custom_llm_provider' in locals() else None)
+    # Provider selection: always bind local and set safe default for OpenAI-compatible bases
+    import os as _os  # local import to avoid top-level side effects
+    _default_provider_env = _os.getenv("SCILLM_DEFAULT_PROVIDER")
+    _base_candidate = (
+        kwargs.get("api_base")
+        or base_url
+        or _os.getenv("OPENAI_BASE_URL")
+        or _os.getenv("CHUTES_API_BASE")
+    )
+    custom_llm_provider = (
+        kwargs.get("custom_llm_provider")
+        or _default_provider_env
+        or ("openai" if _base_candidate else None)
+    )
+
+    # Optional: one-time/session preflight model catalog check
+    try:
+        if _os.getenv("SCILLM_MODEL_PREFLIGHT", "0").lower() in {"1","true","yes"} and _base_candidate and isinstance(model, str):
+            from litellm.extras.preflight import catalog_for, check_model_available
+            ids = catalog_for(_base_candidate)
+            if ids:
+                _m = model.split("/", 1)[1] if (custom_llm_provider and custom_llm_provider.lower().startswith("openai") and model.startswith("openai/")) else model
+                check_model_available(_base_candidate, _m, soft=_os.getenv("SCILLM_MODEL_PREFLIGHT_SOFT","0").lower() in {"1","true","yes"})
+    except Exception:
+        pass
+
+    # Fallback-to-closest aliasing (session catalog only)
+    try:
+        _fb = kwargs.get("fallback_closest")
+        if _fb is None:
+            _fb = True  # default on
+        _cut = kwargs.get("fallback_closest_cutoff")
+        if _cut is None:
+            try:
+                _cut = float(_os.getenv("SCILLM_MODEL_ALIAS_CUTOFF", "0.55") or "0.55")
+            except Exception:
+                _cut = 0.55
+        if _fb and _base_candidate and isinstance(model, str) and _os.getenv("SCILLM_MODEL_PREFLIGHT", "0").lower() in {"1","true","yes"} and _os.getenv("SCILLM_MODEL_ALIAS","1").lower() in {"1","true","yes"}:
+            from litellm.extras.preflight import catalog_for
+            ids = catalog_for(_base_candidate)
+            if ids and model not in ids:
+                try:
+                    from litellm.extras.model_alias import resolve_model_id
+                    _requested = model.split("/", 1)[1] if (custom_llm_provider and custom_llm_provider.lower().startswith("openai") and model.startswith("openai/")) else model
+                    _resolved = resolve_model_id(api_base=_base_candidate, requested=_requested, cutoff=float(_cut))
+                    if _resolved:
+                        model = _resolved
+                        kwargs["_requested_model_id"] = _requested
+                        kwargs["_resolved_model_id"] = model
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
+    # Optional: one-time/session preflight model catalog check
+    try:
+        if _os.getenv("SCILLM_MODEL_PREFLIGHT", "0").lower() in {"1","true","yes"} and _base_candidate and isinstance(model, str):
+            from litellm.extras.preflight import catalog_for, check_model_available
+            ids = catalog_for(_base_candidate)
+            if ids:
+                _m = model.split("/", 1)[1] if (custom_llm_provider and custom_llm_provider.lower().startswith("openai") and model.startswith("openai/")) else model
+                check_model_available(_base_candidate, _m, soft=_os.getenv("SCILLM_MODEL_PREFLIGHT_SOFT","0").lower() in {"1","true","yes"})
+    except Exception:
+        pass
+
+    # Fallback-to-closest aliasing (session catalog only)
+    try:
+        _fb = kwargs.get("fallback_closest")
+        if _fb is None:
+            _fb = True  # default on
+        _cut = kwargs.get("fallback_closest_cutoff")
+        if _cut is None:
+            try:
+                _cut = float(_os.getenv("SCILLM_MODEL_ALIAS_CUTOFF", "0.55") or "0.55")
+            except Exception:
+                _cut = 0.55
+        if _fb and _base_candidate and isinstance(model, str) and _os.getenv("SCILLM_MODEL_PREFLIGHT", "0").lower() in {"1","true","yes"} and _os.getenv("SCILLM_MODEL_ALIAS","1").lower() in {"1","true","yes"}:
+            from litellm.extras.preflight import catalog_for
+            ids = catalog_for(_base_candidate)
+            if ids and model not in ids:
+                try:
+                    from litellm.extras.model_alias import resolve_model_id
+                    _requested = model.split("/", 1)[1] if (custom_llm_provider and custom_llm_provider.lower().startswith("openai") and model.startswith("openai/")) else model
+                    _resolved = resolve_model_id(api_base=_base_candidate, requested=_requested, cutoff=float(_cut))
+                    if _resolved:
+                        model = _resolved
+                        kwargs["_requested_model_id"] = _requested
+                        kwargs["_resolved_model_id"] = model
+                except Exception:
+                    pass
+    except Exception:
+        pass
 
     ## PROMPT MANAGEMENT HOOKS ##
     #########################################################
@@ -524,6 +674,36 @@ async def acompletion(
             raise Exception(
                 "No response from fallbacks. Got none. Turn on `litellm.set_verbose=True` to see more details."
             )
+        # Auto JSON sanitize for JSON-mode responses (non-streaming)
+        try:
+            _auto_json = kwargs.get("auto_json_sanitize")
+            if _auto_json is None:
+                _auto_json = bool(
+                    (isinstance(response_format, dict) and response_format.get("type") == "json_object")
+                    or (kwargs.get("response_mime_type") == "application/json")
+                    or (_os.getenv("SCILLM_JSON_SANITIZE","0").lower() in {"1","true","yes"})
+                )
+            if _auto_json and not stream and isinstance(response, ModelResponse):
+                try:
+                    _msg = response.choices[0].message
+                    _content = getattr(_msg, "content", None)
+                    if isinstance(_content, str):
+                        import json as _json
+                        try:
+                            _ = _json.loads(_content)
+                        except Exception:
+                            from litellm.extras import clean_json_string as _clean
+                            _cleaned = _clean(_content)
+                            _json.loads(_cleaned)
+                            _msg.content = _cleaned
+                            if not hasattr(response, "_hidden_params") or response._hidden_params is None:
+                                response._hidden_params = {}
+                            response._hidden_params["json_sanitized"] = True
+                            response._hidden_params["json_sanitizer"] = "clean_json_string"
+                except Exception:
+                    pass
+        except Exception:
+            pass
         return response
 
     ### APPLY MOCK DELAY ###
@@ -571,6 +751,36 @@ async def acompletion(
             response.set_logging_event_loop(
                 loop=loop
             )  # sets the logging event loop if the user does sync streaming (e.g. on proxy for sagemaker calls)
+        # Auto JSON sanitize for JSON-mode responses (non-streaming)
+        try:
+            _auto_json = kwargs.get("auto_json_sanitize")
+            if _auto_json is None:
+                _auto_json = bool(
+                    (isinstance(response_format, dict) and response_format.get("type") == "json_object")
+                    or (kwargs.get("response_mime_type") == "application/json")
+                    or (_os.getenv("SCILLM_JSON_SANITIZE","0").lower() in {"1","true","yes"})
+                )
+            if _auto_json and not stream and isinstance(response, ModelResponse):
+                try:
+                    _msg = response.choices[0].message
+                    _content = getattr(_msg, "content", None)
+                    if isinstance(_content, str):
+                        import json as _json
+                        try:
+                            _ = _json.loads(_content)
+                        except Exception:
+                            from litellm.extras import clean_json_string as _clean
+                            _cleaned = _clean(_content)
+                            _json.loads(_cleaned)
+                            _msg.content = _cleaned
+                            if not hasattr(response, "_hidden_params") or response._hidden_params is None:
+                                response._hidden_params = {}
+                            response._hidden_params["json_sanitized"] = True
+                            response._hidden_params["json_sanitizer"] = "clean_json_string"
+                except Exception:
+                    pass
+        except Exception:
+            pass
         return response
     except Exception as e:
         custom_llm_provider = custom_llm_provider or "openai"
@@ -1003,6 +1213,54 @@ def completion(  # type: ignore # noqa: PLR0915
     force_timeout = kwargs.get("force_timeout", 600)  ## deprecated
     logger_fn = kwargs.get("logger_fn", None)
     verbose = kwargs.get("verbose", False)
+    # Provider selection: always bind local and set safe default for OpenAI-compatible bases
+    import os as _os  # local import to avoid top-level side effects
+    _default_provider_env = _os.getenv("SCILLM_DEFAULT_PROVIDER")
+    _base_candidate = (
+        kwargs.get("api_base")
+        or base_url
+        or _os.getenv("OPENAI_BASE_URL")
+        or _os.getenv("CHUTES_API_BASE")
+    )
+    
+    # Optional: one-time/session preflight model catalog check
+    try:
+        if _os.getenv("SCILLM_MODEL_PREFLIGHT", "0").lower() in {"1","true","yes"} and _base_candidate and isinstance(model, str):
+            from litellm.extras.preflight import catalog_for, check_model_available
+            ids = catalog_for(_base_candidate)
+            if ids:
+                _m = model.split("/", 1)[1] if (custom_llm_provider and custom_llm_provider.lower().startswith("openai") and model.startswith("openai/")) else model
+                check_model_available(_base_candidate, _m, soft=_os.getenv("SCILLM_MODEL_PREFLIGHT_SOFT","0").lower() in {"1","true","yes"})
+    except Exception:
+        pass
+
+    # Fallback-to-closest aliasing (session catalog only)
+    try:
+        _fb = kwargs.get("fallback_closest")
+        if _fb is None:
+            _fb = True  # default on
+        _cut = kwargs.get("fallback_closest_cutoff")
+        if _cut is None:
+            try:
+                _cut = float(_os.getenv("SCILLM_MODEL_ALIAS_CUTOFF", "0.55") or "0.55")
+            except Exception:
+                _cut = 0.55
+        if _fb and _base_candidate and isinstance(model, str) and _os.getenv("SCILLM_MODEL_PREFLIGHT", "0").lower() in {"1","true","yes"} and _os.getenv("SCILLM_MODEL_ALIAS","1").lower() in {"1","true","yes"}:
+            from litellm.extras.preflight import catalog_for
+            ids = catalog_for(_base_candidate)
+            if ids and model not in ids:
+                try:
+                    from litellm.extras.model_alias import resolve_model_id
+                    _requested = model.split("/", 1)[1] if (custom_llm_provider and custom_llm_provider.lower().startswith("openai") and model.startswith("openai/")) else model
+                    _resolved = resolve_model_id(api_base=_base_candidate, requested=_requested, cutoff=float(_cut))
+                    if _resolved:
+                        model = _resolved
+                        kwargs["_requested_model_id"] = _requested
+                        kwargs["_resolved_model_id"] = model
+                except Exception:
+                    pass
+    except Exception:
+        pass
     # ensure local var bound before any usage downstream
     # ensure local var bound before any reference below
     if "custom_llm_provider" in kwargs and kwargs.get("custom_llm_provider") is not None:
@@ -3670,6 +3928,36 @@ def completion(  # type: ignore # noqa: PLR0915
             raise LiteLLMUnknownProvider(
                 model=model, custom_llm_provider=custom_llm_provider
             )
+        # Auto JSON sanitize for JSON-mode responses (non-streaming)
+        try:
+            _auto_json = kwargs.get("auto_json_sanitize")
+            if _auto_json is None:
+                _auto_json = bool(
+                    (isinstance(response_format, dict) and response_format.get("type") == "json_object")
+                    or (kwargs.get("response_mime_type") == "application/json")
+                    or (_os.getenv("SCILLM_JSON_SANITIZE","0").lower() in {"1","true","yes"})
+                )
+            if _auto_json and not stream and isinstance(response, ModelResponse):
+                try:
+                    _msg = response.choices[0].message
+                    _content = getattr(_msg, "content", None)
+                    if isinstance(_content, str):
+                        import json as _json
+                        try:
+                            _ = _json.loads(_content)
+                        except Exception:
+                            from litellm.extras import clean_json_string as _clean
+                            _cleaned = _clean(_content)
+                            _json.loads(_cleaned)
+                            _msg.content = _cleaned
+                            if not hasattr(response, "_hidden_params") or response._hidden_params is None:
+                                response._hidden_params = {}
+                            response._hidden_params["json_sanitized"] = True
+                            response._hidden_params["json_sanitizer"] = "clean_json_string"
+                except Exception:
+                    pass
+        except Exception:
+            pass
         return response
     except Exception as e:
         ## Map to OpenAI Exception
@@ -3797,6 +4085,36 @@ async def aembedding(*args, **kwargs) -> EmbeddingResponse:
             raise ValueError(
                 "Unable to get Embedding Response. Please pass a valid llm_provider."
             )
+        # Auto JSON sanitize for JSON-mode responses (non-streaming)
+        try:
+            _auto_json = kwargs.get("auto_json_sanitize")
+            if _auto_json is None:
+                _auto_json = bool(
+                    (isinstance(response_format, dict) and response_format.get("type") == "json_object")
+                    or (kwargs.get("response_mime_type") == "application/json")
+                    or (_os.getenv("SCILLM_JSON_SANITIZE","0").lower() in {"1","true","yes"})
+                )
+            if _auto_json and not stream and isinstance(response, ModelResponse):
+                try:
+                    _msg = response.choices[0].message
+                    _content = getattr(_msg, "content", None)
+                    if isinstance(_content, str):
+                        import json as _json
+                        try:
+                            _ = _json.loads(_content)
+                        except Exception:
+                            from litellm.extras import clean_json_string as _clean
+                            _cleaned = _clean(_content)
+                            _json.loads(_cleaned)
+                            _msg.content = _cleaned
+                            if not hasattr(response, "_hidden_params") or response._hidden_params is None:
+                                response._hidden_params = {}
+                            response._hidden_params["json_sanitized"] = True
+                            response._hidden_params["json_sanitizer"] = "clean_json_string"
+                except Exception:
+                    pass
+        except Exception:
+            pass
         return response
     except Exception as e:
         custom_llm_provider = custom_llm_provider or "openai"
@@ -4691,6 +5009,36 @@ def embedding(  # noqa: PLR0915
             raise LiteLLMUnknownProvider(
                 model=model, custom_llm_provider=custom_llm_provider
             )
+        # Auto JSON sanitize for JSON-mode responses (non-streaming)
+        try:
+            _auto_json = kwargs.get("auto_json_sanitize")
+            if _auto_json is None:
+                _auto_json = bool(
+                    (isinstance(response_format, dict) and response_format.get("type") == "json_object")
+                    or (kwargs.get("response_mime_type") == "application/json")
+                    or (_os.getenv("SCILLM_JSON_SANITIZE","0").lower() in {"1","true","yes"})
+                )
+            if _auto_json and not stream and isinstance(response, ModelResponse):
+                try:
+                    _msg = response.choices[0].message
+                    _content = getattr(_msg, "content", None)
+                    if isinstance(_content, str):
+                        import json as _json
+                        try:
+                            _ = _json.loads(_content)
+                        except Exception:
+                            from litellm.extras import clean_json_string as _clean
+                            _cleaned = _clean(_content)
+                            _json.loads(_cleaned)
+                            _msg.content = _cleaned
+                            if not hasattr(response, "_hidden_params") or response._hidden_params is None:
+                                response._hidden_params = {}
+                            response._hidden_params["json_sanitized"] = True
+                            response._hidden_params["json_sanitizer"] = "clean_json_string"
+                except Exception:
+                    pass
+        except Exception:
+            pass
         return response
     except Exception as e:
         ## LOGGING
@@ -5273,6 +5621,36 @@ async def atranscription(*args, **kwargs) -> TranscriptionResponse:
             raise ValueError(
                 f"Invalid response from transcription provider, expected TranscriptionResponse, but got {type(response)}"
             )
+        # Auto JSON sanitize for JSON-mode responses (non-streaming)
+        try:
+            _auto_json = kwargs.get("auto_json_sanitize")
+            if _auto_json is None:
+                _auto_json = bool(
+                    (isinstance(response_format, dict) and response_format.get("type") == "json_object")
+                    or (kwargs.get("response_mime_type") == "application/json")
+                    or (_os.getenv("SCILLM_JSON_SANITIZE","0").lower() in {"1","true","yes"})
+                )
+            if _auto_json and not stream and isinstance(response, ModelResponse):
+                try:
+                    _msg = response.choices[0].message
+                    _content = getattr(_msg, "content", None)
+                    if isinstance(_content, str):
+                        import json as _json
+                        try:
+                            _ = _json.loads(_content)
+                        except Exception:
+                            from litellm.extras import clean_json_string as _clean
+                            _cleaned = _clean(_content)
+                            _json.loads(_cleaned)
+                            _msg.content = _cleaned
+                            if not hasattr(response, "_hidden_params") or response._hidden_params is None:
+                                response._hidden_params = {}
+                            response._hidden_params["json_sanitized"] = True
+                            response._hidden_params["json_sanitizer"] = "clean_json_string"
+                except Exception:
+                    pass
+        except Exception:
+            pass
         return response
     except Exception as e:
         custom_llm_provider = custom_llm_provider or "openai"
@@ -6164,6 +6542,36 @@ def stream_chunk_builder(  # noqa: PLR0915
                 usage, "cost", logging_obj._response_cost_calculator(result=response)
             )
 
+        # Auto JSON sanitize for JSON-mode responses (non-streaming)
+        try:
+            _auto_json = kwargs.get("auto_json_sanitize")
+            if _auto_json is None:
+                _auto_json = bool(
+                    (isinstance(response_format, dict) and response_format.get("type") == "json_object")
+                    or (kwargs.get("response_mime_type") == "application/json")
+                    or (_os.getenv("SCILLM_JSON_SANITIZE","0").lower() in {"1","true","yes"})
+                )
+            if _auto_json and not stream and isinstance(response, ModelResponse):
+                try:
+                    _msg = response.choices[0].message
+                    _content = getattr(_msg, "content", None)
+                    if isinstance(_content, str):
+                        import json as _json
+                        try:
+                            _ = _json.loads(_content)
+                        except Exception:
+                            from litellm.extras import clean_json_string as _clean
+                            _cleaned = _clean(_content)
+                            _json.loads(_cleaned)
+                            _msg.content = _cleaned
+                            if not hasattr(response, "_hidden_params") or response._hidden_params is None:
+                                response._hidden_params = {}
+                            response._hidden_params["json_sanitized"] = True
+                            response._hidden_params["json_sanitizer"] = "clean_json_string"
+                except Exception:
+                    pass
+        except Exception:
+            pass
         return response
     except Exception as e:
         verbose_logger.exception(
