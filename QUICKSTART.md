@@ -5,13 +5,33 @@
   <img src="SciLLM_icon.svg" alt="SciLLM Icon" width="32" />
 </p>
 
-# Lean4 Prover — Quickstart
+# SciLLM Multi‑Surface Quickstart
 
-This quickstart mirrors the SciLLM (LiteLLM scientific fork) conventions. Scenarios live under
-`scenarios/` and produce human- and machine-friendly JSON that can be embedded
-in readiness reports or review bundles.
+> Environment Prefix Preference: Use `SCILLM_` (e.g. `SCILLM_ENABLE_CODEX_AGENT=1`). Legacy `LITELLM_` variables still work.
+> Model IDs: Replace `<MODEL_ID>` placeholders with real IDs from `GET $CODEX_AGENT_API_BASE/v1/models`.
 
-## 1) Install
+Former references to `gpt-5` were illustrative; they are now replaced with `<MODEL_ID>`.
+
+This unified quickstart covers:
+1. codex‑agent (OpenAI‑compatible shim / sidecar)
+2. mini‑agent (local deterministic MCP‑style loop)
+3. CodeWorld (strategy orchestration + MCTS)
+4. Certainly / Lean4 bridge
+
+If you only need Lean4 specifics, see `LEAN4_QUICKSTART.md` (can be factored separately).
+## 0) Prerequisites
+
+| Item | Minimum | Notes |
+|------|---------|-------|
+| Python | 3.10.11 | Tested with uv; 3.11+ generally fine |
+| uv | Latest | For environment + sync speed |
+| Docker | 24+ | Required for sidecars/full stack |
+| jq | Any | For JSON filtering in shell examples |
+| Redis (optional) | 6+ | Caching & session history; auto‑fallback to in‑memory |
+
+> Replace `<MODEL_ID>` wherever shown with an actual ID discovered via `GET $CODEX_AGENT_API_BASE/v1/models` or your provider listing.
+
+## 1) Install (Local Dev)
 
 ```bash
 uv venv --python=3.10.11 .venv
@@ -20,7 +40,7 @@ uv pip install -e .[dev]
 cp env.example .env  # optional, enables cached Lean/LiteLLM settings
 ```
 
-## Mini‑Agent & codex‑agent (OpenAI‑compatible) — 60‑sec local setup
+## 2) Mini‑Agent & codex‑agent (OpenAI‑compatible) — 60‑sec local setup (Zero‑ambiguity)
 
 Happy Path (copy/paste):
 - Run ONE of these: local mini‑agent or Docker sidecar
@@ -35,32 +55,66 @@ Extractor pipeline — zero‑ambiguity checklist (copy/paste)
 source .venv/bin/activate
 set -a; [ -f .env ] && source .env; set +a
 
-# 1) Choose ONE base (no /v1): mini‑agent (8788) or sidecar (8077)
-export CODEX_AGENT_API_BASE=http://127.0.0.1:8788   # or http://127.0.0.1:8077
+# 1) Choose ONE base (no /v1) mini‑agent (8788) or sidecar (8077)
+export CODEX_AGENT_API_BASE=http://127.0.0.1:8788  # or 8077
 
 # 2) Map to OpenAI envs expected by the extractor HTTP client
-export OPENAI_BASE_URL="$CODEX_AGENT_API_BASE"     # do NOT append /v1
-export OPENAI_API_KEY="${CODEX_AGENT_API_KEY:-none}"
+export OPENAI_BASE_URL="$CODEX_AGENT_API_BASE"     # no /v1 suffix
+export OPENAI_API_KEY="${CODEX_AGENT_API_KEY:-none}"  # 'none' for echo/dev
 
 # 3) Sanity probes
 curl -sSf "$CODEX_AGENT_API_BASE/healthz"
 curl -sS  "$CODEX_AGENT_API_BASE/v1/models" | jq -r '.data[].id'
 
-# 4) High‑reasoning chat (pick a valid MODEL from the line above, e.g., gpt-5)
+# 4) (Optional) High‑reasoning chat
+MODEL_ID=$(curl -sS "$CODEX_AGENT_API_BASE/v1/models" | jq -r '.data[0].id')
 curl -sS "$CODEX_AGENT_API_BASE/v1/chat/completions" \
   -H 'Content-Type: application/json' \
-  -d '{"model":"gpt-5","reasoning":{"effort":"high"},"messages":[{"role":"user","content":"ping"}]}' \
+  -d "{\"model\":\"$MODEL_ID\",\"reasoning\":{\"effort\":\"high\"},\"messages\":[{\"role\":\"user\",\"content\":\"ping\"}]}" \
   | jq -r '.choices[0].message.content'
 ```
 
-Provider name and model id — avoid confusion
-- Canonical provider is `codex-agent`. Aliases like `code-agent`/`code_agent` are discouraged.
-- You can call with either:
-  - `model="codex-agent/<id>"` (e.g., `codex-agent/gpt-5`), or
-  - `model="<id>", custom_llm_provider="codex-agent"`.
-- Always discover a valid `<id>` via `GET $CODEX_AGENT_API_BASE/v1/models`.
+Provider name & model ID — avoid confusion
+- `model="codex-agent/<MODEL_ID>"`, or
+- `model="<MODEL_ID>", custom_llm_provider="codex-agent"`.
+- Always discover a valid `<MODEL_ID>` via `GET $CODEX_AGENT_API_BASE/v1/models`.
 
-Extractor pipeline (HTTP client) env mapping
+One-time session preflight (optional)
+
+JSON mode (auto sanitize)
+- Enable once so responses in JSON mode are cleaned automatically if providers return fences/prose.
+  - `export SCILLM_JSON_SANITIZE=1`
+  - Or pass `auto_json_sanitize=True` to completion()/acompletion() when using `response_format={"type":"json_object"}` or `response_mime_type="application/json"`.
+- Cache model IDs once at process start to avoid repeated lookups and fail fast on unknown IDs.
+  ```python
+  from litellm.extras.preflight import preflight_models
+  import os
+  preflight_models(api_base=os.environ["CHUTES_API_BASE"], api_key=os.environ.get("CHUTES_API_KEY"))
+  # Enable guard in calls (reads cached set; zero network):
+  #   export SCILLM_MODEL_PREFLIGHT=1
+# Optional: enable alias resolution for doc-style names -> canonical IDs
+export SCILLM_MODEL_ALIAS=1
+  ```
+
+
+
+OpenAI‑compatible (Chutes) usage note
+- Optional: `fallback_closest=True` (default) resolves unknown doc-style names to the closest live ID from your cached catalog. Tune with `fallback_closest_cutoff=0.55`.
+- Use vendor‑first model IDs from `/v1/models` (e.g., `moonshotai/Kimi-K2-Instruct-0905`).
+- Passing `custom_llm_provider="openai"` is optional — scillm now defaults
+  to 'openai' when `api_base` points to an OpenAI‑compatible gateway (e.g., `CHUTES_API_BASE`).
+- Avoid adding an `openai/` prefix; if present, it will be stripped for OpenAI‑compatible providers.
+
+Python one‑liner (Chutes):
+```python
+from scillm import completion; import os
+print(completion(model='moonshotai/Kimi-K2-Instruct-0905',
+                messages=[{'role':'user','content':'{}'}],
+                response_format={'type':'json_object'},
+                api_base=os.environ['CHUTES_API_BASE'],
+                api_key=os.environ.get('CHUTES_API_KEY','')).choices[0].message.content)
+```
+Extractor pipeline (HTTP client) env mapping (single place; reused later)
 
 ```bash
 # If your client expects OpenAI envs, map them to codex‑agent
@@ -68,7 +122,7 @@ export OPENAI_BASE_URL="$CODEX_AGENT_API_BASE"     # do NOT append /v1
 export OPENAI_API_KEY="${CODEX_AGENT_API_KEY:-none}"
 ```
 
-Mini‑Agent (MCP) quickstart
+### Mini‑Agent (MCP) Quickstart
 
 ```bash
 # Start the MCP-style mini‑agent locally (OpenAI‑compatible shim for tools)
@@ -82,9 +136,14 @@ curl -sSf http://127.0.0.1:8788/ready || true
 python examples/mini_agent_inprocess.py
 ```
 
-Notes
-- Mini‑Agent uses MCP semantics for tool execution. For HTTP usage, point clients at 127.0.0.1:8788 (no /v1 path) using the provided agent proxy schema.
-- For lessons learned and limits, see CONTEXT.md (Extractor Pipeline and runbook pointers).
+Notes:
+- Mini‑Agent uses MCP‑style semantics for tool execution. Point HTTP clients at `$CODEX_AGENT_API_BASE` with no `/v1` suffix (provider adds endpoints).
+- Limitations: no streaming responses; images in multi‑part messages are detected but not processed.
+- Trace storage (optional):
+  ```
+  export MINI_AGENT_STORE_TRACES=1
+  export MINI_AGENT_STORE_PATH=local/artifacts/mini_agent_traces.jsonl
+  ```
 
 Use this if you want an OpenAI‑style endpoint for agent/router tests without any external gateway.
 
@@ -94,7 +153,7 @@ Use this if you want an OpenAI‑style endpoint for agent/router tests without a
 uvicorn litellm.experimental_mcp_client.mini_agent.agent_proxy:app --host 127.0.0.1 --port 8788
 ```
 
-2) Export env (before importing Router). Do NOT append `/v1` to the base.
+2) Export env (before importing Router). (No `/v1`.)
 
 ```bash
 export LITELLM_ENABLE_CODEX_AGENT=1
@@ -105,31 +164,31 @@ export CODEX_AGENT_API_BASE=http://127.0.0.1:8788
 3) Quick verify
 
 ```bash
-curl -sSf http://127.0.0.1:8788/healthz
+curl -sSf "$CODEX_AGENT_API_BASE/healthz"
 curl -sS -H 'content-type: application/json' \
-  -d '{"model":"gpt-5","messages":[{"role":"user","content":"say hello"}]}' \
-  http://127.0.0.1:8788/v1/chat/completions | jq -r '.choices[0].message.content'
+  -d '{"model":"<MODEL_ID>","messages":[{"role":"user","content":"say hello"}]}' \
+  "$CODEX_AGENT_API_BASE/v1/chat/completions" | jq -r '.choices[0].message.content'
 ```
 
-Also available (sidecar 8077):
+Also available (sidecar 8077) — identical API surface:
 
 ```bash
 docker compose -f local/docker/compose.agents.yml up --build -d codex-sidecar
 export CODEX_AGENT_API_BASE=http://127.0.0.1:8077   # no /v1
 curl -sSf http://127.0.0.1:8077/healthz
-curl -sS  http://127.0.0.1:8077/v1/models | jq .
+curl -sS  "$CODEX_AGENT_API_BASE/v1/models" | jq .
 curl -sS -H 'content-type: application/json' \
-  -d '{"model":"gpt-5","reasoning":{"effort":"high"},"messages":[{"role":"system","content":"Return STRICT JSON only: {\"ok\": true}"}]}' \
-  http://127.0.0.1:8077/v1/chat/completions | jq -r '.choices[0].message.content'
+  -d '{"model":"<MODEL_ID>","reasoning":{"effort":"high"},"messages":[{"role":"system","content":"Return STRICT JSON only: {\"ok\": true}"}]}' \
+  "$CODEX_AGENT_API_BASE/v1/chat/completions" | jq -r '.choices[0].message.content'
 ```
 
-Doctor (one‑shot):
+Doctor (one‑shot self‑test):
 
 ```bash
 make codex-agent-doctor
 ```
 
-Capabilities and expectations
+Capabilities & expectations
 
 - Mini‑agent (local shim):
   - Text‑only, non‑streaming; images are ignored
@@ -138,7 +197,7 @@ Capabilities and expectations
 - Sidecar (Docker):
   - OpenAI‑compatible pass‑through; streaming/usage/vision depend on the upstream provider
 
-Strict JSON and stop tokens
+Strict JSON & stop tokens (client‑side enforcement)
 
 - Gateway does not enforce strict JSON. Enforce client‑side and validate:
 
@@ -146,7 +205,7 @@ Strict JSON and stop tokens
 from openai import OpenAI
 client = OpenAI(base_url=os.environ["OPENAI_BASE_URL"], api_key=os.getenv("OPENAI_API_KEY","none"))
 resp = client.chat.completions.create(
-    model="gpt-5",
+    model="<MODEL_ID>",
     response_format={"type":"json_object"},
     stop=["```","END_JSON"],
     messages=[{"role":"user","content":"Return {\\"ok\\": true} as JSON only."}],
@@ -155,7 +214,7 @@ data = resp.choices[0].message.content
 # validate/strip here per your pipeline
 ```
 
-Client cache (optional; LiteLLM)
+Client cache (optional; LiteLLM) — in‑memory fallback if Redis absent
 
 ```python
 from litellm.extras import initialize_litellm_cache
@@ -168,14 +227,14 @@ litellm.cache = Cache(type=LiteLLMCacheType.REDIS, host=os.getenv("REDIS_HOST","
 litellm.enable_cache()
 ```
 
-Auth for codex‑agent sidecar (when echo is disabled)
+Auth for codex‑agent sidecar (when echo disabled)
 
 - The compose sets `CODEX_SIDECAR_ECHO=1` by default (no creds required). To run with real creds:
   - Remove or set `CODEX_SIDECAR_ECHO: "0"` for codex‑sidecar in `local/docker/compose.agents.yml`.
   - Mount your auth: `- ${HOME}/.codex/auth.json:/root/.codex/auth.json:ro`.
   - Verify inside Docker: `python debug/check_codex_auth.py --container litellm-codex-agent`.
 
-Debug probes
+Debug probes (transport sanity)
 
 ```bash
 python debug/verify_mini_agent.py           # mini‑agent /ready + /agent/run
@@ -183,13 +242,25 @@ python debug/verify_codex_agent_docker.py   # sidecar /healthz + /v1 endpoints
 python debug/codex_parallel_probe.py        # Router.parallel_acompletions → codex‑agent echo
 ```
 
+### Parallel Fan‑Out (Advanced)
+Ordered parallel:
+```python
+results = await Router().parallel_acompletions(reqs, concurrency=8)
+for r in results:
+    print(r.index, r.content, r.error)
+```
+Result object fields: `index, request, response, error, content`.
+
+Unordered experimental:
+`async for r in Router().parallel_as_completed(reqs): ...` (surface may change; prefer the ordered variant for pipelines).
+
 4) Router usage (copy/paste)
 
 ```python
 from litellm import Router
 r = Router()
 out = r.completion(
-    model="gpt-5",
+    model="<MODEL_ID>",
     custom_llm_provider="codex-agent",
     messages=[{"role":"user","content":"Return STRICT JSON only: {\"ok\":true}"}],
     reasoning_effort="high",
@@ -212,7 +283,7 @@ Troubleshooting — fastest fixes
 - `Skipping codex-agent scenario (...)`: set `CODEX_AGENT_API_BASE` and retry.
 - Base includes `/v1`: remove it; the adapter expects a base without the suffix.
 
-## 2) Run release scenarios (fast confidence)
+## 3) Run release scenarios (fast confidence)
 
 ```bash
 make run-scenarios
@@ -220,14 +291,14 @@ make run-scenarios
 
 This executes `scenarios/run_all.py` which currently runs:
 
-1. `lean4_batch_demo.py` – live E2E `cli_mini batch` using your configured Lean4 env (LLM/Docker).
-2. `lean4_suggest_demo.py` – live single requirement “run” flow.
+1. `lean4_batch_demo.py` – live E2E proof batch
+2. `lean4_suggest_demo.py` – single requirement flow
 
 Each script prints the exact command, proof statistics, and normalized JSON
 summary. Use `SCENARIOS_STOP_ON_FIRST_FAILURE=1 make run-scenarios` to
 short-circuit after the first regression.
 
-## 3) Run scenarios individually
+## 4) Run scenarios individually
 
 ```bash
 # Deterministic batch proof (override input via LEAN4_SCENARIO_BATCH_INPUT)
@@ -387,7 +458,7 @@ Notes:
 ```
 
 
-## 4) Deterministic tests and readiness
+## 5) Deterministic tests & readiness
 
 ```bash
 # Full test suite (unit + integration)
@@ -428,9 +499,44 @@ Generate demo graphs:
 uv run scripts/viewers/make_synthetic_graph.py prototypes/lemma-graph-viewer/public/graph.json
 ```
 
-### Need more?
-- `docs/EXTRACTOR_INTEGRATION.md`—Stage 08 batch contract
-- `docs/readiness/FINAL_MANUAL_CHECKLIST.md`—manual gate after `mvp_check`
-- `feature_recipes/`—sample LiteLLM bridge showing how Router calls could invoke
-  Lean4 via the `/bridge` surface
-> Looking for the full SciLLM stack (Lean4/Certainly + CodeWorld + proxy)? See `QUICKSTART.md` for Docker bring‑up (`deploy/docker/compose.scillm.stack.yml`) and scenarios covering both bridges.
+### Additional References
+- `docs/EXTRACTOR_INTEGRATION.md` — batch contract
+- `docs/readiness/FINAL_MANUAL_CHECKLIST.md` — post‐`mvp_check` manual gate
+- `feature_recipes/` — focused examples (parallel completion, MCTS, bridges)
+- `FEATURES.md` — concise matrix & patterns
+
+### Environment Summary (Cheat Sheet)
+| Category | Variables | Notes |
+|----------|-----------|-------|
+| Enable flags | `SCILLM_ENABLE_CODEX_AGENT`, `SCILLM_ENABLE_CODEWORLD`, `SCILLM_ENABLE_LEAN4`, `SCILLM_ENABLE_MINI_AGENT` | Prefer `SCILLM_` prefix |
+| Bases | `CODEX_AGENT_API_BASE`, `CODEWORLD_BASE`, `LEAN4_BRIDGE_BASE` / `CERTAINLY_BRIDGE_BASE` | No `/v1` on codex base |
+| Optional tuning | `SCILLM_DETERMINISTIC_SEED`, `CODEWORLD_MCTS_AUTO_*` | Determinism & MCTS |
+| Retry/logging | `SCILLM_RETRY_META`, `SCILLM_LOG_JSON`, `SCILLM_RETRY_LOG_EVERY` | Structured telemetry |
+| Mini‑agent tracing | `MINI_AGENT_STORE_TRACES=1`, `MINI_AGENT_STORE_PATH` | Append JSONL traces |
+| Warmups/readiness | `STRICT_WARMUPS`, `READINESS_LIVE`, `STRICT_READY`, `READINESS_EXPECT` | Gates & provider expectations |
+
+Security note: Disable codex sidecar echo (remove `CODEX_SIDECAR_ECHO=1`) before supplying real credentials.
+
+---
+End of Multi‑Surface Quickstart.
+
+
+### Retry Metadata Example
+Enable:
+```
+export SCILLM_RETRY_META=1
+```
+Excerpt from response (when retries occur):
+```json
+"additional_kwargs": {
+  "router": { "retries": { "attempts": 2, "total_sleep_s": 5.4, "last_retry_after_s": 3.0 } }
+}
+```
+
+### Security & Isolation (Summary)
+| Area | Note |
+|------|------|
+| codex‑agent echo | Disable before real credentials (remove `CODEX_SIDECAR_ECHO=1`). |
+| CodeWorld sandbox | Process RLIMITs + optional network namespace; use containers for stronger guarantees. |
+| Mini‑Agent outputs | Treat as untrusted until validated. |
+| Model reasoning flag | Optional; omit if provider rejects it. |

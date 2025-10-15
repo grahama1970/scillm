@@ -1,22 +1,37 @@
 # SciLLM Features (Concise, Agent‑Friendly)
 
-This file is a quick, practical map of SciLLM’s capabilities, what they do, and how to use them. It favors one clear path per feature with minimal knobs. All paths work with `uv` (see pyproject and Makefile).
+This file is a quick, practical map of SciLLM’s capabilities, what they do, and how to use them. It favors:
+1. One paved path per feature
+2. Minimal knobs (advanced flags linked, not repeated)
+3. Copy/paste blocks that run after `uv sync`
+
+New in this revision:
+- Replaced placeholder model IDs (`gpt-5`) with `<MODEL_ID>` guidance
+- Added retry metadata JSON example
+- Documented mini‑agent trace storage + security cautions
+- Clarified parallel results object shape
+- Explicit environment prefix guidance (SCILLM_* over legacy LITELLM_*)
 
 > Conventions
 > - Imports assume: `from litellm import Router, completion, acompletion` (or `from scillm import ...` — re‑exported).
 > - “Opt‑in” means disabled by default; enable via env or simple kwargs.
 > - File paths are relative; open them in your editor for details.
+> - Replace `<MODEL_ID>` with a model actually returned by `GET /v1/models` or your configured provider list.
+> - Preferred env variable prefix: `SCILLM_`. Legacy `LITELLM_` aliases remain supported.
+
+## Environment Prefix (One‑liner)
+Prefer: `SCILLM_ENABLE_CODEWORLD=1` etc. (All `SCILLM_ENABLE_*` have `LITELLM_ENABLE_*` fallbacks.)
 
 ## Core Providers & Surfaces
 
 | Area | Feature | What It Does | How To Use (one‑liner) | Files/Notes |
 |---|---|---|---|---|
 | Providers | OpenAI‑compatible | Call any OpenAI‑style model (local or remote) | `completion(model="openai/<org>/<model>", messages=...)` or `Router(...).completion(...)` | litellm/main.py |
-| Providers | codex‑agent (OpenAI‑compatible shim) | Route to your codex-agent (tools, plans, MCP) via OpenAI Chat API | `completion(model="gpt-5", custom_llm_provider="codex-agent", api_base=..., api_key=...)` | litellm/llms/codex_agent.py; compare script supports `--use-codex-*` |
+| Providers | codex‑agent (OpenAI‑compatible shim) | Route to your codex‑agent (tools, plans, MCP) via OpenAI Chat API | `completion(model="<MODEL_ID>", custom_llm_provider="codex-agent", api_base=$CODEX_AGENT_API_BASE, messages=[...])` | Provider adds `/v1` |
 | Providers | Ollama | Local free LLMs via Ollama | `completion(model="ollama/qwen2.5:7b", custom_llm_provider="ollama", api_base=...)` | Normalizes `ollama/<tag>` → `<tag>` |
 | Providers | CodeWorld | Code orchestration (variants, scoring, judge) over HTTP bridge | `completion(model="codeworld", custom_llm_provider="codeworld", api_base=..., items=...)` | litellm/llms/codeworld.py |
 | Providers | Certainly (Lean4) | Lean4 bridge for formal proofs/checks | `completion(model="certainly", custom_llm_provider="certainly", api_base=..., items=...)` | litellm/llms/lean4.py |
-| Agent | mini‑agent (experimental) | Deterministic local tool‑use loop | `completion(model="mini-agent/...", custom_llm_provider="mini-agent")` | docs/my-website/docs/experimental/mini-agent.md |
+| Agent | mini‑agent (experimental) | Deterministic local tool‑use loop (local tool invocation / MCP semantics) | `completion(model="mini-agent/loop", custom_llm_provider="mini-agent", messages=[...])` | See MINI_AGENT.md |
 
 MCP (Model Context Protocol) — Mini‑Agent
 - Start: `uvicorn litellm.experimental_mcp_client.mini_agent.agent_proxy:app --host 127.0.0.1 --port 8788`
@@ -36,7 +51,8 @@ MCP (Model Context Protocol) — Mini‑Agent
 - Quick verify:
   - Health: `curl -sSf http://127.0.0.1:8788/healthz`
   - Models: `curl -sS http://127.0.0.1:8788/v1/models | jq .`
-  - High reasoning chat: `curl -sS -H 'content-type: application/json' -d '{"model":"gpt-5","reasoning":{"effort":"high"},"messages":[{"role":"user","content":"say hello"}]}' http://127.0.0.1:8788/v1/chat/completions | jq -r '.choices[0].message.content'`
+  - High reasoning chat (optional flag): \
+    `curl -sS -H 'content-type: application/json' -d '{"model":"<MODEL_ID>","reasoning":{"effort":"high"},"messages":[{"role":"user","content":"hello"}]}' $CODEX_AGENT_API_BASE/v1/chat/completions | jq -r '.choices[0].message.content'`
   - Doctor (one‑shot): `make codex-agent-doctor` (checks /healthz, /v1/models, and a high‑reasoning ping)
 - Router usage (copy/paste, high reasoning):
   - `export LITELLM_ENABLE_CODEX_AGENT=1`
@@ -44,7 +60,7 @@ MCP (Model Context Protocol) — Mini‑Agent
   - Python:
     - `from litellm import Router`
     - `r = Router()`
-    - `out = r.completion(model="gpt-5", custom_llm_provider="codex-agent", messages=[{"role":"user","content":"Return STRICT JSON only: {\"ok\":true}"}], reasoning_effort="high", response_format={"type":"json_object"})`
+    - `out = r.completion(model="<MODEL_ID>", custom_llm_provider="codex-agent", messages=[{"role":"user","content":"Return STRICT JSON only: {\"ok\":true}"}], response_format={"type":"json_object"})`
     - `print(out.choices[0].message["content"])`
 
 Tip: Using Docker? `docker compose -f local/docker/compose.agents.yml up --build -d` exposes the mini‑agent on `127.0.0.1:8788` and the codex sidecar on `127.0.0.1:8077`. For the Router provider, set `CODEX_AGENT_API_BASE` to the one you want (no `/v1`).
@@ -56,7 +72,7 @@ codex‑agent base rule and endpoints
   - `GET /v1/models` (stub list)
   - `POST /v1/chat/completions` (OpenAI‑compatible; choices[0].message.content is a string)
 
-Auth & debug
+Auth, echo & debug
 - Sidecar echo is enabled by default in `local/docker/compose.agents.yml` (`CODEX_SIDECAR_ECHO=1`). For real creds, disable echo and mount `${HOME}/.codex/auth.json:/root/.codex/auth.json:ro`, then run `python debug/check_codex_auth.py`.
 - Helpful probes:
   - `python debug/verify_mini_agent.py` (Docker + optional local uvicorn)
@@ -77,10 +93,24 @@ Retries meta (optional)
 | Area | Feature | What It Does | How To Use | Files/Notes |
 |---|---|---|---|---|
 | Router | Core routing | Robust sync/async completion through deployments | `from litellm import Router; Router(...).completion(...)` | litellm/router.py |
-| Router | parallel_acompletions | Async fan‑out; returns OpenAI‑shaped dicts in request order | `await router.parallel_acompletions([req,...], max_concurrency=16)` | litellm/router.py; returns list[dict] |
+| Router | parallel_acompletions | Async fan‑out; returns list of result objects | `await router.parallel_acompletions(requests, concurrency=8)` | Each result: `.index .request .response .error .content` |
 | Router | Deterministic mode | Enforce temp=0, top_p=1; serialize fan‑out | `Router(deterministic=True)` | Also zeros freq/pres penalties in deterministic contexts |
 | Router | Schema‑first + fallback | Try JSON schema, fallback once to json_object; validation meta | `response_format={"type":"json_object"}` or schema path under provider | Additional meta in `additional_kwargs["router"]` |
 | Router | Image policy (minimal) | Guard data:image/* sizes (reject mode) | Enabled internally; no extra knobs for MVP | litellm/router.py |
+
+### Parallel Result Object (Shape)
+```
+SimpleNamespace(
+  index: int,
+  request: original request object (dict or RouterParallelRequest),
+  response: provider response object/dict | None,
+  error: Exception | None,
+  content: str | None   # best-effort extraction
+)
+```
+
+### Advanced (Experimental)
+- `parallel_as_completed(requests)` — yields results as they finish (unordered). Not guaranteed stable; prefer `parallel_acompletions` for deterministic ordering.
 
 ## Router — 429 Retries (Opt‑In)
 
@@ -92,14 +122,29 @@ Retries meta (optional)
 | Retry | Callbacks | on_attempt/on_success/on_giveup (for checkpoint/resume) | Pass callbacks in kwargs | Emits dict meta per attempt/success |
 | Retry | JSON telemetry | Low‑noise structured logs | `SCILLM_LOG_JSON=1` and `SCILLM_RETRY_LOG_EVERY=1|N` | Stdout one‑liners |
 
-Recommended defaults for long runs: `retry_enabled=True, honor_retry_after=True, retry_time_budget_s≈600–900, retry_max_attempts≈8, retry_base_s≈5–10, retry_max_s≈90–120, retry_jitter_pct≈0.25`.
+Recommended defaults (long unattended runs):
+`retry_enabled=True honor_retry_after=True retry_time_budget_s=600-900 retry_max_attempts=8 retry_base_s=5-10 retry_max_s=90-120 retry_jitter_pct=0.25`
+
+Retry metadata example (when `SCILLM_RETRY_META=1`):
+```json
+"additional_kwargs": {
+  "router": {
+    "retries": {
+      "attempts": 2,
+      "total_sleep_s": 5.4,
+      "last_retry_after_s": 3.0
+    }
+  }
+}
+```
 
 ## CodeWorld — Strategies & MCTS (Opt‑In)
 
 | Area | Feature | What It Does | How To Use | Files/Notes |
 |---|---|---|---|---|
 | CodeWorld | Baseline | Run variants, judge, score | `completion(model="codeworld", custom_llm_provider="codeworld", items=...)` | litellm/llms/codeworld.py |
-| CodeWorld | MCTS Strategy | Adaptive variant selection (root UCT) | `strategy="mcts"` or model alias `codeworld/mcts` | Scenarios: scenarios/mcts_codeworld_demo.py |
+| CodeWorld | MCTS Strategy | Adaptive variant selection (root UCT) | `strategy="mcts"` or model alias `codeworld/mcts` | `scenarios/mcts_codeworld_demo.py` |
+| CodeWorld | Autogen + MCTS alias | Generate N then search | `model="codeworld/mcts:auto"` (synonym: `codeworld/mcts+auto`) | Normalized to `codeworld/mcts:auto` in manifests |
 | CodeWorld | Seed determinism | Reproducible MCTS runs | `SCILLM_DETERMINISTIC_SEED=<int>` or per‑request | One‑time warnings on mismatches |
 
 One‑POST (HTTP) autogenerate + MCTS
@@ -109,14 +154,58 @@ One‑POST (HTTP) autogenerate + MCTS
   - `BASE=http://127.0.0.1:8888 curl -sS "$BASE/bridge/complete" -H 'Content-Type: application/json' -d '{"messages":[{"role":"user","content":"Autogenerate"}],"items":[{"task":"t","context":{}}],"provider":{"name":"codeworld","args":{"strategy":"mcts","strategy_config":{"autogenerate":{"enabled":true,"n":3}}}}}' | jq '.run_manifest.mcts_stats'`
 - Docker bridge only: `make codeworld-bridge-up-only` (defaults `CODEX_AGENT_API_BASE=http://host.docker.internal:8089`). On Linux, compose adds:
   `extra_hosts: ["host.docker.internal:host-gateway"]`. Override via `CODEX_AGENT_API_BASE=http://<host-ip>:8089`.
-- Knobs: `CODEWORLD_ONEPOST_TIMEOUT_S` (default 60s), `CODEWORLD_MCTS_AUTO_N` (default 3), `CODEWORLD_MCTS_AUTO_TEMPERATURE` (default 0), `CODEWORLD_MCTS_AUTO_MAX_TOKENS` (default 2000), `CODEX_AGENT_MODEL`.
+- Knobs:
+  - `CODEWORLD_ONEPOST_TIMEOUT_S` (default 60)
+  - `CODEWORLD_MCTS_AUTO_N` (default 3)
+  - `CODEWORLD_MCTS_AUTO_TEMPERATURE` (default 0)
+  - `CODEWORLD_MCTS_AUTO_MAX_TOKENS` (default 2000)
+  - `CODEWORLD_MCTS_AUTO_MODEL` (override internal generation model)
+- Autogen alias:
+  - `model="codeworld/mcts:auto"` (synonym: `codeworld/mcts+auto` → normalized to `mcts:auto`)
+- Determinism: set `SCILLM_DETERMINISTIC_SEED=<int>` to fix variant sampling (warns on mismatch).
 - Examples use `reasoning={"effort":"high"}` to showcase the path, but it’s optional.
 
 ## Certainly (Lean4)
 
 | Area | Feature | What It Does | How To Use | Notes |
 |---|---|---|---|---|
-| Lean4 | Bridge | FastAPI shim; batch checks; Router provider | `completion(model="certainly", custom_llm_provider="certainly", api_base=..., items=...)` | Scenarios under scenarios/lean4_* |
+| Lean4 | Bridge | FastAPI shim; batch checks; Router provider | `completion(model="certainly", custom_llm_provider="certainly", api_base=$CERTAINLY_BRIDGE_BASE, items=[...])` | `scenarios/lean4_*` |
+
+Lean4 quick health:
+```
+curl -sSf $CERTAINLY_BRIDGE_BASE/healthz
+```
+
+Batch example (canonical envelope):
+```json
+{
+  "messages": [{"role": "system", "content": "Check requirements"}],
+  "items": [{"requirement_text": "0 + n = n"}],
+  "options": {"max_seconds": 120}
+}
+```
+
+
+## Chutes Model Resolution (Alias, Once per Session)
+
+- Purpose: Accept human-friendly “doc-style” names (e.g., `mistral-ai/Mistral-Small-3.2-24B`) and resolve to the canonical IDs returned by your org’s `GET $CHUTES_API_BASE/v1/models`.
+- One-time warm (per process):
+  ```python
+  from litellm.extras.preflight import preflight_models
+  import os
+  preflight_models(api_base=os.environ["CHUTES_API_BASE"], api_key=os.environ.get("CHUTES_API_KEY"))
+  ```
+- Enable guard + aliasing:
+  - `export SCILLM_MODEL_PREFLIGHT=1`
+  - `export SCILLM_MODEL_ALIAS=1`
+  - [optional tie-break] `export SCILLM_MODEL_ALIAS_LLM=1`
+- Behavior:
+  - Regex prefilter → rapidfuzz ranking → pick closest canonical ID from your cached catalog.
+  - Never guesses outside your org’s live list; zero network per call.
+- API knobs (planned):
+  - `fallback_closest=True` (default) and `fallback_closest_cutoff=0.55` on `completion()/acompletion()`; kwargs override envs.
+- Observability:
+  - Responses stamp `_hidden_params.requested_model_id` and `_hidden_params.resolved_model_id` when a mapping occurs.
 
 ## Scenarios (Live, Skip‑Friendly)
 
@@ -158,20 +247,46 @@ One‑POST (HTTP) autogenerate + MCTS
 | Area | Feature | What It Does | How To Use | Files/Notes |
 |---|---|---|---|---|
 | Build | uv/hatch (PEP 621) | Lock‑free sync; fast dev cycles | `uv sync`; `uv run pytest` | pyproject.toml; Makefile |
-| Re‑exports | scillm module | Import `scillm` as alias to litellm | `from scillm import Router, completion` | scillm/__init__.py |
+| Re‑exports | scillm module | Import `scillm` as alias to litellm | `from scillm import Router, completion` | `scillm/__init__.py` |
+
+## Mini‑Agent (Additional Details)
+- Endpoints: `/ready`, `/healthz`, `/v1/chat/completions`, `/agent/run`
+- Trace storage (optional):
+  ```
+  export MINI_AGENT_STORE_TRACES=1
+  export MINI_AGENT_STORE_PATH=local/artifacts/mini_agent_traces.jsonl
+  ```
+  Each run appends JSONL with `final_answer_preview`.
+- Limitations:
+  - Images detected in content arrays but not processed beyond flagging.
+  - No streaming responses; one final message.
+  - Local tool sandbox is coarse; treat outputs as untrusted.
+
+## Security & Isolation (Summary)
+- codex‑agent echo mode (`CODEX_SIDECAR_ECHO=1`) is for development only—disable before real credentials.
+- CodeWorld sandbox: process RLIMITs + optional network namespace; use container isolation for production.
+- Mini‑Agent tool outputs: treat as untrusted; validate before executing derived code.
+- Model outputs: assume untrusted; combine with deterministic verification (tests, proofs, scoring).
 
 ## Common Patterns (TL;DR)
 
 | Pattern | Single Line |
 |---|---|
-| codex‑agent judge (strict JSON) | `resp = Router().completion(model="gpt-5", custom_llm_provider="codex-agent", api_base=..., api_key=..., response_format={"type":"json_object"}, retry_enabled=True, honor_retry_after=True)` |
+| codex‑agent judge (strict JSON) | `resp = Router().completion(model="<MODEL_ID>", custom_llm_provider="codex-agent", api_base=$CODEX_AGENT_API_BASE, response_format={"type":"json_object"}, retry_enabled=True)` |
 | MCTS (CodeWorld) | `completion(model="codeworld/mcts", custom_llm_provider="codeworld", items=..., strategy_config={"rollouts":48,"depth":6})` |
 | Ollama local | `completion(model="ollama/qwen2.5:7b", custom_llm_provider="ollama", api_base="http://127.0.0.1:11434", messages=...)` |
-| Async fan‑out | `await Router().parallel_acompletions([req1, req2], max_concurrency=16)` |
+| Async fan‑out | `await Router().parallel_acompletions([req1, req2], concurrency=16)` |
 | Retry defaults | `retry_enabled=True, honor_retry_after=True, retry_time_budget_s=900, retry_max_attempts=8, retry_base_s=5, retry_max_s=120, retry_jitter_pct=0.25` |
 | Checkpoint/resume | `cp = JsonlCheckpoint(".../results.jsonl"); done = cp.processed_ids(); cp.append({...})` |
 | Throttle (sync/async) | `with bucket.acquire(): ...` / `async with (await bucket.acquire()): ...` |
 
 ---
 
-If you need a quick example for a specific provider or scenario, open the files listed and copy the minimal snippet; everything above is designed to work “as‑is” on feat/final-polish.
+If you need a quick example for a specific provider or scenario, open the files listed and copy the minimal snippet; everything above is designed to work “as‑is” on this branch. Report missing or broken paths via a documentation issue.
+
+
+## Strict JSON (Auto Sanitize)
+- Enable globally: `export SCILLM_JSON_SANITIZE=1`
+- Or per-call: `auto_json_sanitize=True`
+- Triggers when `response_format={"type":"json_object"}` or `response_mime_type="application/json"`.
+- Uses `litellm.extras.clean_json_string()` to repair and re-validate; stamps `_hidden_params.json_sanitized=true`.
