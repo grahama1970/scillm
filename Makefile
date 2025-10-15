@@ -41,6 +41,8 @@ help:
 	@echo "  make codeworld-bridge-up-only   - Start CodeWorld bridge only on :8887 (no Redis)"
 	@echo "  make codeworld-bridge-down-only - Stop CodeWorld bridge-only container"
 	@echo "  make mcts-live              - Run live MCTS (:auto) end-to-end via codex-agent + CodeWorld"
+	@echo "  make model-alias-doctor   - Resolve doc-style -> canonical model id (NAME=...)"
+	@echo "  make json-reliability-doctor - Probe models for strict JSON (MODELS=... or FILE=path)"
 
 # --- Logo exports -------------------------------------------------------------
 .PHONY: logo-export
@@ -367,3 +369,15 @@ lean4-smoke:
 
 codex-regression:
 	@python scenarios/codex_agent_regression_check.py
+
+
+.PHONY: json-reliability-doctor
+json-reliability-doctor:
+	@if [ -z "$$MODELS" ] && [ -z "$$FILE" ]; then echo "Usage: MODELS='a,b,c' make json-reliability-doctor  OR  FILE=path make json-reliability-doctor"; exit 2; fi
+	uv run python scripts/doctor/json_reliability_doctor.py \
+	  $${MODELS:+--models "$$MODELS"} \
+	  $${FILE:+--models-file "$$FILE"} \
+	  $${BASE:+--base "$$BASE"} \
+	  $${KEY:+--key "$$KEY"} \
+	  $${CUTOFF:+--cutoff "$$CUTOFF"} \
+	  --print-table
