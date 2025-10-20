@@ -4,7 +4,7 @@ import time
 import json
 from typing import Any, Dict, List, Optional
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, Header
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 import asyncio
@@ -35,6 +35,17 @@ app = FastAPI(
 # Not durable across restarts; use Redis in production.
 _SESSION_HISTORY: Dict[str, List[float]] = {}
 _SESSION_MAX_HISTORY = 50
+
+# Debug toggle (mirrors SCILLM_DEBUG)
+_DEBUG = str(os.getenv("CODEWORLD_DEBUG", os.getenv("SCILLM_DEBUG", ""))).lower() in {"1", "true", "yes"}
+
+
+def _dbg(msg: str) -> None:
+    if _DEBUG:
+        try:
+            print(f"[codeworld.bridge][debug] {msg}")
+        except Exception:
+            pass
 
 
 class ProviderArgs(BaseModel):
@@ -78,8 +89,11 @@ if REDIS_URL:
         _redis = None
 
 @app.post("/bridge/complete")
-async def bridge_complete(req: CodeWorldBridgeRequest, request: Request):
+async def bridge_complete(req: CodeWorldBridgeRequest, request: Request, x_trace_id: str | None = Header(default=None)):
     started = time.perf_counter()
+    response: Dict[str, Any] = {}
+    trace = x_trace_id or request.headers.get("x-trace-id") or "-"
+    _dbg(f"bridge_complete begin trace_id={trace}")
 
     # Normalize inputs
     items = req.items or []
@@ -120,6 +134,7 @@ async def bridge_complete(req: CodeWorldBridgeRequest, request: Request):
         iterations = 1
 
     # Engine: run task(s) and compute scores via dynamic scoring where provided
+    _dbg(f"items={len(items)} metrics={metrics} iterations={iterations} languages={languages}")
     import hashlib as _hashlib
 
     def _score_hash(s: str) -> float:
@@ -176,14 +191,27 @@ async def bridge_complete(req: CodeWorldBridgeRequest, request: Request):
                 env_gate = str(os.getenv("CODEWORLD_ENABLE_MCTS_GENERATE", "1")).lower()
                 gate_allowed = env_gate not in ("0", "false", "no")
                 if enabled and gate_allowed:
-                    n = int((autogen.get("n") if isinstance(autogen, dict) else AUTOGEN_DEFAULT_N) or AUTOGEN_DEFAULT_N)
-                    gen_model = str((autogen.get("generator_model") if isinstance(autogen, dict) else os.getenv("CODEX_AGENT_MODEL", "gpt-5")) or "gpt-5")
-                    temperature = float((autogen.get("temperature") if isinstance(autogen, dict) else AUTOGEN_DEFAULT_TEMPERATURE) or AUTOGEN_DEFAULT_TEMPERATURE)
-                    max_tokens = int((autogen.get("max_tokens") if isinstance(autogen, dict) else AUTOGEN_DEFAULT_MAX_TOKENS) or AUTOGEN_DEFAULT_MAX_TOKENS)
+                    t_autogen = time.perf_counter()
+                    # Prefer structured autogen dict when present, else check top-level args for n_variants, temperature, etc.
+                    n = int((autogen.get("n") if isinstance(autogen, dict) else provider_args.get("n_variants") or AUTOGEN_DEFAULT_N) or AUTOGEN_DEFAULT_N)
+                    gen_model = str((autogen.get("generator_model") if isinstance(autogen, dict) else provider_args.get("generator_model") or os.getenv("CODEX_AGENT_MODEL", "gpt-5")) or "gpt-5")
+                    temperature = float((autogen.get("temperature") if isinstance(autogen, dict) else provider_args.get("temperature") or AUTOGEN_DEFAULT_TEMPERATURE) or AUTOGEN_DEFAULT_TEMPERATURE)
+                    max_tokens = int((autogen.get("max_tokens") if isinstance(autogen, dict) else provider_args.get("max_tokens") or AUTOGEN_DEFAULT_MAX_TOKENS) or AUTOGEN_DEFAULT_MAX_TOKENS)
                     prompt = _mcts_build_generation_prompt(task, ctx, n)
+                    _dbg(f"autogen enabled n={n} model={gen_model} temp={temperature} max_tokens={max_tokens} trace_id={trace}")
                     llm = _mcts_call_llm_for_variants(prompt, n=n, model=gen_model, temperature=temperature, max_tokens=max_tokens)
                     raw = llm.get("raw", "")
+                    _dbg(f"autogen raw_len={len(raw) if isinstance(raw, str) else 0} trace_id={trace}")
                     vars = _mcts_extract_variants_from_raw(raw)
+                    _dbg(f"autogen parsed_variants={len(vars) if isinstance(vars, list) else 0} trace_id={trace}")
+                    try:
+                        # preview ids
+                        if isinstance(vars, list):
+                            ids = [v.get("id") for v in vars if isinstance(v, dict)]
+                            _dbg(f"autogen ids={ids[:6]} trace_id={trace}")
+                    except Exception:
+                        pass
+                    _dbg(f"autogen elapsed={(time.perf_counter()-t_autogen):.2f}s trace_id={trace}")
                     if isinstance(vars, list) and vars:
                         # Normalize to mapping id->code for engine
                         mapping = {}
@@ -222,6 +250,7 @@ async def bridge_complete(req: CodeWorldBridgeRequest, request: Request):
                     uct_c_v = cfg.get("exploration_constant")
                 seed_v = (cfg.get("seed") if isinstance(cfg, dict) else None) or (provider_args.get("seed") if isinstance(provider_args, dict) else None)
                 timeout_ms_v = int(cfg.get("timeout_ms", provider_args.get("timeout_ms", 50))) if isinstance(provider_args, dict) else 50
+                _dbg(f"mcts rollouts={rollouts} depth={depth_v} uct_c={uct_c_v} seed={seed_v} timeout_ms={timeout_ms_v} trace_id={trace}")
                 try:
                     mcts_out = run_mcts(task=task, context=ctx, code_variants=code_variants, rollouts=rollouts, depth=depth_v, uct_c=float(uct_c_v), seed=seed_v, timeout_ms=timeout_ms_v)
                 except Exception as e:  # noqa: BLE001
@@ -344,6 +373,16 @@ async def bridge_complete(req: CodeWorldBridgeRequest, request: Request):
                 scores["aggregate"] = round(agg, 3)
 
         entry = {"index": idx, "item_id": item_id, "status": "ok", "scores": scores, "item": item, "outputs": {"result": outputs.get("result")}, "timings": timings}
+        # If we synthesized code variants (autogen), attach them so downstream judges/tools can see candidates
+        try:
+            if isinstance(code_variants, dict) and code_variants:
+                entry["code_variants"] = [
+                    {"id": str(k), "code": v} for k, v in list(code_variants.items())
+                    if isinstance(k, (str, int)) and isinstance(v, str)
+                ]
+                _dbg(f"attach code_variants n={len(entry['code_variants'])} trace_id={trace}")
+        except Exception:
+            pass
         if mcts_out is not None:
             try:
                 entry["mcts"] = {
@@ -447,6 +486,7 @@ async def bridge_complete(req: CodeWorldBridgeRequest, request: Request):
         if strategy_name == "mcts":
             m0 = next((r.get("mcts") for r in results if isinstance(r, dict) and r.get("mcts")), None)
             if isinstance(m0, dict):
+                _dbg(f"mcts best_variant={(m0.get('best_variant') if isinstance(m0.get('best_variant'), str) else 'obj')} best_value={m0.get('best_value')} trace_id={trace}")
                 response["run_manifest"]["strategy_name"] = "mcts"
                 response["run_manifest"]["strategy_seed"] = m0.get("seed")
                 response["run_manifest"]["strategy_params"] = {k: m0.get(k) for k in ("rollouts", "depth", "uct_c")}
@@ -481,6 +521,7 @@ async def bridge_complete(req: CodeWorldBridgeRequest, request: Request):
         (out_dir / f"codeworld_run_{int(time.time())}.json").write_text(json.dumps(response, indent=2))
     except Exception:
         pass
+    _dbg(f"bridge_complete done dur={(time.perf_counter()-started):.2f}s items={len(items)} trace_id={trace}")
     return JSONResponse(response)
 
 
@@ -519,6 +560,11 @@ def _mcts_call_llm_for_variants(prompt: str, *, n: int, model: str, temperature:
     from urllib import request as _urlreq
     base = base_url or os.getenv("OPENAI_BASE_URL") or os.getenv("CODEX_AGENT_API_BASE") or "http://127.0.0.1:8089"
     key = api_key or os.getenv("OPENAI_API_KEY") or "none"
+    if _DEBUG:
+        try:
+            print(f"[codeworld.bridge][debug] autogen base={base} model={model}")
+        except Exception:
+            pass
     payload = {"model": model, "messages": [{"role": "system", "content": "You produce strict JSON only."}, {"role": "user", "content": prompt}],
                "temperature": temperature, "max_tokens": max_tokens}
     data = json.dumps(payload).encode("utf-8")
@@ -530,9 +576,11 @@ def _mcts_call_llm_for_variants(prompt: str, *, n: int, model: str, temperature:
             with _urlreq.urlopen(req, timeout=AUTOGEN_HTTP_TIMEOUT_S) as resp:
                 rsp = json.loads(resp.read().decode("utf-8"))
             content = rsp.get("choices", [{}])[0].get("message", {}).get("content", "")
+            _dbg(f"autogen call ok path={path} content_len={len(content) if isinstance(content, str) else 0}")
             return {"raw": content}
         except Exception as e:  # noqa: BLE001
             logging.warning("mcts variant llm call failed at %s: %s", url, e)
+            _dbg(f"autogen call failed path={path} err={e}")
             continue
     return {"raw": ""}
 

@@ -6,7 +6,7 @@ import json
 import threading
 import logging
 from pathlib import Path
-from typing import Dict, Optional, Set, Any
+from typing import Dict, Optional, Set, Any, Tuple
 
 from urllib import request as _urlreq
 from urllib.error import HTTPError, URLError
@@ -15,6 +15,10 @@ from urllib.error import HTTPError, URLError
 _CATALOG: Dict[str, Dict[str, Any]] = {}
 _LOCK = threading.Lock()
 _LOG = logging.getLogger(__name__)
+
+# Cache for discovered auth styles per base
+# value: {"ts": float, "style": str, "ttl": int}
+_AUTH_STYLE: Dict[str, Dict[str, Any]] = {}
 
 
 def _now() -> float:
@@ -171,3 +175,92 @@ try:
 except Exception:
     # Already logged at debug level inside load_catalog
     pass
+
+
+def _is_openai_host(base: str) -> bool:
+    b = _normalize_base(base).lower()
+    return (
+        b.endswith("api.openai.com")
+        or b.endswith("api.openai.com:443")
+        or b.endswith("api.openai.com:80")
+    )
+
+
+def discover_auth_style(
+    *,
+    api_base: str,
+    api_key: Optional[str],
+    prefer: Optional[str] = None,
+    timeout_s: float = 5.0,
+    ttl_s: int = 7200,
+    soft: bool = True,
+) -> str:
+    """Detect which auth header style a base accepts for OpenAI‑compatible APIs.
+
+    Tries in order (unless `prefer` narrows the attempt):
+      1) bearer  → Authorization: Bearer <key>
+      2) x-api-key → x-api-key: <key>
+      3) raw    → Authorization: <key>
+
+    Returns: 'bearer' | 'x-api-key' | 'raw' | 'none'
+    Caches result per base for `ttl_s` seconds.
+    """
+    base = _normalize_base(api_base)
+    if not base:
+        return "none"
+    if _is_openai_host(base):
+        return "bearer"
+
+    # serve from non-expired cache
+    with _LOCK:
+        cur = _AUTH_STYLE.get(base)
+        if cur and isinstance(cur.get("ts"), (int, float)) and (cur["ts"] + ttl_s) > _now():
+            return str(cur.get("style") or "none")
+
+    if not api_key:
+        # No key to probe with; default conservative
+        return "bearer"
+
+    def _try(style: str) -> bool:
+        headers = {"accept": "application/json"}
+        if style == "bearer":
+            headers["authorization"] = f"Bearer {api_key}"
+        elif style == "x-api-key":
+            headers["x-api-key"] = api_key
+        elif style == "raw":
+            headers["authorization"] = api_key
+        else:
+            return False
+        url = base + "/v1/models"
+        try:
+            req = _urlreq.Request(url=url, headers=headers, method="GET")
+            with _urlreq.urlopen(req, timeout=timeout_s) as resp:
+                # any 2xx implies auth accepted
+                code = getattr(resp, "status", getattr(resp, "code", 200))
+                return 200 <= int(code) < 300
+        except HTTPError as e:
+            # 401/403 means wrong auth style; other 2xx/5xx we treat as not-accepted
+            if int(getattr(e, "code", 0)) in (401, 403):
+                return False
+            # Other errors: treat as failure for this style
+            return False
+        except Exception:
+            return False
+
+    order = ["bearer", "x-api-key", "raw"]
+    if prefer in order:
+        order = [prefer] + [s for s in order if s != prefer]
+
+    chosen = "none"
+    for style in order:
+        if _try(style):
+            chosen = style
+            break
+
+    # cache result (even 'none' to avoid re-probing hot)
+    with _LOCK:
+        _AUTH_STYLE[base] = {"ts": _now(), "style": chosen, "ttl": int(ttl_s)}
+
+    if chosen == "none" and not soft:
+        raise RuntimeError(f"Could not determine auth style for {base}")
+    return chosen

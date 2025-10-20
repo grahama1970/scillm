@@ -1336,17 +1336,14 @@ global_disable_no_log_param: bool = False
 ### PASSTHROUGH ###
 from .passthrough import allm_passthrough_route, llm_passthrough_route
 
-# --- Experimental provider: codex-agent (env-gated) ---------------------------
+# --- Provider: codex-agent (auto-register) -----------------------------------
 # Register this BEFORE importing Router so provider validation sees it.
 try:
-    import os as _os
-    if _os.getenv("LITELLM_ENABLE_CODEX_AGENT", "") == "1":
-        from .llms.codex_agent import CodexAgentLLM as _CodexAgentLLM
-        custom_provider_map.append({"provider": "codex-agent", "custom_handler": _CodexAgentLLM()})
-        # Add to provider list once at import time
-        from .utils import custom_llm_setup as _custom_llm_setup
-
-        _custom_llm_setup()
+    from .llms.codex_agent import CodexAgentLLM as _CodexAgentLLM
+    custom_provider_map.append({"provider": "codex-agent", "custom_handler": _CodexAgentLLM()})
+    # Add to provider list once at import time
+    from .utils import custom_llm_setup as _custom_llm_setup
+    _custom_llm_setup()
 except Exception:
     # Best-effort: never break base imports if experimental provider misbehaves
     pass
@@ -1399,11 +1396,23 @@ except Exception:
 # --- Experimental provider: codeworld (env-gated) ----------------------------
 try:
     import os as _os_codeworld
-    if _os_codeworld.getenv("LITELLM_ENABLE_CODEWORLD", "") == "1" or _os_codeworld.getenv("SCILLM_ENABLE_CODEWORLD", "") == "1":
+    _scillm_debug = _os_codeworld.getenv("SCILLM_DEBUG", "").lower() in ("1","true","yes")
+    _gate_codeworld = _os_codeworld.getenv("LITELLM_ENABLE_CODEWORLD", "") == "1" or _os_codeworld.getenv("SCILLM_ENABLE_CODEWORLD", "") == "1"
+    if _scillm_debug:
+        try:
+            print(f"[scillm][debug] codeworld gate: LITELLM_ENABLE_CODEWORLD={_os_codeworld.getenv('LITELLM_ENABLE_CODEWORLD','')!r} SCILLM_ENABLE_CODEWORLD={_os_codeworld.getenv('SCILLM_ENABLE_CODEWORLD','')!r}")
+        except Exception:
+            pass
+    if _gate_codeworld:
         from .llms.codeworld import CodeWorldLLM as _CodeWorldLLM
         from .llms.custom_llm import register_custom_provider as _register_custom_provider_codeworld
 
         _register_custom_provider_codeworld("codeworld", _CodeWorldLLM)
+        if _scillm_debug:
+            try:
+                print("[scillm][debug] codeworld provider registered")
+            except Exception:
+                pass
         # Convenience alias: model/provider "codeworld/mcts" injects strategy="mcts"
         try:
             class _CodeWorldMCTSLLM(_CodeWorldLLM):  # type: ignore
@@ -1420,6 +1429,12 @@ try:
             _register_custom_provider_codeworld("codeworld/mcts", _CodeWorldMCTSLLM)
         except Exception:
             pass
+    else:
+        if _scillm_debug:
+            try:
+                print("[scillm][debug] codeworld provider skipped (env gate disabled)")
+            except Exception:
+                pass
 except Exception:
     # Keep base imports resilient
     pass

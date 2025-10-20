@@ -1,0 +1,12 @@
+{
+  "name": "scillm-codex-cloud-bridge",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Experimental Node bridge for codex-ts-sdk Cloud Tasks → SciLLM",
+  "license": "UNLICENSED",
+  "dependencies": {
+    "codex-ts-sdk": "^0.1.0"
+  }
+}
+

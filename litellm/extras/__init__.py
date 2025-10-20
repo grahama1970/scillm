@@ -1,5 +1,5 @@
 """Optional helpers to reduce app boilerplate. Import-safe; no core API changes."""
-from .cache_utils import initialize_litellm_cache, test_litellm_cache  # noqa: F401
+from .cache_utils import initialize_litellm_cache, test_litellm_cache, cache_stats  # noqa: F401
 from .json_utils import (  # noqa: F401
     PathEncoder,
     clean_json_string,
@@ -18,6 +18,7 @@ from .log_utils import (  # noqa: F401
 __all__ = [
     "initialize_litellm_cache",
     "test_litellm_cache",
+    "cache_stats",
     "PathEncoder",
     "clean_json_string",
     "json_serialize",
@@ -29,3 +30,11 @@ __all__ = [
     "log_safe_results",
     "truncate_large_value",
 ]
+
+# Auto-initialize cache on import if SCILLM_CACHE=1 (fallback to in-memory)
+import os as _os
+try:
+    if (_os.getenv("SCILLM_CACHE") or "").strip().lower() in {"1", "true", "yes", "on"}:
+        initialize_litellm_cache()
+except Exception:
+    pass

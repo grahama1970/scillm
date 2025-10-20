@@ -381,3 +381,4 @@ json-reliability-doctor:
 	  $${KEY:+--key "$$KEY"} \
 	  $${CUTOFF:+--cutoff "$$CUTOFF"} \
 	  --print-table
+## Codex Cloud targets removed (deprecated/disabled). See QUICKSTART.md.

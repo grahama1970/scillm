@@ -105,6 +105,12 @@ OpenAI‑compatible (Chutes) usage note
   to 'openai' when `api_base` points to an OpenAI‑compatible gateway (e.g., `CHUTES_API_BASE`).
 - Avoid adding an `openai/` prefix; if present, it will be stripped for OpenAI‑compatible providers.
 
+Gateways that require x‑api‑key (no Bearer)
+- Happy Path: do nothing. SciLLM auto‑negotiates auth style the first time it sees a non‑OpenAI base (e.g., Chutes) and caches it.
+- You may force a style via env if needed:
+  - `SCILLM_OPENAI_AUTH=auto|bearer|x-api-key|raw` (default: `auto`).
+  - For `x-api-key`/`raw`, SciLLM switches to the OpenAI‑compatible HTTPX path and injects the right header; no code changes required.
+
 Python one‑liner (Chutes):
 ```python
 from scillm import completion; import os
@@ -114,6 +120,60 @@ print(completion(model='moonshotai/Kimi-K2-Instruct-0905',
                 api_base=os.environ['CHUTES_API_BASE'],
                 api_key=os.environ.get('CHUTES_API_KEY','')).choices[0].message.content)
 ```
+
+Codex‑Agent Zero‑Guess Quickstart (no CodeWorld)
+- Start sidecar: `docker compose -f local/docker/compose.agents.yml up -d codex-sidecar`
+- One‑shot doctor: `python debug/codex_agent_doctor.py` → expect `doctor: ok`
+- Minimal API (recommended):
+  - `from scillm.extras.codex import chat`
+  - `chat([{\"role\":\"user\",\"content\":\"ping\"}], model=\"gpt-5\", temperature=0, max_tokens=16)`
+- Codex‑only Option A (generate N + judge; no CodeWorld):
+  - `python debug/smoke_option_a_codex_only.py`
+  - Or programmatic:
+    - `from scillm.extras.multi_agents import answer_code_autogen_and_judge_codex_only`
+    - `answer_code_autogen_and_judge_codex_only(items, n_variants=6, generator_model=\"gpt-5\", judge_model=\"codex-agent/gpt-5\")`
+- scillm completion form (explicit provider):
+  - `export LITELLM_ENABLE_CODEX_AGENT=1 CODEX_AGENT_API_BASE=http://127.0.0.1:8089`
+  - `from scillm import completion`
+  - `completion(model=\"gpt-5\", custom_llm_provider=\"codex-agent\", messages=[...], max_tokens=128)`
+  - Or “only change model” UX (no provider arg):
+    ```python
+    from scillm import completion
+    base = "http://127.0.0.1:8089"
+    r = completion(
+      model="codex-agent/gpt-5",  # no custom_llm_provider needed
+      messages=[{"role":"user","content":"Return strict JSON {ok:true}"}],
+      api_base=base,
+      response_format={"type":"json_object"},
+      temperature=1,
+    )
+    print(r.choices[0].message["content"])  # {"ok": true}
+    ```
+- Judge (parameter‑first, codex‑agent only):
+  - Python:
+    ```python
+    from scillm import completion
+    base = "http://127.0.0.1:8089"
+    msgs=[
+      {"role":"system","content":"Return STRICT JSON only: {best_id:string, rationale_short:string}."},
+      {"role":"user","content":"A vs B; pick one and say why (short)."},
+    ]
+    resp = completion(
+      model="gpt-5", custom_llm_provider="codex-agent", api_base=base,
+      messages=msgs, response_format={"type":"json_object"},
+      temperature=1, allowed_openai_params=["reasoning","reasoning_effort"], reasoning_effort="medium"
+    )
+    print(resp.choices[0].message["content"])  # strict JSON
+    ```
+  - Or with the minimal helper (no Router):
+    ```python
+    from scillm.extras.codex import chat
+    res = chat(messages=msgs, model="gpt-5", base=base,
+               response_format={"type":"json_object"}, temperature=1, reasoning_effort="medium")
+    print(res["choices"][0]["message"]["content"])  # strict JSON
+    ```
+
+Important: a codex‑agent call is NOT a CodeWorld call. CodeWorld is only for strategy runs (e.g., MCTS). Keep them separate unless you explicitly enable CodeWorld autogen.
 Extractor pipeline (HTTP client) env mapping (single place; reused later)
 
 ```bash
@@ -121,6 +181,14 @@ Extractor pipeline (HTTP client) env mapping (single place; reused later)
 export OPENAI_BASE_URL="$CODEX_AGENT_API_BASE"     # do NOT append /v1
 export OPENAI_API_KEY="${CODEX_AGENT_API_KEY:-none}"
 ```
+
+### Codex‑Cloud (Deprecated / Disabled by default)
+
+There is no public, stable Codex Cloud tasks API. To avoid confusion with normal
+OpenAI‑compatible gateways, the `codex_cloud` helpers are disabled by default. Prefer
+`codex-agent` or your existing gateway for best‑of‑N and judging. If you explicitly
+opt in, set both `SCILLM_ENABLE_CODEX_CLOUD=1` and `SCILLM_EXPERIMENTAL_CODEX_CLOUD=1`
+and proceed at your own risk.
 
 ### Mini‑Agent (MCP) Quickstart
 
@@ -282,6 +350,25 @@ Troubleshooting — fastest fixes
 - 400/502 from sidecar: upstream provider not wired → enable echo or configure a real backend.
 - `Skipping codex-agent scenario (...)`: set `CODEX_AGENT_API_BASE` and retry.
 - Base includes `/v1`: remove it; the adapter expects a base without the suffix.
+
+### Chutes rate limiting (recommended defaults)
+
+When targeting an OpenAI‑compatible gateway such as Chutes (sliding window ≈180 RPM; 120‑second cool‑down after any 429), pace calls to avoid bursts:
+
+```bash
+# Soft caps (process‑local) — keep below 180 RPM with headroom
+export SCILLM_RATE_LIMIT_QPS=2.5         # ~150 RPM average
+export SCILLM_COOLDOWN_429_S=120         # honor 120s cool‑down after a 429
+
+# Runner‑side (suggested) — cap concurrency in your batch/async code
+export SCILLM_MAX_CONCURRENCY=2          # keep simultaneous calls small
+```
+
+Notes:
+- Model discovery: run `preflight_models()` once per session and enable `SCILLM_MODEL_PREFLIGHT=1` to avoid per‑call `/v1/models` hits.
+- Caching: enable `initialize_litellm_cache()` to dedupe identical prompts on retries.
+- 429 handling: capacity and rate‑limit 429s look the same from clients; the helper pacer inserts a global cool‑down window after a 429 if you enable it.
+
 
 ## 3) Run release scenarios (fast confidence)
 
@@ -457,6 +544,29 @@ Notes:
 - Reasoning: examples use reasoning={"effort":"high"} to demonstrate capability; it is optional, not required.
 ```
 
+
+### Autogen + Judge (one‑shot helper)
+
+```python
+from scillm.extras import ensure_codex_agent
+from scillm.extras.multi_agents import answer_code_mcts_autogen_and_judge
+import os
+
+ensure_codex_agent()  # uses CODEX_AGENT_API_BASE or starts sidecar
+items=[{"task":"six improved fast inverse square root for gaming (C/C++)","context":{}}]
+res = answer_code_mcts_autogen_and_judge(
+    items,
+    n_variants=6, rollouts=12, depth=4, uct_c=1.3, temperature=0.0,
+    codeworld_base=os.getenv("CODEWORLD_BASE","http://127.0.0.1:8888"),
+    judge_model="gpt-5", timeout=120.0)
+print(res["codeworld"]["results"][0]["mcts"]["best_value"])  # float
+print(res["judge"])  # {'best_id': 'variant_5', 'rationale_short': '...'}
+```
+
+Environment hints
+- `SCILLM_ENABLE_CODEWORLD=1` registers the provider early.
+- `CODEX_AGENT_API_BASE=http://127.0.0.1:8089` points to the codex-agent sidecar (no `/v1`).
+- `CODEWORLD_AUTOGEN_HTTP_TIMEOUT_S=120` can help slower generators.
 
 ## 5) Deterministic tests & readiness
 

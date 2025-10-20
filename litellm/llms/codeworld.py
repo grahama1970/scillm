@@ -24,6 +24,7 @@ Env fallbacks:
 - CODEWORLD_TOKEN (Bearer token if server enforces auth)
 """
 import os
+import uuid
 import threading
 import time
 import asyncio
@@ -36,6 +37,15 @@ from litellm.llms.custom_httpx.http_handler import AsyncHTTPHandler, HTTPHandler
 from litellm.utils import ModelResponse
 
 DEFAULT_BASE = os.getenv("CODEWORLD_BASE", "http://127.0.0.1:8000").rstrip("/")
+_SCILLM_DEBUG = str(os.getenv("SCILLM_DEBUG", "")).lower() in {"1", "true", "yes"}
+
+
+def _dbg(msg: str) -> None:
+    if _SCILLM_DEBUG:
+        try:
+            print(f"[codeworld][debug] {msg}")
+        except Exception:
+            pass
 
 
 class CodeWorldLLM(CustomLLM):
@@ -60,7 +70,9 @@ class CodeWorldLLM(CustomLLM):
         return model
 
     def _resolve_base(self, api_base: Optional[str]) -> str:
-        return (api_base or DEFAULT_BASE).rstrip("/")
+        base = (api_base or DEFAULT_BASE).rstrip("/")
+        _dbg(f"resolve_base base={base}")
+        return base
 
     @staticmethod
     def _headers(api_key: Optional[str]) -> Dict[str, str]:
@@ -91,26 +103,45 @@ class CodeWorldLLM(CustomLLM):
 
         # Model alias support: "codeworld/mcts" injects strategy="mcts" unless caller set one
         try:
-            if isinstance(_model, str) and _model.lower().startswith("codeworld/") and "/" in _model:
-                alias = _model.split("/", 1)[1].strip().lower()
+            alias: Optional[str] = None
+            if isinstance(_model, str):
+                lower = _model.lower().strip()
+                if lower.startswith("codeworld/") and "/" in lower:
+                    alias = lower.split("/", 1)[1]
+                elif lower in ("mcts", "mcts:auto", "mcts+auto"):
+                    alias = lower
+            if alias is not None:
                 if alias == "mcts" and "strategy" not in merged_args and "strategy" not in optional_params:
                     merged_args["strategy"] = "mcts"
                 if alias in ("mcts:auto", "mcts+auto"):
                     if "strategy" not in merged_args and "strategy" not in optional_params:
                         merged_args["strategy"] = "mcts"
-                    # enable autogeneration defaults (can be overridden)
-                    merged_args.setdefault("autogenerate", True)
-                    # Allow env overrides while keeping safe defaults
+                    # enable autogeneration and pass a structured config understood by the bridge
+                    # Prefer explicit caller params when present; fall back to envs
                     try:
                         n_env = int(os.getenv("CODEWORLD_MCTS_AUTO_N", "6"))
                     except Exception:
                         n_env = 6
-                    merged_args.setdefault("n_variants", n_env)
                     try:
                         t_env = float(os.getenv("CODEWORLD_MCTS_AUTO_TEMPERATURE", "0.0"))
                     except Exception:
                         t_env = 0.0
-                    merged_args.setdefault("temperature", t_env)
+                    try:
+                        max_toks_env = int(os.getenv("CODEWORLD_MCTS_AUTO_MAX_TOKENS", "2000"))
+                    except Exception:
+                        max_toks_env = 2000
+                    gen_model_env = os.getenv("CODEX_AGENT_MODEL", "gpt-5")
+                    n_req = optional_params.get("n_variants")
+                    t_req = optional_params.get("temperature")
+                    max_toks_req = optional_params.get("max_tokens")
+                    gen_model_req = optional_params.get("generator_model")
+                    merged_args["autogenerate"] = {
+                        "enabled": True,
+                        "n": int(n_req if n_req is not None else n_env),
+                        "temperature": float(t_req if t_req is not None else t_env),
+                        "max_tokens": int(max_toks_req if max_toks_req is not None else max_toks_env),
+                        "generator_model": str(gen_model_req if gen_model_req else gen_model_env),
+                    }
                     gen_model = os.getenv("CODEWORLD_MCTS_AUTO_MODEL")
                     if gen_model:
                         merged_args.setdefault("generator_model", gen_model)
@@ -222,6 +253,22 @@ class CodeWorldLLM(CustomLLM):
             pass
         if optional_params.get("return_artifacts") is not None:
             p["return_artifacts"] = bool(optional_params["return_artifacts"])
+        # Debug summary (no secrets)
+        try:
+            args = (p.get("provider") or {}).get("args", {})
+            _dbg(
+                "payload model={} strategy={} rollouts={} depth={} uct_c={} autogen={} n_variants={}".format(
+                    _model,
+                    args.get("strategy"),
+                    args.get("rollouts"),
+                    args.get("depth"),
+                    args.get("uct_c"),
+                    args.get("autogenerate") or (args.get("n_variants") is not None),
+                    args.get("n_variants"),
+                )
+            )
+        except Exception:
+            pass
         return p
 
     def _map_response(self, model_response: ModelResponse, data: Dict[str, Any], model: str) -> ModelResponse:
@@ -273,10 +320,23 @@ class CodeWorldLLM(CustomLLM):
     ) -> ModelResponse:
         base = self._resolve_base(api_base)
         normalized_model = self._normalize_model_string(model)
+        trace_id = uuid.uuid4().hex
+        _dbg(f"completion model={normalized_model} trace_id={trace_id}")
         payload = self._build_payload(model, messages, optional_params or {})
         hdr = {**headers, **self._headers(api_key)} if headers else self._headers(api_key)
+        hdr.setdefault("X-Trace-Id", trace_id)
         budget = float(payload.get("request_timeout", 60.0))
+        # Lightweight input summary
         try:
+            items = payload.get("items") or []
+            prov = (payload.get("provider") or {}).get("args", {})
+            _dbg(
+                f"pre http base={base} msgs={len(messages)} items={len(items)} rollouts={prov.get('rollouts')} depth={prov.get('depth')} uct_c={prov.get('uct_c')} autogen={prov.get('autogenerate') or prov.get('n_variants') is not None} trace_id={trace_id}"
+            )
+        except Exception:
+            pass
+        try:
+            t0 = time.perf_counter()
             if isinstance(client, HTTPHandler):
                 r = client.post(
                     f"{base}/bridge/complete", json=payload, headers=hdr, timeout=budget + 30.0
@@ -288,7 +348,10 @@ class CodeWorldLLM(CustomLLM):
                     resp = c.post(f"{base}/bridge/complete", json=payload)
                     status = resp.status_code
                     data = resp.json() if status in (200, 202) else {}
+            dt = (time.perf_counter() - t0)
+            _dbg(f"completion http_status={status} elapsed={dt:.2f}s budget={budget}s trace_id={trace_id}")
         except Exception as e:
+            _dbg(f"completion exception={type(e).__name__}:{str(e)[:160]} trace_id={trace_id}")
             raise CustomLLMError(status_code=500, message=str(e)[:400])
 
         if status == 200:
@@ -307,6 +370,7 @@ class CodeWorldLLM(CustomLLM):
                         if rr is None:
                             raise CustomLLMError(status_code=500, message="bridge result_url is invalid")
                         if rr.status_code == 200:
+                            _dbg(f"poll OK -> 200 trace_id={trace_id}")
                             return self._map_response(model_response, rr.json(), normalized_model)
                         if rr.status_code != 202:
                             try:
@@ -314,9 +378,12 @@ class CodeWorldLLM(CustomLLM):
                                 msg = payload.get("error") if isinstance(payload, dict) else payload
                             except Exception:
                                 msg = rr.text
+                            _dbg(f"poll error status={rr.status_code} msg={str(msg)[:120]} trace_id={trace_id}")
                             raise CustomLLMError(status_code=rr.status_code, message=str(msg)[:400])
                 except Exception:
                     pass
+                remaining = max(0.0, t_end - time.time())
+                _dbg(f"poll 202 sleep={backoff:.1f}s remaining~{remaining:.1f}s trace_id={trace_id}")
                 time.sleep(backoff)
                 backoff = min(backoff * 2.0, 10.0)
             raise CustomLLMError(status_code=504, message="CodeWorld job did not complete within budget")
@@ -348,6 +415,7 @@ class CodeWorldLLM(CustomLLM):
     ) -> ModelResponse:
         base = self._resolve_base(api_base)
         normalized_model = self._normalize_model_string(model)
+        _dbg(f"acompletion model={normalized_model}")
         payload = self._build_payload(model, messages, optional_params or {})
         hdr = {**headers, **self._headers(api_key)} if headers else self._headers(api_key)
         budget = float(payload.get("request_timeout", 60.0))
@@ -363,7 +431,9 @@ class CodeWorldLLM(CustomLLM):
                     resp = await c.post(f"{base}/bridge/complete", json=payload)
                     status = resp.status_code
                     data = resp.json() if status in (200, 202) else {}
+            _dbg(f"acompletion http_status={status} budget={budget}s")
         except Exception as e:
+            _dbg(f"acompletion exception={str(e)[:120]}")
             raise CustomLLMError(status_code=500, message=str(e)[:400])
 
         if status == 200:
@@ -379,6 +449,7 @@ class CodeWorldLLM(CustomLLM):
                     try:
                         rr = await c.get(base + result_url)
                         if rr.status_code == 200:
+                            _dbg("apoll OK -> 200")
                             return self._map_response(model_response, rr.json(), normalized_model)
                         if rr.status_code != 202:
                             try:
@@ -386,9 +457,12 @@ class CodeWorldLLM(CustomLLM):
                                 msg = payload.get("error") if isinstance(payload, dict) else payload
                             except Exception:
                                 msg = rr.text
+                            _dbg(f"apoll error status={rr.status_code} msg={str(msg)[:120]}")
                             raise CustomLLMError(status_code=rr.status_code, message=str(msg)[:400])
                     except Exception:
                         pass
+                    remaining = max(0.0, t_end - time.time())
+                    _dbg(f"apoll 202 sleep={backoff:.1f}s remaining~{remaining:.1f}s")
                     await asyncio.sleep(backoff)  # type: ignore
                     backoff = min(backoff * 2.0, 10.0)
             raise CustomLLMError(status_code=504, message="CodeWorld job did not complete within budget")
