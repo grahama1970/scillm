@@ -1455,7 +1455,20 @@ def completion(  # type: ignore # noqa: PLR0915
             deployments = [
                 m["litellm_params"] for m in model_list if m["model_name"] == model
             ]
-            return litellm.batch_completion_models(deployments=deployments, **args)
+            resp = litellm.batch_completion_models(deployments=deployments, **args)
+            if resp is not None:
+                return resp
+            # Fallback: if no model responded (e.g., exceptions filtered), try first deployment directly
+            if deployments:
+                first = dict(deployments[0])
+                fb_args = {k: v for k, v in dict(args).items() if v is not None}
+                fb_args.pop("model_list", None)
+                # Do not let base args override explicit deployment params
+                for k, v in list(fb_args.items()):
+                    if k in first:
+                        fb_args.pop(k)
+                return litellm.completion(**first, **fb_args)
+            return None
         if litellm.model_alias_map and model in litellm.model_alias_map:
             model = litellm.model_alias_map[
                 model
@@ -2837,6 +2850,39 @@ def completion(  # type: ignore # noqa: PLR0915
                 logging_obj=logging,
                 custom_llm_provider="maritalk",
                 custom_prompt_dict=custom_prompt_dict,
+            )
+
+            response = model_response
+        elif custom_llm_provider in ("openai_like", "hosted_vllm", "lm_studio", "llamafile"):
+            # HTTPX OpenAI-compatible chat path (uses OpenAILikeChatHandler)
+            api_base = (
+                api_base or litellm.api_base or get_secret_str("OPENAI_LIKE_API_BASE")
+            )
+            if extra_headers is not None:
+                headers = headers or {}
+                headers.update(extra_headers)
+
+            model_response = openai_like_chat_completion.completion(
+                model=model,
+                messages=messages,
+                api_base=api_base,
+                custom_prompt_dict=custom_prompt_dict,
+                model_response=model_response,
+                print_verbose=print_verbose,
+                encoding=encoding,
+                api_key=api_key,
+                logging_obj=logging,
+                optional_params=optional_params,
+                acompletion=acompletion,
+                litellm_params=litellm_params,
+                logger_fn=logger_fn,
+                headers=headers,
+                timeout=timeout,
+                base_model=None,
+                client=client,
+                json_mode=json_mode,
+                custom_endpoint=None,
+                custom_llm_provider=custom_llm_provider,
             )
 
             response = model_response

@@ -5,7 +5,8 @@ For handling OpenAI-like chat completions, like IBM WatsonX, etc.
 """
 
 import json
-from typing import Any, Callable, Optional, Union
+import os
+from typing import Any, Callable, Optional, Union, Tuple
 
 import httpx
 
@@ -21,6 +22,51 @@ from litellm.utils import CustomStreamWrapper, ProviderConfigManager
 
 from ..common_utils import OpenAILikeBase, OpenAILikeError
 from .transformation import OpenAILikeChatConfig
+
+
+def _scillm_transport_name(api_base: str) -> str:
+    # OpenAI-compatible non-OpenAI bases use HTTPX transport here
+    return "httpx-oai-compatible"
+
+
+def _scillm_detect_auth_style(h: dict) -> str:
+    auth = h.get("Authorization")
+    if isinstance(auth, str) and auth.startswith("Bearer"):
+        return "bearer"
+    if "x-api-key" in h:
+        return "x-api-key"
+    return "none"
+
+
+def _scillm_apply_auth_policy(api_base: str, headers: dict) -> Tuple[dict, str]:
+    """
+    SCILLM paved-path auth for OpenAI-compatible gateways:
+    - SCILLM_SAFE_MODE=1 (default): no mutation, only detect style.
+    - When SCILLM_SAFE_MODE!=1 and SCILLM_ENABLE_AUTO_AUTH=1:
+        Prefer x-api-key for non api.openai.com; convert Bearer->x-api-key.
+    Never log secrets; only style names are surfaced for DEBUG.
+    """
+    safe_mode = os.getenv("SCILLM_SAFE_MODE", "1") == "1"
+    enable_auto_auth = os.getenv("SCILLM_ENABLE_AUTO_AUTH", "0") == "1"
+    new_headers = dict(headers or {})
+    is_openai = "api.openai.com" in (api_base or "")
+
+    if safe_mode:
+        return new_headers, _scillm_detect_auth_style(new_headers)
+
+    if not is_openai:
+        # Prefer x-api-key on non-OpenAI bases
+        if "x-api-key" in new_headers:
+            return new_headers, "x-api-key"
+        auth = new_headers.get("Authorization")
+        if isinstance(auth, str) and auth.startswith("Bearer") and enable_auto_auth:
+            token = auth.split(" ", 1)[-1]
+            new_headers.pop("Authorization", None)
+            new_headers["x-api-key"] = token
+            return new_headers, "x-api-key"
+
+    # Default: no mutation, return detected style
+    return new_headers, _scillm_detect_auth_style(new_headers)
 
 
 async def make_call(
@@ -252,6 +298,10 @@ class OpenAILikeChatHandler(OpenAILikeBase):
             custom_endpoint=custom_endpoint,
             headers=headers,
         )
+        # SCILLM: apply paved-path auth policy for HTTPX OpenAI-compatible transport
+        # Do not log secrets; only capture style names.
+        headers, __sc_auth_style = _scillm_apply_auth_policy(api_base=api_base, headers=headers)
+        __sc_transport = _scillm_transport_name(api_base)
 
         stream: bool = optional_params.pop("stream", None) or False
         extra_body = optional_params.pop("extra_body", {})
@@ -279,14 +329,20 @@ class OpenAILikeChatHandler(OpenAILikeBase):
         }
 
         ## LOGGING
+        _debug_meta = os.getenv("SCILLM_DEBUG_META", "0").lower() in {"1","true","yes"}
+        additional = {
+            "complete_input_dict": data,
+            "api_base": api_base,
+        }
+        if _debug_meta:
+            additional.update({
+                "scillm_transport": __sc_transport,
+                "scillm_auth_style": __sc_auth_style,
+            })
         logging_obj.pre_call(
             input=messages,
             api_key=api_key,
-            additional_args={
-                "complete_input_dict": data,
-                "api_base": api_base,
-                "headers": headers,
-            },
+            additional_args=additional,
         )
         if acompletion is True:
             if client is None or not isinstance(client, AsyncHTTPHandler):

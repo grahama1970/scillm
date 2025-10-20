@@ -106,20 +106,33 @@ OpenAI‑compatible (Chutes) usage note
 - Avoid adding an `openai/` prefix; if present, it will be stripped for OpenAI‑compatible providers.
 
 Gateways that require x‑api‑key (no Bearer)
-- Happy Path: do nothing. SciLLM auto‑negotiates auth style the first time it sees a non‑OpenAI base (e.g., Chutes) and caches it.
-- You may force a style via env if needed:
-  - `SCILLM_OPENAI_AUTH=auto|bearer|x-api-key|raw` (default: `auto`).
-  - For `x-api-key`/`raw`, SciLLM switches to the OpenAI‑compatible HTTPX path and injects the right header; no code changes required.
+- Stable path: pass `x-api-key` explicitly with the HTTPX OpenAI‑compatible provider.
 
-Python one‑liner (Chutes):
+Python snippet (Chutes):
 ```python
-from scillm import completion; import os
-print(completion(model='moonshotai/Kimi-K2-Instruct-0905',
-                messages=[{'role':'user','content':'{}'}],
-                response_format={'type':'json_object'},
-                api_base=os.environ['CHUTES_API_BASE'],
-                api_key=os.environ.get('CHUTES_API_KEY','')).choices[0].message.content)
+from scillm import completion
+import os
+resp = completion(
+  model=os.environ["CHUTES_MODEL_ID"],
+  api_base=os.environ["CHUTES_API_BASE"],
+  api_key=None,
+  custom_llm_provider="openai_like",
+  messages=[{"role":"user","content":"Return only {\"ok\":true} as JSON."}],
+  response_format={"type":"json_object"},
+  extra_headers={"x-api-key": os.environ["CHUTES_API_KEY"]},
+)
+print(resp.choices[0].message.get("content",""))
 ```
+
+Optional (experimental): Opt‑in to convert Bearer→x‑api‑key for non‑OpenAI bases:
+```
+export SCILLM_SAFE_MODE=0
+export SCILLM_ENABLE_AUTO_AUTH=1
+```
+
+Safe defaults:
+- `SCILLM_SAFE_MODE=1` (default) preserves legacy behavior and never mutates headers.
+- DEBUG-only names (no secrets) are exposed when `SCILLM_DEBUG_META=1`.
 
 Codex‑Agent Zero‑Guess Quickstart (no CodeWorld)
 - Start sidecar: `docker compose -f local/docker/compose.agents.yml up -d codex-sidecar`

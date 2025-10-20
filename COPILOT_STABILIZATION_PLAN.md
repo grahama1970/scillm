@@ -2,9 +2,9 @@
 
 **Project**
 
-* Fork/Repo: `experiments/litellm`
+* Fork/Repo: `grahama1970/scillm`
 * Branch: `stabilize/scillm-core-transport-auth`
-* Path: `git@github.com:experiments/litellm.git#stabilize/scillm-core-transport-auth`
+* Path: `git@github.com:grahama1970/scillm.git#stabilize/scillm-core-transport-auth`
 
 **Task**
 
@@ -73,4 +73,3 @@
 * Tests/smokes: Which deterministic smokes must pass (counts > 0, strict formats)?
 * Performance: Any batch sizes, rate limits, or timeouts/retries to honor?
 * Observability: What summary lines should the CLI print on completion?
-
