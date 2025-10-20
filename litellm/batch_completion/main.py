@@ -164,20 +164,38 @@ def batch_completion_models(*args, **kwargs):
                     return future.result()
     elif "deployments" in kwargs:
         deployments = kwargs["deployments"]
-        kwargs.pop("deployments")
-        kwargs.pop("model_list")
-        nested_kwargs = kwargs.pop("kwargs", {})
+        # do not mutate caller kwargs beyond this point
+        _base_kwargs = dict(kwargs)
+        _base_kwargs.pop("deployments", None)
+        _base_kwargs.pop("model_list", None)
+        nested_kwargs = _base_kwargs.pop("kwargs", {})
+        # Whitelist of completion kwargs safe to forward to per-deployment calls
+        _allowed = {
+            "messages","timeout","temperature","top_p","n","stream","stream_options","stop",
+            "max_completion_tokens","max_tokens","modalities","prediction","audio","presence_penalty",
+            "frequency_penalty","logit_bias","user","reasoning_effort","response_format","seed","tools",
+            "tool_choice","logprobs","top_logprobs","parallel_tool_calls","web_search_options","deployment_id",
+            "safety_identifier","functions","function_call","base_url","api_version","api_key","thinking",
+            "custom_llm_provider","headers","extra_headers"
+        }
         futures = {}
         with ThreadPoolExecutor(max_workers=len(deployments)) as executor:
             for deployment in deployments:
-                for key in kwargs.keys():
-                    if (
-                        key not in deployment
-                    ):  # don't override deployment values e.g. model name, api base, etc.
-                        deployment[key] = kwargs[key]
-                kwargs = {**deployment, **nested_kwargs}
-                futures[deployment["model"]] = executor.submit(
-                    litellm.completion, **kwargs
+                # compose per-call kwargs without mutating shared dicts
+                call_kwargs = dict(deployment)
+                for key, val in _base_kwargs.items():
+                    if key in _allowed and key not in call_kwargs:  # don't override deployment-provided values
+                        call_kwargs[key] = val
+                if nested_kwargs:
+                    call_kwargs.update(nested_kwargs)
+                # Ensure auth headers survive provider normalization: merge extra_headers into headers
+                eh = call_kwargs.pop("extra_headers", None)
+                if isinstance(eh, dict) and eh:
+                    merged_headers = dict(call_kwargs.get("headers", {}) or {})
+                    merged_headers.update(eh)
+                    call_kwargs["headers"] = merged_headers
+                futures[deployment.get("model", "__unknown__")] = executor.submit(
+                    litellm.completion, **call_kwargs
                 )
 
             while futures:
@@ -188,23 +206,23 @@ def batch_completion_models(*args, **kwargs):
                 for future in done:
                     try:
                         result = future.result()
-                        return result
+                        if result is not None:
+                            return result
                     except Exception:
-                        # if model 1 fails, continue with response from model 2, model3
+                        # if model 1 fails, continue with response from other models
                         print_verbose(
                             "\n\ngot an exception, ignoring, removing from futures"
                         )
-                        print_verbose(futures)
-                        new_futures = {}
-                        for key, value in futures.items():
-                            if future == value:
-                                print_verbose(f"removing key{key}")
-                                continue
-                            else:
-                                new_futures[key] = value
-                        futures = new_futures
-                        print_verbose(f"new futures{futures}")
-                        continue
+                    # remove completed/failed future and continue loop
+                    new_futures = {}
+                    for key, value in futures.items():
+                        if future == value:
+                            print_verbose(f"removing key{key}")
+                            continue
+                        else:
+                            new_futures[key] = value
+                    futures = new_futures
+                    print_verbose(f"new futures{futures}")
 
                 print_verbose("\n\ndone looping through futures\n\n")
                 print_verbose(futures)
