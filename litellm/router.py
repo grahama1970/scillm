@@ -794,6 +794,21 @@ class Router:
         eff_conc = max_concurrency if max_concurrency is not None else concurrency
         if self._deterministic:
             eff_conc = 1
+        # Chutes/OpenAI-compatible guardrail: cap batch concurrency only for Chutes contexts
+        try:
+            import os as _os
+            _is_chutes = bool(_os.getenv("CHUTES_API_BASE") or (_os.getenv("SCILLM_CHUTES_MODE", "0").lower() in {"1","true","yes"}))
+            if _is_chutes:
+                _cap_env = _os.getenv("SCILLM_MAX_CONCURRENCY")
+                if _cap_env is not None and _cap_env != "":
+                    cap = max(1, int(_cap_env))
+                    if eff_conc is None or eff_conc > cap:
+                        eff_conc = cap
+                else:
+                    if eff_conc is None or eff_conc > 2:
+                        eff_conc = 2
+        except Exception:
+            pass
 
         # Enforce request-count budget pre-scheduling
         reqs = list(requests)
@@ -809,6 +824,22 @@ class Router:
             concurrency=eff_conc,
             preserve_order=preserve_order,
         )
+
+        # If any request raised a rate-limit (429), inform the pacer to cool down
+        try:
+            import os as _os
+            from litellm.extras.provider_pacer import note_429 as _scillm_note_429
+            _base_hint = _os.getenv("CHUTES_API_BASE") or _os.getenv("OPENAI_BASE_URL")
+            for _r in prs:
+                e = getattr(_r, "exception", None)
+                if e is None:
+                    continue
+                code = getattr(e, "status_code", None) or getattr(e, "code", None)
+                if str(code) == "429":
+                    _scillm_note_429(_base_hint)
+                    break
+        except Exception:
+            pass
 
         if not return_exceptions:
             for r in prs:

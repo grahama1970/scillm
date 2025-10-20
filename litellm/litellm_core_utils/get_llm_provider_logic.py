@@ -117,6 +117,17 @@ def get_llm_provider(  # noqa: PLR0915
                 except Exception:
                     pass
             return model.split("/",1)[1] if "/" in model else model, _clp, api_key, api_base
+        # Fast-path by model prefix: allow users to only change the model to "codex-agent/<id>"
+        try:
+            _prefix = model.split("/", 1)[0]
+            if _prefix in ("codex-agent", "code-agent", "code_agent"):
+                return (model.split("/",1)[1] if "/" in model else model), "codex-agent", api_key, api_base
+            # Experimental: codex-cloud prefix (reserved). We only normalize provider here;
+            # completion() will raise a clear NotImplemented error unless a custom path hooks it.
+            if _prefix == "codex-cloud":
+                return (model.split("/",1)[1] if "/" in model else model), "codex-cloud", api_key, api_base
+        except Exception:
+            pass
         if litellm.LiteLLMProxyChatConfig._should_use_litellm_proxy_by_default(
             litellm_params=litellm_params
         ):

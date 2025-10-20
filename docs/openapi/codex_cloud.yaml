@@ -1,0 +1,114 @@
+# SPDX-License-Identifier: MIT
+openapi: 3.0.3
+info:
+  title: Codex Cloud Tasks (Proposed)
+  version: 0.1.0
+  description: |
+    Minimal HTTP contract for remote code generation tasks used by SciLLM.
+    This document captures the endpoints our client currently calls.
+servers:
+  - url: https://chatgpt.com/backend-api
+    description: Normalized base ("/backend-api" appended for chatgpt.com/chat.openai.com)
+paths:
+  /wham/environments:
+    get:
+      summary: List environments
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    id: { type: string }
+                    label: { type: string }
+        '401': { description: Unauthorized }
+  /wham/tasks:
+    post:
+      summary: Create a code generation task
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                environment_id: { type: string, description: "or environmentId (camelCase)" }
+                prompt: { type: string }
+                git_ref: { type: string, description: "or gitRef" }
+                best_of_n: { type: integer, description: "or bestOfN" }
+                qa_mode: { type: boolean, description: "or qaMode" }
+      responses:
+        '200':
+          description: Created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  id: { type: string }
+        '401': { description: Unauthorized }
+  /wham/tasks/{task_id}:
+    get:
+      summary: Get task summary/status
+      parameters:
+        - in: path
+          name: task_id
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  id: { type: string }
+                  status: { type: string }
+                  turn_status: { type: string }
+        '404': { description: Not Found }
+  /wham/tasks/{task_id}/text:
+    get:
+      summary: Get task prompt/text
+      parameters:
+        - in: path
+          name: task_id
+          required: true
+          schema: { type: string }
+      responses:
+        '200': { description: OK }
+        '404': { description: Not Found }
+  /wham/tasks/{task_id}/messages:
+    get:
+      summary: Get task messages/logs
+      parameters:
+        - in: path
+          name: task_id
+          required: true
+          schema: { type: string }
+      responses:
+        '200': { description: OK }
+        '404': { description: Not Found }
+  /wham/tasks/{task_id}/diff:
+    get:
+      summary: Get task diff (unified)
+      parameters:
+        - in: path
+          name: task_id
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: OK (text/plain preferred; JSON {diff:string} tolerated)
+        '404': { description: Not Found }
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+security:
+  - bearerAuth: []

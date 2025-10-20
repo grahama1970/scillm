@@ -68,6 +68,7 @@ LITELLM_ENABLE_CERTAINLY=1 CERTAINLY_BRIDGE_BASE=http://127.0.0.1:8787 \
   - Quick HTTP (high reasoning):
     `curl -sS "$CODEX_AGENT_API_BASE/v1/chat/completions" -H 'Content-Type: application/json' -d '{"model":"gpt-5","reasoning":{"effort":"high"},"messages":[{"role":"user","content":"ping"}]}' | jq -r '.choices[0].message.content'`
 - Router call: `completion(model="<MODEL_ID>", custom_llm_provider="codex-agent", api_base=$CODEX_AGENT_API_BASE, messages=[...], reasoning_effort="high")`
+- Model-only UX: `completion(model="codex-agent/gpt-5", api_base=$CODEX_AGENT_API_BASE, messages=[...], response_format={"type":"json_object"}, temperature=1)`
 - Optional cache: `from litellm.extras import initialize_litellm_cache; initialize_litellm_cache()`
 
 MCTS (CodeWorld) one‑POST live check
@@ -140,7 +141,7 @@ Use either local (mini‑agent) or Docker (sidecar). Both expose the same API; d
       retry_enabled=True,
       honor_retry_after=True
   )
-  print(out.choices[0].message["content"])
+  print(out.choices[0].message["content"])  # JSON
   ```
 
 Docker option: `docker compose -f local/docker/compose.agents.yml up --build -d` exposes mini‑agent on `127.0.0.1:8788` and the codex sidecar on `127.0.0.1:8077`. Point `CODEX_AGENT_API_BASE` at the one you want (no `/v1`).
@@ -167,6 +168,46 @@ from litellm import Router
 r = Router(model_list=[{"model_name":"gpt-5","litellm_params":{"model":"gpt-5","custom_llm_provider":"codex-agent","api_base":os.getenv("CODEX_AGENT_API_BASE"),"api_key":os.getenv("CODEX_AGENT_API_KEY")}}])
 ```
 
+### Judge (parameter‑first; completion and helper forms)
+
+- Completion (no envs required besides base):
+  ```python
+  from scillm import completion
+  base = "http://127.0.0.1:8089"
+  msgs=[
+    {"role":"system","content":"Return STRICT JSON only: {best_id:string, rationale_short:string}."},
+    {"role":"user","content":"A vs B — pick one and say why (short)."},
+  ]
+  r = completion(model="gpt-5", custom_llm_provider="codex-agent", api_base=base,
+                 messages=msgs, response_format={"type":"json_object"},
+                 temperature=1, allowed_openai_params=["reasoning","reasoning_effort"], reasoning_effort="medium")
+  print(r.choices[0].message["content"])  # strict JSON
+  ```
+
+- Minimal helper (direct HTTP, no Router):
+  ```python
+  from scillm.extras.codex import chat
+  res = chat(messages=msgs, model="gpt-5", base=base,
+             response_format={"type":"json_object"}, temperature=1, reasoning_effort="medium")
+  print(res["choices"][0]["message"]["content"])  # strict JSON
+  ```
+
+### Codex‑Cloud (Experimental)
+
+Use codex-ts-sdk to run best‑of‑N remote code tasks as an alternative to local codex‑agent:
+
+- One‑time install: `cd scillm/extras/js && npm install`
+- Enable + run smoke:
+  ```bash
+  export SCILLM_EXPERIMENTAL_CODEX_CLOUD=1
+  export CODEX_CLOUD_API_KEY=...   # or OPENAI_API_KEY
+  # Optional: export CODEX_CLOUD_BASE_URL=... CODEX_CLOUD_ENV=prod
+  python debug/live_best_of_n_and_judge.py
+  ```
+- Notes:
+  - Produces a simple variants dict with a diff (PoC). We can expand to per‑attempt variants.
+  - Chat/completions for `codex-cloud` are intentionally not implemented yet; use helpers only.
+
 ### Retry metadata (429 backoff)
 Set:
 ```
@@ -187,6 +228,17 @@ Result snippet:
 ```
 
 ## Rate Limiting & Retries (429)
+
+### Chutes mode (QPS pacing)
+If you target an OpenAI‑compatible gateway with ~180 RPM limits (e.g., Chutes), you can enable gentle, process‑local pacing:
+
+```bash
+export SCILLM_RATE_LIMIT_QPS=2.5   # ~150 RPM average
+export SCILLM_COOLDOWN_429_S=120   # cool‑down window after a 429
+```
+
+Pair this with a low runner concurrency (e.g., MAX_WORKERS=2) to avoid bursts.
+
 
 For long unattended runs that encounter provider 429s, SciLLM’s Router supports opt‑in retrier logic (Retry‑After awareness, exponential jitter backoff, budgets, callbacks). See docs/guide/RATE_LIMIT_RETRIES.md for env and per‑call examples.
 

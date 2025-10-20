@@ -83,7 +83,16 @@ class CodexAgentLLM(CustomLLM):
         client: Optional[HTTPHandler] = None,
     ) -> ModelResponse:
         base = self._resolve_base(api_base)
-        payload: dict[str, Any] = {"model": model, "messages": messages}
+        # Normalize common provider prefixes so the sidecar/gateway sees a plain model id
+        try:
+            _mid = str(model)
+            if _mid.startswith("codex-agent/"):
+                _mid = _mid.split("/", 1)[1]
+            elif _mid.startswith("codex/"):
+                _mid = _mid.split("/", 1)[1]
+        except Exception:
+            _mid = model
+        payload: dict[str, Any] = {"model": _mid, "messages": messages}
         extras = dict(optional_params or {})
         for key, value in extras.items():
             if key not in ("model", "messages"):
@@ -102,6 +111,8 @@ class CodexAgentLLM(CustomLLM):
             pass
         # Compose headers; honor provided headers but add Authorization if api_key is present
         _hdr = dict(headers or {})
+        # Force local sidecar handling (the sidecar honors this header to bypass any forwarding config)
+        _hdr.setdefault("X-Codex-Force-Local", "1")
         if api_key and not any(k.lower() == "authorization" for k in _hdr.keys()):
             _hdr["Authorization"] = f"Bearer {api_key}"
         # Sanitize hop-by-hop and duplicate Authorization headers defensively
@@ -273,7 +284,15 @@ class CodexAgentLLM(CustomLLM):
         client: Optional[AsyncHTTPHandler] = None,
     ) -> ModelResponse:
         base = self._resolve_base(api_base)
-        payload: dict[str, Any] = {"model": model, "messages": messages}
+        try:
+            _mid = str(model)
+            if _mid.startswith("codex-agent/"):
+                _mid = _mid.split("/", 1)[1]
+            elif _mid.startswith("codex/"):
+                _mid = _mid.split("/", 1)[1]
+        except Exception:
+            _mid = model
+        payload: dict[str, Any] = {"model": _mid, "messages": messages}
         extras = dict(optional_params or {})
         for key, value in extras.items():
             if key not in ("model", "messages"):
@@ -311,6 +330,8 @@ class CodexAgentLLM(CustomLLM):
                 continue
             _sanitized[k] = v
         _hdr = _sanitized
+        # Force local sidecar handling for async path as well
+        _hdr.setdefault("X-Codex-Force-Local", "1")
         request_timeout: Optional[Union[float, httpx.Timeout]] = timeout or 30.0
         max_retries = int(os.getenv("CODEX_AGENT_MAX_RETRIES", "2"))
         base_ms = int(os.getenv("CODEX_AGENT_RETRY_BASE_MS", "120"))

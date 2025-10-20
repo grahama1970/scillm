@@ -150,7 +150,13 @@ class ChatMessage(BaseModel):
 class ChatCompletionRequest(BaseModel):
     model: str = Field(..., description="Model name (e.g., gpt-5).")
     messages: List[ChatMessage] = Field(..., description="OpenAI-style messages array.")
+    # Optional OpenAI-compatible fields (accepted/passed through when forwarding)
     stream: bool = Field(default=False)
+    response_format: Optional[Dict[str, object]] = None
+    temperature: Optional[float] = None
+    max_tokens: Optional[int] = None
+    reasoning_effort: Optional[str] = None
+    reasoning: Optional[Dict[str, object]] = None
 
 
 # ---------------------------------------------------------------------------
@@ -355,12 +361,16 @@ def _extract_codex_content(raw: str) -> str:
 app = FastAPI(title="Codex Sidecar", version="0.1.0")
 
 
+FORWARD_BASE = os.getenv("CODEX_FORWARD_BASE") or os.getenv("OPENAI_BASE_URL") or os.getenv("SCILLM_AUTOGEN_FALLBACK_BASE")
+FORWARD_TOKEN = os.getenv("CODEX_FORWARD_TOKEN") or os.getenv("CHUTES_API_KEY") or os.getenv("OPENAI_API_KEY")
+
+
 @app.get("/healthz")
 async def healthz() -> Dict[str, object]:
     home = os.getenv("HOME", "/root")
     auth_path = os.getenv("CODEX_AUTH_PATH", os.path.join(home, ".codex", "auth.json"))
     auth_present = os.path.exists(auth_path)
-    return {"ok": True, "concurrency": SETTINGS.max_concurrency, "auth_present": auth_present}
+    return {"ok": True, "concurrency": SETTINGS.max_concurrency, "auth_present": auth_present, "forward_mode": bool(FORWARD_BASE)}
 
 
 @app.post("/v1/chat/completions")
@@ -384,7 +394,82 @@ async def chat_completions(req: ChatCompletionRequest, request: Request):
             return JSONResponse(body)
     except Exception:
         pass
-    # Preflight: require auth.json when not in echo mode to avoid opaque CLI failures
+    # Forwarding mode: proxy to an upstream OpenAI-compatible base if configured.
+    # Guard: if the caller uses explicit codex-agent model ids ("codex-agent/<id>"),
+    # bypass forwarding and use the local CLI path to avoid upstream 404s.
+    _model_raw = str(req.model or "")
+    _force_local = False
+    try:
+        _force_local = str(request.headers.get("x-codex-force-local", "")).lower() in ("1","true","yes")
+    except Exception:
+        _force_local = False
+    if FORWARD_BASE and not _model_raw.startswith("codex-agent/") and not _force_local:
+        import urllib.request as rq
+        base = FORWARD_BASE.rstrip("/")
+        headers = {"Content-Type": "application/json"}
+        if FORWARD_TOKEN:
+            headers["Authorization"] = f"Bearer {FORWARD_TOKEN}"
+        def _normalize_model_id(mid: str) -> str:
+            try:
+                if mid.startswith("codex/"):
+                    return mid.split("/", 1)[1]
+                return mid
+            except Exception:
+                return mid
+
+        model_norm = _normalize_model_id(req.model)
+        body = {
+            "model": model_norm,
+            "messages": [m.model_dump() for m in req.messages],
+            "stream": False,
+        }
+        # Pass-through common optional params
+        if req.response_format is not None:
+            body["response_format"] = req.response_format
+        if req.temperature is not None:
+            body["temperature"] = req.temperature
+        if req.max_tokens is not None:
+            body["max_tokens"] = req.max_tokens
+        if req.reasoning_effort is not None:
+            body["reasoning_effort"] = req.reasoning_effort
+        if req.reasoning is not None:
+            body["reasoning"] = req.reasoning
+        try:
+            data = json.dumps(body).encode("utf-8")
+            with rq.urlopen(rq.Request(url=base + "/v1/chat/completions", data=data, headers=headers, method="POST"), timeout=SETTINGS.abs_timeout_s) as resp:
+                status = int(getattr(resp, "status", 0) or 0)
+                payload = json.loads(resp.read().decode("utf-8", "ignore"))
+                return JSONResponse(payload, status_code=status)
+        except Exception as e:
+            msg = str(e)
+            # Retry once by falling back to last-segment id if upstream 404s and model contains '/'
+            if "HTTP Error 404" in msg and "/" in req.model:
+                try:
+                    last_seg = req.model.split("/")[-1]
+                    if last_seg != model_norm:
+                        body_retry = dict(body)
+                        body_retry["model"] = last_seg
+                        data2 = json.dumps(body_retry).encode("utf-8")
+                        with rq.urlopen(rq.Request(url=base + "/v1/chat/completions", data=data2, headers=headers, method="POST"), timeout=SETTINGS.abs_timeout_s) as resp2:
+                            status2 = int(getattr(resp2, "status", 0) or 0)
+                            payload2 = json.loads(resp2.read().decode("utf-8", "ignore"))
+                            return JSONResponse(payload2, status_code=status2)
+                except Exception:
+                    pass
+            # Translate common upstream 404s to a helpful 400 for clients
+            if "HTTP Error 404" in msg:
+                hint = {
+                    "error": {
+                        "message": "Upstream 404: model not routable for chat/completions.",
+                        "hint": "Choose a chat-capable model id from /v1/models (capabilities.chat=true) or set CODEX_JUDGE_MODEL. The sidecar also accepts 'codex/<id>' and normalizes to '<id>'.",
+                        "model_tried": req.model,
+                        "normalized": model_norm,
+                    }
+                }
+                return JSONResponse(hint, status_code=400)
+            raise HTTPException(status_code=502, detail=f"Upstream error: {msg[:800]}")
+
+    # Preflight (CLI mode): require auth.json when not in echo mode to avoid opaque failures
     try:
         echo = os.getenv("CODEX_SIDECAR_ECHO", "") == "1" or os.getenv("CODEX_ECHO_MODE", "") == "1"
         home = os.getenv("HOME", "/root")
@@ -406,6 +491,15 @@ async def chat_completions(req: ChatCompletionRequest, request: Request):
     prompt = _messages_to_prompt(req.messages)
     if not prompt:
         raise HTTPException(status_code=400, detail="Empty prompt")
+    # Normalize model id for the local CLI (removes local provider prefixes)
+    _cli_model = str(req.model or "")
+    try:
+        if _cli_model.startswith("codex-agent/"):
+            _cli_model = _cli_model.split("/", 1)[1]
+        elif _cli_model.startswith("codex/"):
+            _cli_model = _cli_model.split("/", 1)[1]
+    except Exception:
+        pass
 
     async def _invoke_nonstream() -> JSONResponse:
         async with _SEM:
@@ -417,7 +511,7 @@ async def chat_completions(req: ChatCompletionRequest, request: Request):
                 try:
                     code, stdout_text, stderr_text = await _run_codex_once(
                         prompt=prompt,
-                        model=req.model,
+                        model=_cli_model,
                         input_mode=SETTINGS.input_mode,
                         args=SETTINGS.codex_cmd,
                         prompt_flag=SETTINGS.prompt_flag,
@@ -541,14 +635,41 @@ async def chat_completions(req: ChatCompletionRequest, request: Request):
     return await _invoke_stream()
 
 
+# Compatibility alias: accept clients posting to "/chat/completions" without the "/v1" prefix.
+@app.post("/chat/completions")
+async def chat_completions_compat(req: ChatCompletionRequest, request: Request):
+    return await chat_completions(req, request)
+
+
 @app.get("/v1/models")
 async def list_models() -> Dict[str, object]:
-    """Minimal stub for OpenAI-compatible model listing.
+    """Forward /v1/models when a base is configured; else return a minimal list.
 
-    Sidecar does not maintain a dynamic registry; provide a stable placeholder
-    so clients that probe /v1/models don't fail.
+    When forwarding, include a synthetic "capabilities" hint if upstream lacks it.
     """
-    return {"object": "list", "data": [{"id": "gpt-5", "object": "model"}]}
+    if FORWARD_BASE:
+        import urllib.request as rq
+        base = FORWARD_BASE.rstrip("/")
+        headers = {}
+        if FORWARD_TOKEN:
+            headers["Authorization"] = f"Bearer {FORWARD_TOKEN}"
+        try:
+            with rq.urlopen(rq.Request(url=base + "/v1/models", headers=headers), timeout=8.0) as resp:
+                payload = json.loads(resp.read().decode("utf-8", "ignore"))
+            # Add a soft hint to each entry if no capabilities field exists
+            try:
+                for m in payload.get("data", []) if isinstance(payload, dict) else []:
+                    if isinstance(m, dict) and "capabilities" not in m:
+                        # Heuristic: assume chat-capable unless id contains "embed" or "rerank"
+                        mid = str(m.get("id", ""))
+                        chat_cap = not any(x in mid.lower() for x in ("embed", "rerank", "tts", "image"))
+                        m["capabilities"] = {"chat": chat_cap}
+            except Exception:
+                pass
+            return payload
+        except Exception as e:
+            return {"object": "list", "data": [], "error": str(e)}
+    return {"object": "list", "data": [{"id": "gpt-5", "object": "model", "capabilities": {"chat": True}}]}
 
 
 # ---------------------------------------------------------------------------

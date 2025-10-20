@@ -162,6 +162,7 @@ from .llms.oobabooga.chat import oobabooga
 from .llms.openai.completion.handler import OpenAITextCompletion
 from .llms.openai.image_variations.handler import OpenAIImageVariationsHandler
 from .llms.openai.openai import OpenAIChatCompletion
+from .llms.codex_agent import CodexAgentLLM
 from .llms.openai.transcriptions.handler import OpenAIAudioTranscription
 from .llms.openai_like.chat.handler import OpenAILikeChatHandler
 from .llms.openai_like.embedding.handler import OpenAILikeEmbeddingHandler
@@ -226,6 +227,7 @@ from litellm.utils import (
 
 ####### ENVIRONMENT VARIABLES ###################
 openai_chat_completions = OpenAIChatCompletion()
+codex_agent_completions = CodexAgentLLM()
 openai_text_completions = OpenAITextCompletion()
 openai_audio_transcriptions = OpenAIAudioTranscription()
 openai_image_variations = OpenAIImageVariationsHandler()
@@ -500,6 +502,13 @@ async def acompletion(
         or _default_provider_env
         or ("openai" if _base_candidate else None)
     )
+
+    # Gentle pacing for OpenAI-compatible gateways (e.g., Chutes) per rate-limit guidelines.
+    try:
+        from litellm.extras.provider_pacer import throttle_async as _scillm_throttle_async
+        await _scillm_throttle_async(_base_candidate)
+    except Exception:
+        pass
 
     # Optional: one-time/session preflight model catalog check
     try:
@@ -1188,6 +1197,15 @@ def completion(  # type: ignore # noqa: PLR0915
         - It supports various optional parameters for customizing the completion behavior.
         - If 'mock_response' is provided, a mock completion response is returned for testing or debugging.
     """
+    # Gentle pacing for OpenAI-compatible gateways (e.g., Chutes) per rate-limit guidelines.
+    try:
+        import os as _os
+        _base_candidate = (kwargs.get("api_base") or base_url or _os.getenv("OPENAI_BASE_URL") or _os.getenv("CHUTES_API_BASE"))
+        from litellm.extras.provider_pacer import throttle_sync as _scillm_throttle_sync
+        _scillm_throttle_sync(_base_candidate)
+    except Exception:
+        pass
+
     ### VALIDATE Request ###
     if model is None:
         raise ValueError("model param not passed in.")
@@ -1199,6 +1217,8 @@ def completion(  # type: ignore # noqa: PLR0915
     ######### unpacking kwargs #####################
     args = locals()
     # Precedence: explicit base_url / api_key / custom_llm_provider override env
+    # Ensure local binding for custom_llm_provider to avoid UnboundLocalError
+    custom_llm_provider = kwargs.get("custom_llm_provider", None)
     api_base = kwargs.get("api_base", None)
     if base_url and not api_base:
         api_base = base_url
@@ -1265,6 +1285,14 @@ def completion(  # type: ignore # noqa: PLR0915
     # ensure local var bound before any reference below
     if "custom_llm_provider" in kwargs and kwargs.get("custom_llm_provider") is not None:
         custom_llm_provider = kwargs.get("custom_llm_provider")
+
+    # Auto-map provider when model is explicitly prefixed (reduce friction for users)
+    try:
+        if (custom_llm_provider is None) and isinstance(model, str):
+            if model.startswith("codex-agent/"):
+                custom_llm_provider = "codex-agent"
+    except Exception:
+        pass
     litellm_logging_obj = kwargs.get("litellm_logging_obj", None)
     id = kwargs.get("id", None)
     metadata = kwargs.get("metadata", None)
@@ -1300,6 +1328,49 @@ def completion(  # type: ignore # noqa: PLR0915
         headers = {}
     if extra_headers is not None:
         headers.update(extra_headers)
+
+    # Auto-auth negotiation for OpenAI-compatible gateways (Happy Path):
+    # If user selected the OpenAI path but the base is not api.openai.com, try
+    # to discover accepted auth style and transparently switch to the HTTPX
+    # OpenAI-compatible path when Bearer is rejected (e.g., Chutes).
+    try:
+        import os as _os
+        _auth_env = (_os.getenv("SCILLM_OPENAI_AUTH") or "auto").strip().lower()
+        _base_for_auth = (
+            kwargs.get("api_base")
+            or base_url
+            or _os.getenv("OPENAI_BASE_URL")
+            or _os.getenv("CHUTES_API_BASE")
+        )
+        _provider = (kwargs.get("custom_llm_provider") or custom_llm_provider or "openai")
+        if (
+            _base_for_auth
+            and isinstance(_provider, str)
+            and _provider.lower().startswith("openai")
+        ):
+            from litellm.extras.preflight import discover_auth_style
+            _prefer = None if _auth_env in ("", "auto") else _auth_env
+            _style = discover_auth_style(
+                api_base=_base_for_auth,
+                api_key=api_key or _os.getenv("OPENAI_API_KEY") or _os.getenv("CHUTES_API_KEY"),
+                prefer=_prefer,
+                timeout_s=float(_os.getenv("SCILLM_OPENAI_AUTH_TIMEOUT_S", "5") or 5),
+                ttl_s=int(_os.getenv("SCILLM_OPENAI_AUTH_TTL_S", "3600") or 3600),
+                soft=True,
+            )
+            if _style in ("x-api-key", "raw"):
+                # Switch to OpenAI-compatible handler and inject header once.
+                custom_llm_provider = "custom_openai"
+                key_for_header = api_key or _os.getenv("CHUTES_API_KEY") or _os.getenv("OPENAI_API_KEY") or ""
+                if _style == "x-api-key" and "x-api-key" not in headers:
+                    headers["x-api-key"] = key_for_header
+                elif _style == "raw" and "Authorization" not in headers:
+                    headers["Authorization"] = key_for_header
+                # Prevent SDK from adding Bearer downstream
+                api_key = None
+    except Exception:
+        # Never fail user calls due to negotiation hints
+        pass
     num_retries = kwargs.get(
         "num_retries", None
     )  ## alt. param for 'max_retries'. Use this to pass retries w/ instructor.
@@ -2179,13 +2250,14 @@ def completion(  # type: ignore # noqa: PLR0915
                 or get_secret("OPENAI_API_BASE")
                 or "https://api.openai.com/v1"
             )
-            # set API KEY
-            api_key = (
-                api_key
-                or litellm.api_key  # for deepinfra/perplexity/anyscale/friendliai we check in get_llm_provider and pass in the api key from there
-                or litellm.openai_key
-                or get_secret("OPENAI_API_KEY")
-            )
+            # set API KEY (skip for custom_openai where headers carry auth)
+            if custom_llm_provider != "custom_openai":
+                api_key = (
+                    api_key
+                    or litellm.api_key  # for deepinfra/perplexity/anyscale/friendliai we check in get_llm_provider and pass in the api key from there
+                    or litellm.openai_key
+                    or get_secret("OPENAI_API_KEY")
+                )
 
             headers = headers or litellm.headers
 
@@ -2246,6 +2318,27 @@ def completion(  # type: ignore # noqa: PLR0915
             ## LOGGING
             logging.post_call(
                 input=messages, api_key=api_key, original_response=response
+            )
+        elif custom_llm_provider == "codex-agent":
+            # Route explicitly to codex-agent provider even if model resembles an OpenAI id (e.g., "gpt-5").
+            # This prevents accidental fallback to OpenAI client when users only change the model to "codex-agent/<id>".
+            response = codex_agent_completions.completion(
+                model=model,
+                messages=messages,
+                api_base=api_base,
+                custom_prompt_dict=custom_prompt_dict,
+                model_response=model_response,
+                print_verbose=print_verbose,
+                encoding=encoding,
+                api_key=api_key,
+                logging_obj=logging,
+                optional_params=optional_params,
+                acompletion=acompletion,
+                litellm_params=litellm_params,
+                logger_fn=logger_fn,
+                headers=headers or {},
+                timeout=timeout,
+                client=client,
             )
         elif (
             model in litellm.open_ai_chat_completion_models
@@ -2309,7 +2402,7 @@ def completion(  # type: ignore # noqa: PLR0915
             ## COMPLETION CALL
             use_base_llm_http_handler = get_secret_bool(
                 "EXPERIMENTAL_OPENAI_BASE_LLM_HTTP_HANDLER"
-            )
+            ) or (custom_llm_provider == "custom_openai")
 
             try:
                 if use_base_llm_http_handler:

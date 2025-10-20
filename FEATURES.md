@@ -28,6 +28,8 @@ Prefer: `SCILLM_ENABLE_CODEWORLD=1` etc. (All `SCILLM_ENABLE_*` have `LITELLM_EN
 |---|---|---|---|---|
 | Providers | OpenAI‑compatible | Call any OpenAI‑style model (local or remote) | `completion(model="openai/<org>/<model>", messages=...)` or `Router(...).completion(...)` | litellm/main.py |
 | Providers | codex‑agent (OpenAI‑compatible shim) | Route to your codex‑agent (tools, plans, MCP) via OpenAI Chat API | `completion(model="<MODEL_ID>", custom_llm_provider="codex-agent", api_base=$CODEX_AGENT_API_BASE, messages=[...])` | Provider adds `/v1` |
+| UX | Model‑only alias | Use “only change model” form (no provider arg) | `completion(model="codex-agent/gpt-5", api_base=$CODEX_AGENT_API_BASE, messages=[...])` | New guard ensures no OpenAI fallback |
+| Deprecated | codex‑cloud (remote best‑of‑N) | No public, stable Codex Cloud Tasks API; prefer codex‑agent or gateway best‑of‑N | — | Disabled by default |
 | Providers | Ollama | Local free LLMs via Ollama | `completion(model="ollama/qwen2.5:7b", custom_llm_provider="ollama", api_base=...)` | Normalizes `ollama/<tag>` → `<tag>` |
 | Providers | CodeWorld | Code orchestration (variants, scoring, judge) over HTTP bridge | `completion(model="codeworld", custom_llm_provider="codeworld", api_base=..., items=...)` | litellm/llms/codeworld.py |
 | Providers | Certainly (Lean4) | Lean4 bridge for formal proofs/checks | `completion(model="certainly", custom_llm_provider="certainly", api_base=..., items=...)` | litellm/llms/lean4.py |
@@ -78,6 +80,37 @@ Auth, echo & debug
   - `python debug/verify_mini_agent.py` (Docker + optional local uvicorn)
   - `python debug/verify_codex_agent_docker.py` (compose start optional; probes /healthz,/models,/chat)
   - `python debug/codex_parallel_probe.py` (prints `content` + `scillm_router` for parallel echo)
+
+Codex‑Agent vs CodeWorld: zero‑ambiguity contract
+- codex‑agent: OpenAI‑compatible chat at `$CODEX_AGENT_API_BASE/v1/chat/completions`.
+  - Use `model="codex-agent/<ID>"` or `custom_llm_provider="codex-agent"` with `model="<ID>"`.
+  - Minimal helper: `from scillm.extras.codex import chat`.
+  - Doctor: `python debug/codex_agent_doctor.py` (health, chat, judge) → `doctor: ok`.
+- CodeWorld: strategy runner at `$CODEWORLD_BASE/bridge/complete` (e.g., MCTS).
+  - Use `model="codeworld/mcts"` and pass `items=[...]`, `rollouts/depth/uct_c`.
+  - Only touches codex‑agent if you explicitly enable autogen.
+
+Judge examples (codex‑agent only)
+- completion (parameter‑first):
+  ```python
+  from scillm import completion
+  base = "http://127.0.0.1:8089"
+  msgs=[
+    {"role":"system","content":"Return STRICT JSON only: {best_id:string, rationale_short:string}."},
+    {"role":"user","content":"A vs B — pick one."},
+  ]
+  r = completion(model="gpt-5", custom_llm_provider="codex-agent", api_base=base,
+                 messages=msgs, response_format={"type":"json_object"}, temperature=1,
+                 allowed_openai_params=["reasoning","reasoning_effort"], reasoning_effort="medium")
+  print(r.choices[0].message["content"])  # strict JSON
+  ```
+- helper (direct HTTP):
+  ```python
+  from scillm.extras.codex import chat
+  res = chat(messages=msgs, model="gpt-5", base=base,
+             response_format={"type":"json_object"}, temperature=1, reasoning_effort="medium")
+  print(res["choices"][0]["message"]["content"])  # strict JSON
+  ```
 
 Router judge mapping (optional)
 - Per‑call (quickest):
@@ -279,6 +312,56 @@ Batch example (canonical envelope):
 | Retry defaults | `retry_enabled=True, honor_retry_after=True, retry_time_budget_s=900, retry_max_attempts=8, retry_base_s=5, retry_max_s=120, retry_jitter_pct=0.25` |
 | Checkpoint/resume | `cp = JsonlCheckpoint(".../results.jsonl"); done = cp.processed_ids(); cp.append({...})` |
 | Throttle (sync/async) | `with bucket.acquire(): ...` / `async with (await bucket.acquire()): ...` |
+
+## Multi‑Agent Helpers (New)
+
+- Text (spawn N codex‑agents and judge best):
+  - Python
+    - `from scillm.extras.multi_agents import answer_text_multi`
+    - `out = answer_text_multi(messages=[{"role":"user","content":"Explain quicksort in 3 bullets."}], model_ids=["<MODEL_ID_A>","<MODEL_ID_B>"], judge_model="openai/gpt-4o-mini", codex_api_base=os.getenv("CODEX_AGENT_API_BASE"))`
+    - `print(out["best_index"], out["answers"][out["best_index"]])`
+
+- Code (apply MCTS over variants or autogenerate):
+  - Python
+    - `from scillm.extras.multi_agents import answer_code_mcts`
+    - Variants provided: `resp = answer_code_mcts(items, codeworld_base="http://127.0.0.1:8888", rollouts=24, depth=6)`
+    - Autogenerate N then search: `resp = answer_code_mcts(items=[{"task":"t","context":{}}], codeworld_base="http://127.0.0.1:8888", autogenerate_n=3, rollouts=24, depth=6)`
+    - `print(resp["results"][0]["mcts"]["best_variant"])`
+
+### Autogen (seamless)
+
+- Ensure codex‑agent automatically, then autogenerate variants + MCTS in one call:
+  - `from scillm.extras import ensure_codex_agent, answer_code_mcts_autogen`
+  - `ensure_codex_agent()`  # starts sidecar if needed or uses CODEX_AGENT_API_BASE
+  - `items=[{"task":"6 improved fast inverse sqrt for gaming plugin","context":{}}]`
+  - `resp = answer_code_mcts_autogen(items, n_variants=6, rollouts=48, depth=6, uct_c=1.25, temperature=0.0, codeworld_base=os.getenv("CODEWORLD_BASE","http://127.0.0.1:8888"))`
+  - `payload = resp.additional_kwargs["codeworld"]`
+  - `print(payload["run_manifest"]["strategy_generator"])`
+  - `print(payload["results"][0]["mcts"])`
+
+### Autogen + Judge (end‑to‑end)
+
+- One‑shot helper that generates N variants, runs MCTS, then asks a codex‑agent judge for the best id.
+  - Env:
+    - `SCILLM_ENABLE_CODEWORLD=1`
+    - `CODEX_AGENT_API_BASE=http://127.0.0.1:8089` (sidecar or gateway; no `/v1`)
+    - Optional: `CODEWORLD_AUTOGEN_HTTP_TIMEOUT_S=120` for longer generation
+  - Python:
+    - `from scillm.extras import ensure_codex_agent`
+    - `from scillm.extras.multi_agents import answer_code_mcts_autogen_and_judge`
+    - `ensure_codex_agent()`
+    - `items=[{"task":"six improved fast inverse square root for gaming (C/C++)","context":{}}]`
+    - `res = answer_code_mcts_autogen_and_judge(items, n_variants=6, rollouts=12, depth=4, uct_c=1.3, temperature=0.0, codeworld_base=os.getenv("CODEWORLD_BASE","http://127.0.0.1:8888"), judge_model="gpt-5", timeout=120)`
+    - `print(res["codeworld"]["results"][0]["mcts"]["best_value"])`
+    - `print(res["judge"])  # {best_id: ..., rationale_short: ...}`
+
+Notes
+- Judge uses the codex-agent sidecar and requests strict JSON (`response_format={"type":"json_object"}`) with reasoning enabled; if the model returns nearly‑JSON text, the helper attempts a safe salvage and logs a short preview when `SCILLM_DEBUG=1`.
+
+Fallbacks
+- If the embedded sidecar cannot start or fails probes, ensure_codex_agent() checks these env bases (no `/v1`):
+  - `SCILLM_AUTOGEN_FALLBACK_BASE`, `OPENAI_BASE_URL`, `CHUTES_API_BASE`, `RUNPOD_API_BASE`
+- It sets `CODEX_AGENT_API_BASE` to the first healthy endpoint.
 
 ---
 
