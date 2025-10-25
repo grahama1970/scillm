@@ -146,6 +146,17 @@ def get_llm_provider(  # noqa: PLR0915
 
         dynamic_api_key = None
 
+        # Lazy‑load custom providers (e.g., 'chutes') when explicitly requested
+        try:
+            cand = (custom_llm_provider or "").strip().lower()
+            if cand and cand not in getattr(litellm, "_custom_providers", []):
+                # Only import known safe names; avoid arbitrary import surface
+                if cand in ("chutes", "codex-agent", "codeworld", "mini-agent"):
+                    mod_name = cand.replace("-", "_")
+                    __import__(f"litellm.llms.{mod_name}")
+        except Exception:
+            pass
+
         # Normalize OpenAI-compatible alias: "openai/<org>/<model>" → provider="openai", model="<org>/<model>"
         try:
             if model.startswith("openai/") and (custom_llm_provider in (None, "", "openai")):

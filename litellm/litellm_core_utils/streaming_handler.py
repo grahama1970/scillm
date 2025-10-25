@@ -93,6 +93,8 @@ class CustomStreamWrapper:
         self.sent_first_thinking_block = False
         self.sent_last_thinking_block = False
         self.thinking_content = ""
+        # Optional: underlying HTTP client/transport used by provider; may expose close/aclose
+        self._sc_client = None
 
         self.system_fingerprint: Optional[str] = None
         self.received_finish_reason: Optional[str] = None
@@ -153,6 +155,28 @@ class CustomStreamWrapper:
 
     def __aiter__(self):
         return self
+
+    async def aclose(self) -> None:
+        """Best-effort cleanup for async streaming resources and underlying clients."""
+        try:
+            cs = getattr(self, "completion_stream", None)
+            if cs is not None and hasattr(cs, "aclose"):
+                try:
+                    await cs.aclose()  # type: ignore
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        try:
+            client = getattr(self, "_sc_client", None)
+            # Close httpx/aiohttp style clients
+            if client is not None:
+                if hasattr(client, "aclose"):
+                    await client.aclose()  # type: ignore
+                elif hasattr(client, "close"):
+                    client.close()  # type: ignore
+        except Exception:
+            pass
 
     def check_send_stream_usage(self, stream_options: Optional[dict]):
         return (

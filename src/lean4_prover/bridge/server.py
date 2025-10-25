@@ -63,6 +63,17 @@ class Lean4BridgeRequest(CanonicalBridgeRequest):
 
 
 def _normalise_requirements(requirements: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Normalize incoming items into the canonical schema used by the CLI.
+
+    Pass-through keys (when present and valid):
+      - requirement_text (required)
+      - context (dict)
+      - metadata (dict)
+      - strategies (list[str] or comma-separated str)
+
+    This enables upstream callers (e.g., DeepSeek Prover planners) to propose
+    a per-item strategy plan that the CLI will honor. Unknown keys are ignored.
+    """
     normalised: List[Dict[str, Any]] = []
     for idx, raw in enumerate(requirements):
         text = raw.get("requirement_text") or raw.get("requirement")
@@ -70,13 +81,26 @@ def _normalise_requirements(requirements: List[Dict[str, Any]]) -> List[Dict[str
             raise HTTPException(status_code=400, detail=f"Requirement #{idx} missing 'requirement_text'")
         context = raw.get("context") if isinstance(raw.get("context"), dict) else {}
         metadata = raw.get("metadata") if isinstance(raw.get("metadata"), dict) else {}
-        normalised.append(
-            {
-                "requirement_text": text,
-                "context": context,
-                "metadata": metadata,
-            }
-        )
+        # Optional strategies pass-through: list[str] or comma-separated str
+        strategies_val = raw.get("strategies")
+        strategies: List[str] | None = None
+        if isinstance(strategies_val, list):
+            try:
+                strategies = [str(s).strip() for s in strategies_val if str(s).strip()]
+            except Exception:
+                strategies = None
+        elif isinstance(strategies_val, str):
+            s = strategies_val.strip()
+            if s:
+                strategies = [part.strip() for part in s.replace("\n", ",").split(",") if part.strip()]
+        item: Dict[str, Any] = {
+            "requirement_text": text,
+            "context": context,
+            "metadata": metadata,
+        }
+        if strategies:
+            item["strategies"] = strategies
+        normalised.append(item)
     if not normalised:
         raise HTTPException(status_code=400, detail="lean4_requirements must contain at least one item")
     return normalised

@@ -95,15 +95,32 @@ async def main() -> None:
         concurrency=2,
     )
 
+    # Small, user-facing de-flake: one-shot retry for empty content
+    retried = 0
     for item in results:
         request_messages = getattr(item.request, "messages", None)
+        content = item.content
+        if not content:
+            try:
+                retry = await router.acompletion(
+                    model="parallel-demo",
+                    messages=request_messages or [],
+                    temperature=0,
+                    max_tokens=64,
+                )
+                content = retry.choices[0].message.get("content", "") or content
+                retried += 1
+            except Exception:
+                pass
         print({
             "index": item.index,
             "request": request_messages,
             "response": getattr(item.response, "choices", item.response),
-            "content": item.content,
+            "content": content,
             "error": str(item.error) if item.error else None,
         })
+    if retried:
+        print({"info": f"one-shot retried {retried} item(s) for empty content"})
 
 
 if __name__ == "__main__":

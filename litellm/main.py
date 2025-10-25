@@ -1308,9 +1308,11 @@ def completion(  # type: ignore # noqa: PLR0915
     try:
         _prov = kwargs.get("custom_llm_provider") or custom_llm_provider
         if isinstance(model, str) and isinstance(_prov, str):
-            if _prov.lower().startswith("openai") and model.startswith("openai/"):
+            _p = _prov.lower()
+            # Strip explicit prefixes for OpenAI and OpenAI‑compatible providers
+            if model.startswith("openai/") and (_p.startswith("openai") or _p in {"openai_like", "custom_openai"}):
                 model = model.split("/", 1)[1]
-            if _prov.lower() == "ollama" and model.startswith("ollama/"):
+            if _p == "ollama" and model.startswith("ollama/"):
                 model = model.split("/", 1)[1]
     except Exception:
         pass
@@ -1327,7 +1329,9 @@ def completion(  # type: ignore # noqa: PLR0915
     if headers is None:
         headers = {}
     if extra_headers is not None:
-        headers.update(extra_headers)
+        # merge without mutating caller-provided dicts
+        _eh = dict(extra_headers) if isinstance(extra_headers, dict) else {}
+        headers.update(_eh)
 
     # Auto-auth negotiation for OpenAI-compatible gateways (Happy Path):
     # If user selected the OpenAI path but the base is not api.openai.com, try
@@ -1343,10 +1347,18 @@ def completion(  # type: ignore # noqa: PLR0915
             or _os.getenv("CHUTES_API_BASE")
         )
         _provider = (kwargs.get("custom_llm_provider") or custom_llm_provider or "openai")
+        # Skip OpenAI auth negotiation entirely for registered custom providers (e.g., 'chutes').
+        _is_custom = False
+        try:
+            import litellm as _lt
+            _is_custom = isinstance(_provider, str) and (_provider.lower() in getattr(_lt, "_custom_providers", []))
+        except Exception:
+            _is_custom = False
         if (
             _base_for_auth
             and isinstance(_provider, str)
             and _provider.lower().startswith("openai")
+            and not _is_custom
         ):
             from litellm.extras.preflight import discover_auth_style
             _prefer = None if _auth_env in ("", "auto") else _auth_env
@@ -1370,6 +1382,33 @@ def completion(  # type: ignore # noqa: PLR0915
                 api_key = None
     except Exception:
         # Never fail user calls due to negotiation hints
+        pass
+
+    # Hard guard: if caller explicitly supplies x-api-key (or raw Authorization)
+    # and base is not api.openai.com, force the HTTPX OpenAI-compatible path to
+    # avoid the OpenAI SDK silently re-injecting Bearer or ignoring headers.
+    try:
+        _ab = (kwargs.get("api_base") or base_url or "") or ""
+        _is_openai_host = isinstance(_ab, str) and ("api.openai.com" in _ab)
+        _has_explicit_xkey = isinstance(headers, dict) and ("x-api-key" in headers)
+        _has_raw_auth = isinstance(headers, dict) and (
+            "Authorization" in headers and not str(headers.get("Authorization", "")).startswith("Bearer ")
+        )
+        # Do not override a registered custom provider
+        _is_custom = False
+        try:
+            import litellm as _lt
+            _prov = (kwargs.get("custom_llm_provider") or custom_llm_provider)
+            _is_custom = isinstance(_prov, str) and (_prov.lower() in getattr(_lt, "_custom_providers", []))
+        except Exception:
+            _is_custom = False
+        if (not _is_openai_host) and (_has_explicit_xkey or _has_raw_auth) and (not _is_custom):
+            if custom_llm_provider not in ("custom_openai", "openai_like"):
+                custom_llm_provider = "custom_openai"
+                kwargs["custom_llm_provider"] = custom_llm_provider
+            # Ensure SDK does not add Bearer
+            api_key = None
+    except Exception:
         pass
     num_retries = kwargs.get(
         "num_retries", None
@@ -2353,6 +2392,49 @@ def completion(  # type: ignore # noqa: PLR0915
                 timeout=timeout,
                 client=client,
             )
+        
+        elif (
+            custom_llm_provider in getattr(litellm, "_custom_providers", [])
+        ):
+            # Route to registered custom providers (e.g., 'chutes') before any OpenAI branch
+            custom_handler = None
+            try:
+                for item in getattr(litellm, "custom_provider_map", []) or []:
+                    if item.get("provider") == custom_llm_provider:
+                        custom_handler = item.get("custom_handler")
+                        break
+            except Exception:
+                custom_handler = None
+            if custom_handler is None:
+                raise LiteLLMUnknownProvider(model=model, custom_llm_provider=custom_llm_provider)
+
+            handler_fn = custom_chat_llm_router(async_fn=acompletion, stream=stream, custom_llm=custom_handler)
+            headers = headers or litellm.headers
+            response = handler_fn(
+                model=model,
+                messages=messages,
+                headers=headers,
+                model_response=model_response,
+                print_verbose=print_verbose,
+                api_key=api_key,
+                api_base=api_base,
+                acompletion=acompletion,
+                logging_obj=logging,
+                optional_params=optional_params,
+                litellm_params=litellm_params,
+                logger_fn=logger_fn,
+                timeout=timeout,  # type: ignore
+                custom_prompt_dict=custom_prompt_dict,
+                client=client,
+                encoding=encoding,
+            )
+            if stream is True:
+                return CustomStreamWrapper(
+                    completion_stream=response,
+                    model=model,
+                    custom_llm_provider=custom_llm_provider,
+                    logging_obj=logging,
+                )
         elif (
             model in litellm.open_ai_chat_completion_models
             or custom_llm_provider == "custom_openai"
@@ -2368,7 +2450,7 @@ def completion(  # type: ignore # noqa: PLR0915
             or custom_llm_provider == "together_ai"
             or custom_llm_provider == "nebius"
             or custom_llm_provider in litellm.openai_compatible_providers
-            or "ft:gpt-3.5-turbo" in model  # finetune gpt-3.5-turbo
+            or "ft:gpt-3.5-turbo" in model
         ):  # allow user to make an openai call with a custom base
             # note: if a user sets a custom base - we should ensure this works
             # allow for the setting of dynamic and stateful api-bases
@@ -2862,6 +2944,7 @@ def completion(  # type: ignore # noqa: PLR0915
                 headers = headers or {}
                 headers.update(extra_headers)
 
+            # Ensure json_mode defined for downstream call
             model_response = openai_like_chat_completion.completion(
                 model=model,
                 messages=messages,
@@ -2878,9 +2961,7 @@ def completion(  # type: ignore # noqa: PLR0915
                 logger_fn=logger_fn,
                 headers=headers,
                 timeout=timeout,
-                base_model=None,
                 client=client,
-                json_mode=json_mode,
                 custom_endpoint=None,
                 custom_llm_provider=custom_llm_provider,
             )

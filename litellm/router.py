@@ -1390,7 +1390,20 @@ class Router:
                 except Exception:
                     pass
                 # Call litellm.completion directly to avoid Router model_list/health gating
-                return _litellm.completion(model=model, messages=messages, **kwargs)
+                # Avoid duplicate 'model' key in kwargs
+                _kwargs = dict(kwargs)
+                _kwargs.pop("model", None)
+                _kwargs.pop("messages", None)
+                try:
+                    from scillm.extras.autoscale import controller as _sc_controller
+                    _pacer = _sc_controller()
+                except Exception:
+                    _pacer = None
+                if _pacer is None:
+                    return _litellm.completion(model=model, messages=messages, **_kwargs)
+                else:
+                    with _pacer.acquire():
+                        return _litellm.completion(model=model, messages=messages, **_kwargs)
             else:
                 kwargs["original_function"] = self._completion
             self._update_kwargs_before_fallbacks(model=model, kwargs=kwargs)
@@ -1932,10 +1945,20 @@ class Router:
                 except Exception:
                     use_extracted = False
             if not use_extracted:
-                model_client = self._get_async_openai_model_client(
-                    deployment=deployment,
-                    kwargs=kwargs,
-                )
+                # Only construct an OpenAI SDK client for providers that use it.
+                # Custom providers (e.g., 'chutes') manage transport/auth themselves.
+                _clp = str(kwargs.get("custom_llm_provider", "")).lower()
+                try:
+                    import litellm as _lt
+                    _is_custom = _clp in getattr(_lt, "_custom_providers", [])
+                except Exception:
+                    _is_custom = False
+                model_client = None
+                if not _is_custom:
+                    model_client = self._get_async_openai_model_client(
+                        deployment=deployment,
+                        kwargs=kwargs,
+                    )
                 self.total_calls[model_name] += 1
 
                 input_kwargs = {
@@ -1946,7 +1969,14 @@ class Router:
                     **kwargs,
                 }
 
-                _response = litellm.acompletion(**input_kwargs)
+                # For custom providers, prefer the synchronous completion path
+                # (litellm.main.completion) which reliably dispatches through
+                # the custom provider router. For SDK-based providers, keep
+                # using the async acompletion path.
+                if _is_custom:
+                    _response = litellm.completion(**input_kwargs)
+                else:
+                    _response = litellm.acompletion(**input_kwargs)
 
                 logging_obj: Optional[LiteLLMLogging] = kwargs.get(
                     "litellm_logging_obj", None
@@ -5038,7 +5068,18 @@ class Router:
         Handler for making a call to the .completion()/.embeddings()/etc. functions.
         """
         model_group = kwargs.get("model")
-        response = original_function(*args, **kwargs)
+        # Global pacing: serialize + rate-limit provider invocations to reduce 429/503 without
+        # requiring DevOps to tune per-run concurrency. No-ops when SCILLM_AUTOSCALE is disabled.
+        try:
+            from scillm.extras.autoscale import controller as _sc_controller
+            _pacer = _sc_controller()
+        except Exception:
+            _pacer = None
+        if _pacer is None:
+            response = original_function(*args, **kwargs)
+        else:
+            with _pacer.acquire():
+                response = original_function(*args, **kwargs)
         if coroutine_checker.is_async_callable(response) or inspect.isawaitable(response):
             response = await response
         ## PROCESS RESPONSE HEADERS

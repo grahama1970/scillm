@@ -339,6 +339,16 @@ def _to_openai_with_meta(resp: Any, timing_ms: Optional[int], req: RouterParalle
     out.setdefault("scillm_router", {})
     if meta is not None:
         out["scillm_router"].update(meta)
+        # Surface provider-specific warmup time if available (e.g., chutes)
+        try:
+            r_ak = getattr(resp, "additional_kwargs", {}) if hasattr(resp, "additional_kwargs") else {}
+            if isinstance(r_ak, dict):
+                ch = r_ak.get("chutes") or {}
+                wu = ch.get("warmup_seconds") if isinstance(ch, dict) else None
+                if isinstance(wu, (int, float)):
+                    out["scillm_router"].setdefault("warmup_seconds", float(wu))
+        except Exception:
+            pass
     # Optional: if retries meta requested and not present, map provider-specific stats
     try:
         import os as _os

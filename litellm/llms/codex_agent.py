@@ -19,6 +19,7 @@ Notes
 """
 
 import os
+import uuid
 from typing import Any, Optional, Union, Callable
 
 import httpx
@@ -27,7 +28,10 @@ from litellm.llms.custom_llm import CustomLLM, CustomLLMError
 from litellm.llms.custom_httpx.http_handler import AsyncHTTPHandler, HTTPHandler
 from litellm.utils import ModelResponse
 
-from .codex_sidecar_manager import SidecarError, ensure_sidecar
+# Lazy import of sidecar manager to avoid hard dependency at import time.
+SidecarError = None  # type: ignore
+ensure_sidecar = None  # type: ignore
+restart_sidecar = None  # type: ignore
 
 
 class CodexAgentLLM(CustomLLM):
@@ -44,6 +48,10 @@ class CodexAgentLLM(CustomLLM):
             return b.rstrip("/")
 
         try:
+            global ensure_sidecar, SidecarError
+            if ensure_sidecar is None:
+                from .codex_sidecar_manager import ensure_sidecar as _ens, SidecarError as _SE  # type: ignore
+                ensure_sidecar = _ens; SidecarError = _SE
             sidecar_base = ensure_sidecar()
         except SidecarError as exc:
             raise CustomLLMError(
@@ -82,7 +90,23 @@ class CodexAgentLLM(CustomLLM):
         timeout: Optional[Union[float, httpx.Timeout]] = None,
         client: Optional[HTTPHandler] = None,
     ) -> ModelResponse:
-        base = self._resolve_base(api_base)
+        # Ephemeral per-call for local judge (gpt-5) calls when no explicit base is set
+        # Acceptable 3–8s overhead for a fresh process
+        try:
+            _mid_check = str(model)
+            _is_judge = "gpt-5" in _mid_check
+            _has_explicit_base = bool(api_base or os.getenv("CODEX_AGENT_API_BASE"))
+            if _is_judge and not _has_explicit_base:
+                # Restart embedded sidecar and use its base
+                global restart_sidecar
+                if restart_sidecar is None:
+                    from .codex_sidecar_manager import restart_sidecar as _rs  # type: ignore
+                    restart_sidecar = _rs
+                base = restart_sidecar()
+            else:
+                base = self._resolve_base(api_base)
+        except Exception:
+            base = self._resolve_base(api_base)
         # Normalize common provider prefixes so the sidecar/gateway sees a plain model id
         try:
             _mid = str(model)
@@ -92,7 +116,19 @@ class CodexAgentLLM(CustomLLM):
                 _mid = _mid.split("/", 1)[1]
         except Exception:
             _mid = model
-        payload: dict[str, Any] = {"model": _mid, "messages": messages}
+        # Fresh session + context guard (low cognitive load: defaults via env, no caller changes)
+        raw_msgs = list(messages or [])
+        try:
+            # Keep system messages + last N non-system messages (heuristic to avoid context rot)
+            max_hist = int(os.getenv("SCILLM_CODEX_MAX_HISTORY", "8"))
+            if max_hist > 0 and len(raw_msgs) > max_hist:
+                system_msgs = [m for m in raw_msgs if isinstance(m, dict) and m.get("role") == "system"]
+                non_system = [m for m in raw_msgs if not (isinstance(m, dict) and m.get("role") == "system")]
+                raw_msgs = system_msgs + non_system[-max_hist:]
+        except Exception:
+            pass
+
+        payload: dict[str, Any] = {"model": _mid, "messages": raw_msgs}
         extras = dict(optional_params or {})
         for key, value in extras.items():
             if key not in ("model", "messages"):
@@ -135,6 +171,19 @@ class CodexAgentLLM(CustomLLM):
                 continue
             _sanitized[k] = v
         _hdr = _sanitized
+        # Fresh session header by default (stateless per-call behavior)
+        try:
+            if os.getenv("SCILLM_CODEX_FRESH", "1") in {"1", "true", "yes", "on"}:
+                _hdr.setdefault("X-Codex-Session", uuid.uuid4().hex)
+        except Exception:
+            pass
+
+        # Reserve output space if caller didn't specify
+        try:
+            if "max_tokens" not in payload and os.getenv("SCILLM_CODEX_MAX_TOKENS"):
+                payload["max_tokens"] = int(os.getenv("SCILLM_CODEX_MAX_TOKENS", "256"))
+        except Exception:
+            pass
         request_timeout: Optional[Union[float, httpx.Timeout]] = timeout or 30.0
         max_retries = int(os.getenv("CODEX_AGENT_MAX_RETRIES", "2"))
         base_ms = int(os.getenv("CODEX_AGENT_RETRY_BASE_MS", "120"))

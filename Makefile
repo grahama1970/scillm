@@ -382,3 +382,49 @@ json-reliability-doctor:
 	  $${CUTOFF:+--cutoff "$$CUTOFF"} \
 	  --print-table
 ## Codex Cloud targets removed (deprecated/disabled). See QUICKSTART.md.
+CERTAINLY_COMPOSE?=docker/compose.certainly.bridge.yml
+SCILLM_BRIDGES_PROJECT?=scillm-bridges
+
+.PHONY: certainly-bridge-up
+certainly-bridge-up:
+	@echo "[certainly] bringing up container via $${CERTAINLY_COMPOSE}"
+	@if curl -fsS http://127.0.0.1:8791/healthz >/dev/null; then \
+	  echo "[certainly] already healthy on 8791"; \
+	else \
+	  docker compose -p $(SCILLM_BRIDGES_PROJECT) -f $(CERTAINLY_COMPOSE) up -d; \
+	fi
+	@echo "[certainly] waiting for healthz on http://127.0.0.1:8791/healthz"
+	@bash -c 'for i in 1 2 3 4 5; do curl -fsS http://127.0.0.1:8791/healthz >/dev/null && echo "ok" && exit 0; sleep 1; done; echo "timeout waiting for healthz" && exit 1'
+
+.PHONY: certainly-bridge-down
+certainly-bridge-down:
+	@echo "[certainly] stopping container via $${CERTAINLY_COMPOSE}"
+	docker compose -p $(SCILLM_BRIDGES_PROJECT) -f $(CERTAINLY_COMPOSE) down -v || true
+
+.PHONY: certainly-bridge-doctor
+certainly-bridge-doctor:
+	@bash debug/certainly_bridge_doctor.sh
+stability:
+	@echo "[stability] running SciLLM stability check (all components)…"
+	@PYTHONPATH=src:$(PWD) python scripts/scillm_stability_check.py --all || true
+# Chutes host doctor: poll -> single chat -> small batch
+.PHONY: chutes-host-doctor
+chutes-host-doctor:
+	@CHUTES_API_KEY=$(CHUTES_API_KEY) \
+	SLUG=$(SLUG) \
+	PYTHONPATH=src:. \
+	python scripts/chutes_host_doctor.py --slug "$${SLUG}" --model "$${MODEL}" --concurrency $${CONCURRENCY:-2}
+notebooks-smoke:
+	@echo "[smokes] running feature smokes (no notebook logic)"
+	@env SCILLM_FORCE_HTTPX_STREAM=1 $$(grep -v '^#' .env | xargs) uv run -- python scripts/feature_smokes.py
+	@echo "[notebooks] generating viewer notebooks"
+	@uv run -- python scripts/notebooks_build.py
+	@echo "[smokes] summaries:"
+	@-test -f .artifacts/nb_chutes_openai_compatible.json && echo "  - chutes_openai: $$(cat .artifacts/nb_chutes_openai_compatible.json)" || true
+	@-test -f .artifacts/nb_router_parallel_batch.json && echo "  - router_parallel: $$(cat .artifacts/nb_router_parallel_batch.json)" || true
+	@-test -f .artifacts/nb_model_list_first_success.json && echo "  - model_list: $$(cat .artifacts/nb_model_list_first_success.json)" || true
+
+.PHONY: warmup-probe
+warmup-probe:
+	@echo "[chutes] warmup probe"
+	@env $$(grep -v '^#' .env | xargs) PYTHONPATH=src:. uv run -- python scripts/chutes_warmup_probe.py --wait-seconds $${WAIT_SECONDS:-180}

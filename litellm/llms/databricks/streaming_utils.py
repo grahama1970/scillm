@@ -12,8 +12,10 @@ from litellm.types.utils import GenericStreamingChunk, Usage
 
 
 class ModelResponseIterator:
-    def __init__(self, streaming_response, sync_stream: bool):
+    def __init__(self, streaming_response, sync_stream: bool, response_obj=None):
         self.streaming_response = streaming_response
+        # Keep optional reference to underlying HTTP response to allow cleanup
+        self._response_obj = response_obj
 
     def chunk_parser(self, chunk: dict) -> GenericStreamingChunk:
         try:
@@ -126,6 +128,11 @@ class ModelResponseIterator:
         try:
             chunk = await self.async_response_iterator.__anext__()
         except StopAsyncIteration:
+            # Stream naturally ended: ensure we close the underlying response
+            try:
+                await self.aclose()
+            except Exception:
+                pass
             raise StopAsyncIteration
         except ValueError as e:
             raise RuntimeError(f"Error receiving chunk from stream: {e}")
@@ -136,6 +143,11 @@ class ModelResponseIterator:
             chunk = litellm.CustomStreamWrapper._strip_sse_data_from_chunk(chunk) or ""
             chunk = chunk.strip()
             if chunk == "[DONE]":
+                # Server signaled end-of-stream: close and stop
+                try:
+                    await self.aclose()
+                except Exception:
+                    pass
                 raise StopAsyncIteration
             if len(chunk) > 0:
                 json_chunk = json.loads(chunk)
@@ -163,3 +175,12 @@ class ModelResponseIterator:
                 index=0,
                 tool_use=None,
             )
+
+    async def aclose(self):
+        """Best-effort cleanup for the underlying HTTP response if provided."""
+        try:
+            resp = getattr(self, "_response_obj", None)
+            if resp is not None and hasattr(resp, "aclose"):
+                await resp.aclose()
+        except Exception:
+            pass

@@ -24,6 +24,8 @@ Env fallbacks:
 - CODEWORLD_TOKEN (Bearer token if server enforces auth)
 """
 import os
+import subprocess
+from pathlib import Path
 import uuid
 import threading
 import time
@@ -73,6 +75,53 @@ class CodeWorldLLM(CustomLLM):
         base = (api_base or DEFAULT_BASE).rstrip("/")
         _dbg(f"resolve_base base={base}")
         return base
+
+    @staticmethod
+    def _ping_healthz(base: str, timeout_s: float = 2.0) -> bool:
+        try:
+            with httpx.Client(timeout=timeout_s) as c:
+                r = c.get(f"{base}/healthz")
+                return 200 <= r.status_code < 300
+        except Exception:
+            return False
+
+    def _autostart_bridge_if_needed(self, base_hint: str) -> str:
+        # Decide whether auto-start is enabled: ON by default for localhost, else env-gated
+        env_base = os.getenv("CODEWORLD_BASE")
+        desired = (env_base or base_hint).rstrip("/")
+        is_local = desired.startswith("http://127.0.0.1:") or desired.startswith("http://localhost:")
+        auto_flag = os.getenv("SCILLM_AUTO_START_BRIDGES")
+        auto_enabled = (is_local and auto_flag != "0") or (auto_flag == "1")
+        if not auto_enabled:
+            return desired
+        if self._ping_healthz(desired, timeout_s=1.5):
+            return desired
+        # Start only the codeworld-bridge service via compose
+        root = Path(__file__).resolve().parents[2]
+        compose = root / "deploy" / "docker" / "compose.scillm.stack.yml"
+        try:
+            env = os.environ.copy()
+            env.setdefault("COMPOSE_PROJECT_NAME", "scillm-bridges")
+            # 1) If a container exists but is unhealthy, try a fast restart
+            try:
+                for name in ("scillm-bridges-codeworld-bridge-1", "codeworld-bridge", "codeworld-codeworld-1"):
+                    subprocess.run(["docker","restart", name], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                for _ in range(5):
+                    if self._ping_healthz(desired, timeout_s=1.0):
+                        return desired
+                    time.sleep(0.6)
+            except Exception:
+                pass
+            subprocess.run([
+                "docker", "compose", "-f", str(compose), "up", "-d", "codeworld-bridge"
+            ], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=env)
+            # wait briefly
+            for _ in range(10):
+                if self._ping_healthz(desired, timeout_s=1.5):
+                    break
+        except Exception:
+            pass
+        return desired
 
     @staticmethod
     def _headers(api_key: Optional[str]) -> Dict[str, str]:
@@ -319,6 +368,7 @@ class CodeWorldLLM(CustomLLM):
         client: Optional[HTTPHandler] = None,
     ) -> ModelResponse:
         base = self._resolve_base(api_base)
+        base = self._autostart_bridge_if_needed(base)
         normalized_model = self._normalize_model_string(model)
         trace_id = uuid.uuid4().hex
         _dbg(f"completion model={normalized_model} trace_id={trace_id}")
@@ -414,6 +464,7 @@ class CodeWorldLLM(CustomLLM):
         client: Optional[AsyncHTTPHandler] = None,
     ) -> ModelResponse:
         base = self._resolve_base(api_base)
+        base = self._autostart_bridge_if_needed(base)
         normalized_model = self._normalize_model_string(model)
         _dbg(f"acompletion model={normalized_model}")
         payload = self._build_payload(model, messages, optional_params or {})

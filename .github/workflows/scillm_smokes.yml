@@ -1,0 +1,68 @@
+name: SciLLM Feature Smokes
+
+on:
+  push:
+    branches: [ stabilize/**, main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  smokes:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        httpx_stream: [ '0', '1' ]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install uv
+        run: |
+          curl -LsSf https://astral.sh/uv/install.sh | sh
+          echo "$HOME/.cargo/bin" >> $GITHUB_PATH
+      - name: Sync deps
+        run: uv sync
+      - name: Run feature smokes
+        env:
+          CHUTES_API_BASE: ${{ secrets.CHUTES_API_BASE }}
+          CHUTES_API_KEY:  ${{ secrets.CHUTES_API_KEY }}
+          CHUTES_MODEL:    ${{ vars.CHUTES_MODEL }}
+          CHUTES_TEXT_MODEL: ${{ vars.CHUTES_TEXT_MODEL }}
+          CHUTES_VLM_MODEL:  ${{ vars.CHUTES_VLM_MODEL }}
+          CHUTES_TOOLS_MODEL: ${{ vars.CHUTES_TOOLS_MODEL }}
+          SCILLM_FORCE_HTTPX_STREAM: ${{ matrix.httpx_stream }}
+        run: |
+          uv run -- python scripts/feature_smokes.py
+          uv run -- python scripts/notebooks_build.py
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: scillm-smokes-${{ matrix.httpx_stream }}
+          path: .artifacts/*.json
+
+  warmup:
+    if: ${{ vars.CHUTES_WARMUP_CORDS == '1' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install uv
+        run: |
+          curl -LsSf https://astral.sh/uv/install.sh | sh
+          echo "$HOME/.cargo/bin" >> $GITHUB_PATH
+      - name: Sync deps
+        run: uv sync
+      - name: Warmup probe (optional cords)
+        env:
+          CHUTES_API_BASE: ${{ secrets.CHUTES_API_BASE }}
+          CHUTES_API_KEY:  ${{ secrets.CHUTES_API_KEY }}
+          SCILLM_ENABLE_WARMUP_CORDS: ${{ vars.CHUTES_WARMUP_CORDS }}
+        run: |
+          uv run -- python scripts/chutes_warmup_probe.py --wait-seconds 180 || true
+      - name: Upload warmup result
+        if: always()
+        run: |
+          echo "Warmup job completed (see logs for JSON)."

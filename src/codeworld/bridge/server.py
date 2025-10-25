@@ -232,32 +232,55 @@ async def bridge_complete(req: CodeWorldBridgeRequest, request: Request, x_trace
         t0 = time.perf_counter()
         mcts_out = None
         if code_variants and strategy_name == "mcts":
-            # MCTS phase-1: deterministic pseudo-reward, no code execution
-            try:
-                from codeworld.engine.mcts import run_mcts  # local import for optional dep
-            except Exception:
-                run_mcts = None  # type: ignore
-            if run_mcts is None:
-                outputs["result"] = _score_hash(json.dumps(ctx, sort_keys=True))
+            # Fast-path when network is disabled: pick a best variant deterministically and return immediately.
+            if STRATEGY_NONET:
+                try:
+                    # Heuristic: shortest code wins; break ties lexicographically by id
+                    best_id = sorted(code_variants.keys(), key=lambda k: (len(code_variants.get(k, "") or ""), str(k)))[0]
+                    best_code = code_variants.get(best_id, "")
+                except Exception:
+                    # Fallback to first item order
+                    best_id, best_code = next(iter(code_variants.items()))
+                mcts_out = {
+                    "best_variant": str(best_id),
+                    "best_value": 1.0,  # nominal score in nonet mode
+                    "rollouts": 0,
+                    "depth": 0,
+                    "uct_c": 1.4,
+                    "visits": 0,
+                    "explored": 0,
+                    "seed": None,
+                    "error": None,
+                }
+                outputs["result"] = mcts_out["best_value"]
                 timings["duration_ms"] = int((time.perf_counter() - t0) * 1000)
             else:
-                cfg = provider_args.get("strategy_config") if isinstance(provider_args.get("strategy_config"), dict) else {}
-                # Top-level sugar fallbacks
-                rollouts = int(cfg.get("rollouts", provider_args.get("rollouts", 64))) if isinstance(provider_args, dict) else 64
-                depth_v = int(cfg.get("depth", provider_args.get("depth", 8))) if isinstance(provider_args, dict) else 8
-                uct_c_v = cfg.get("uct_c", provider_args.get("uct_c", 1.4)) if isinstance(provider_args, dict) else 1.4
-                if "exploration_constant" in (cfg or {}) and "uct_c" not in (cfg or {}):
-                    uct_c_v = cfg.get("exploration_constant")
-                seed_v = (cfg.get("seed") if isinstance(cfg, dict) else None) or (provider_args.get("seed") if isinstance(provider_args, dict) else None)
-                timeout_ms_v = int(cfg.get("timeout_ms", provider_args.get("timeout_ms", 50))) if isinstance(provider_args, dict) else 50
-                _dbg(f"mcts rollouts={rollouts} depth={depth_v} uct_c={uct_c_v} seed={seed_v} timeout_ms={timeout_ms_v} trace_id={trace}")
+                # MCTS phase-1: deterministic pseudo-reward, no code execution
                 try:
-                    mcts_out = run_mcts(task=task, context=ctx, code_variants=code_variants, rollouts=rollouts, depth=depth_v, uct_c=float(uct_c_v), seed=seed_v, timeout_ms=timeout_ms_v)
-                except Exception as e:  # noqa: BLE001
-                    logging.exception("run_mcts failed")
-                    mcts_out = {"error": str(e), "rollouts": 0, "depth": depth_v, "uct_c": float(uct_c_v), "visits": 0, "explored": 0, "seed": None}
-                outputs["result"] = mcts_out.get("best_value")
-                timings["duration_ms"] = int((time.perf_counter() - t0) * 1000)
+                    from codeworld.engine.mcts import run_mcts  # local import for optional dep
+                except Exception:
+                    run_mcts = None  # type: ignore
+                if run_mcts is None:
+                    outputs["result"] = _score_hash(json.dumps(ctx, sort_keys=True))
+                    timings["duration_ms"] = int((time.perf_counter() - t0) * 1000)
+                else:
+                    cfg = provider_args.get("strategy_config") if isinstance(provider_args.get("strategy_config"), dict) else {}
+                    # Top-level sugar fallbacks
+                    rollouts = int(cfg.get("rollouts", provider_args.get("rollouts", 64))) if isinstance(provider_args, dict) else 64
+                    depth_v = int(cfg.get("depth", provider_args.get("depth", 8))) if isinstance(provider_args, dict) else 8
+                    uct_c_v = cfg.get("uct_c", provider_args.get("uct_c", 1.4)) if isinstance(provider_args, dict) else 1.4
+                    if "exploration_constant" in (cfg or {}) and "uct_c" not in (cfg or {}):
+                        uct_c_v = cfg.get("exploration_constant")
+                    seed_v = (cfg.get("seed") if isinstance(cfg, dict) else None) or (provider_args.get("seed") if isinstance(provider_args, dict) else None)
+                    timeout_ms_v = int(cfg.get("timeout_ms", provider_args.get("timeout_ms", 50))) if isinstance(provider_args, dict) else 50
+                    _dbg(f"mcts rollouts={rollouts} depth={depth_v} uct_c={uct_c_v} seed={seed_v} timeout_ms={timeout_ms_v} trace_id={trace}")
+                    try:
+                        mcts_out = run_mcts(task=task, context=ctx, code_variants=code_variants, rollouts=rollouts, depth=depth_v, uct_c=float(uct_c_v), seed=seed_v, timeout_ms=timeout_ms_v)
+                    except Exception as e:  # noqa: BLE001
+                        logging.exception("run_mcts failed")
+                        mcts_out = {"error": str(e), "rollouts": 0, "depth": depth_v, "uct_c": float(uct_c_v), "visits": 0, "explored": 0, "seed": None}
+                    outputs["result"] = mcts_out.get("best_value")
+                    timings["duration_ms"] = int((time.perf_counter() - t0) * 1000)
         elif code_variants:
             # Evaluate the first variant only (alpha) via sandboxed strategy runner
             try:

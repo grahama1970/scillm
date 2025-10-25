@@ -21,4 +21,17 @@ if not _strict and not getattr(litellm, "drop_params", False):
 
 from .multi_agents import *  # noqa: F401,F403
 from litellm.extras.codex_bootstrap import *  # re-export ensure_codex_agent
-from .codex_cloud import generate_variants_cloud, variants_to_scillm  # experimental
+# Optional: codex-cloud helpers (disabled by default to avoid import-time failures)
+try:
+    if os.getenv("SCILLM_ENABLE_CODEX_CLOUD", "").lower() in {"1", "true", "yes"}:
+        from .codex_cloud import generate_variants_cloud, variants_to_scillm  # type: ignore # noqa: F401
+except Exception:
+    # Keep extras import resilient
+    pass
+
+# Optional: register chutes provider when explicitly enabled (avoids surprise costs)
+try:
+    if os.getenv("SCILLM_ENABLE_CHUTES_AUTOSTART", "").lower() in {"1", "true", "yes"}:
+        import litellm.llms.chutes  # noqa: F401
+except Exception:
+    pass

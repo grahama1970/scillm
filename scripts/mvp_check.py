@@ -338,6 +338,13 @@ def main() -> int:
         port = env0.get("MINI_AGENT_API_PORT", "8788")
         mini_base = f"http://{host}:{port}"
         os.environ["MINI_AGENT_API_BASE"] = mini_base
+    # Auto-start mini-agent on localhost if not ready
+    try:
+        from litellm.extras.mini_agent_bootstrap import ensure_mini_agent
+        os.environ["MINI_AGENT_API_BASE"] = ensure_mini_agent(mini_base)
+        mini_base = os.environ["MINI_AGENT_API_BASE"]
+    except Exception:
+        pass
     codex_base = env0.get("CODEX_AGENT_API_BASE") or mini_base
     if codex_base != mini_base and strict_ready:
         print(f"[CONFIG_ERROR] CODEX_AGENT_API_BASE ({codex_base}) != MINI_AGENT_API_BASE ({mini_base}) under STRICT mode.")

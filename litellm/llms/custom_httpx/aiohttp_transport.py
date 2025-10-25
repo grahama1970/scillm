@@ -76,8 +76,12 @@ def map_aiohttp_exceptions() -> typing.Iterator[None]:
 class AiohttpResponseStream(httpx.AsyncByteStream):
     CHUNK_SIZE = 1024 * 16
 
-    def __init__(self, aiohttp_response: ClientResponse) -> None:
+    def __init__(self, aiohttp_response: ClientResponse, transport: Optional["LiteLLMAiohttpTransport"] = None) -> None:
         self._aiohttp_response = aiohttp_response
+        # Keep a reference to the transport so we can close it in a finalizer
+        # when the response stream is explicitly closed. This helps prevent
+        # shutdown warnings about unclosed client sessions in short‑lived runs.
+        self._transport = transport
 
     async def __aiter__(self) -> typing.AsyncIterator[bytes]:
         try:
@@ -107,6 +111,14 @@ class AiohttpResponseStream(httpx.AsyncByteStream):
     async def aclose(self) -> None:
         with map_aiohttp_exceptions():
             await self._aiohttp_response.__aexit__(None, None, None)
+        # Best‑effort: close the underlying transport (and its ClientSession)
+        # to avoid "Unclosed client session/connector" warnings during process exit
+        try:
+            t = getattr(self, "_transport", None)
+            if t is not None and hasattr(t, "aclose"):
+                await t.aclose()
+        except Exception:
+            pass
 
 
 class AiohttpTransport(httpx.AsyncBaseTransport):
@@ -235,7 +247,7 @@ class LiteLLMAiohttpTransport(AiohttpTransport):
         return httpx.Response(
             status_code=response.status,
             headers=response.headers,
-            content=AiohttpResponseStream(response),
+            content=AiohttpResponseStream(response, transport=self),
             request=request,
         )
     
