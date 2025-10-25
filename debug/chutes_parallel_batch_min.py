@@ -29,7 +29,7 @@ from typing import Any, Dict, List, TypedDict, Union
 
 from scillm import Router
 try:
-    from litellm.extras.json_utils import clean_json_string as _clean_json
+    from scillm.extras import clean_json_string as _clean_json
 except Exception:  # pragma: no cover
     _clean_json = None
 

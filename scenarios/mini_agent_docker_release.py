@@ -12,7 +12,7 @@ import sys
 from dotenv import find_dotenv, load_dotenv
 
 from litellm import Router
-from litellm.extras import clean_json_string
+from scillm.extras import clean_json_string
 
 load_dotenv(find_dotenv())
 
