@@ -21,6 +21,18 @@ if not _strict and not getattr(litellm, "drop_params", False):
 
 from .multi_agents import *  # noqa: F401,F403
 from litellm.extras.codex_bootstrap import *  # re-export ensure_codex_agent
+# Re-export common JSON helpers from our canonical module
+try:
+    from .json_utils import (  # type: ignore
+        clean_json_string,
+        parse_json,
+        save_json_to_file,
+        load_json_file,
+        json_serialize,
+        PathEncoder,
+    )
+except Exception:
+    pass
 # Optional: codex-cloud helpers (disabled by default to avoid import-time failures)
 try:
     if os.getenv("SCILLM_ENABLE_CODEX_CLOUD", "").lower() in {"1", "true", "yes"}:

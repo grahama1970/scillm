@@ -61,7 +61,7 @@ def _tools_call_direct(base: str, key: str, endpoint: str, model: str, tools: Li
 
 def chutes_openai_compatible() -> Dict[str, Any]:
     import litellm
-    from litellm.extras.json_utils import clean_json_string
+from scillm.extras import clean_json_string
     base = _env("CHUTES_API_BASE")
     key = _env("CHUTES_API_KEY")
     model = os.environ.get("CHUTES_TEXT_MODEL") or os.environ.get("CHUTES_SELECTED_MODEL") or _env("CHUTES_MODEL")
