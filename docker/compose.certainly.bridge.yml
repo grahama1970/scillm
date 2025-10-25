@@ -1,0 +1,26 @@
+services:
+  certainly_bridge:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.bridge
+    image: certainly/lean4-bridge:local
+    ports:
+      - "8791:8787"
+    environment:
+      - CERTAINLY_ARTIFACTS_DIR=/app/local/artifacts/runs
+      - LEAN4_REPO=/lean4
+      # Pass-through LLM and defaults from host to container
+      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY:-}
+      - CERTAINLY_MODEL=${CERTAINLY_MODEL:-}
+      - CERTAINLY_LLM_DEFAULT=${CERTAINLY_LLM_DEFAULT:-}
+    volumes:
+      # Persist artifacts onto host (optional)
+      - ../local/artifacts:/app/local/artifacts
+      # Mount Lean4 repo read-only so bridge can call CLI
+      - ../lean4:/lean4:ro
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8787/healthz || exit 1"]
+      interval: 20s
+      timeout: 5s
+      retries: 6
+      start_period: 30s

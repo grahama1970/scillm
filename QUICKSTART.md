@@ -98,41 +98,79 @@ export SCILLM_MODEL_ALIAS=1
 
 
 
-OpenAI‑compatible (Chutes) usage note
-- Optional: `fallback_closest=True` (default) resolves unknown doc-style names to the closest live ID from your cached catalog. Tune with `fallback_closest_cutoff=0.55`.
-- Use vendor‑first model IDs from `/v1/models` (e.g., `moonshotai/Kimi-K2-Instruct-0905`).
-- Passing `custom_llm_provider="openai"` is optional — scillm now defaults
-  to 'openai' when `api_base` points to an OpenAI‑compatible gateway (e.g., `CHUTES_API_BASE`).
-- Avoid adding an `openai/` prefix; if present, it will be stripped for OpenAI‑compatible providers.
+OpenAI‑compatible (Chutes) — Paved Path
 
-Gateways that require x‑api‑key (no Bearer)
-- Stable path: pass `x-api-key` explicitly with the HTTPX OpenAI‑compatible provider.
+Happy Path (shared base)
+- Discover a model id via `GET $CHUTES_API_BASE/v1/models`.
+- Non‑stream JSON → use `x-api-key`; Streaming → use `Authorization: Bearer`.
+- Single JSON call (Python):
+  ```python
+  from scillm import completion, os
+  r = completion(
+    model=os.environ["CHUTES_MODEL_ID"],
+    api_base=os.environ["CHUTES_API_BASE"],
+    api_key=None,
+    custom_llm_provider="openai_like",
+    extra_headers={"x-api-key": os.environ["CHUTES_API_KEY"]},
+    messages=[{"role":"user","content":"Return only {\"ok\":true} as JSON."}],
+    response_format={"type":"json_object"},
+    temperature=0, max_tokens=16)
+  print(r.choices[0].message.get("content",""))
+  ```
+- Streaming (text):
+  ```python
+  from scillm import acompletion, os, asyncio
+  async def main():
+    s = await acompletion(
+      model=os.environ["CHUTES_TEXT_MODEL"], api_base=os.environ["CHUTES_API_BASE"],
+      api_key=None, custom_llm_provider="openai_like",
+      extra_headers={"Authorization": f"Bearer {os.environ['CHUTES_API_KEY']}"},
+      messages=[{"role":"user","content":"Tell me a 50 word story."}], stream=True,
+      temperature=0)
+    async for ev in s: print(ev)
+    await s.aclose()
+  asyncio.run(main())
+  ```
+- Tools (Kimi‑K2, non‑stream):
+  ```python
+  tools=[{"type":"function","function":{"name":"get_weather","parameters":{"type":"object","properties":{"city":{"type":"string"}},"required":["city"]}}}]
+  r = completion(model=os.environ["CHUTES_TOOLS_MODEL"], api_base=os.environ["CHUTES_API_BASE"],
+    api_key=None, custom_llm_provider="openai_like",
+    extra_headers={"Authorization": f"Bearer {os.environ['CHUTES_API_KEY']}"},
+    messages=[{"role":"user","content":"What is the weather in Tokyo right now?"}],
+    tools=tools, tool_choice="auto", temperature=0, stream=False)
+  print(r.choices[0].finish_reason, r.choices[0].tool_calls)
+  ```
+- Batch (Router JSON): set `x-api-key` in `model_list`:
+  ```python
+  from scillm import Router, os
+  router = Router(model_list=[{"model_name":"chutes","litellm_params":{
+    "model": os.environ["CHUTES_MODEL_ID"],
+    "api_base": os.environ["CHUTES_API_BASE"],
+    "api_key": None,
+    "custom_llm_provider": "openai_like",
+    "extra_headers": {"x-api-key": os.environ["CHUTES_API_KEY"]}}}])
+  # then: await router.parallel_acompletions([...], concurrency=K)
+  ```
 
-Python snippet (Chutes):
-```python
-from scillm import completion
-import os
-resp = completion(
-  model=os.environ["CHUTES_MODEL_ID"],
-  api_base=os.environ["CHUTES_API_BASE"],
-  api_key=None,
-  custom_llm_provider="openai_like",
-  messages=[{"role":"user","content":"Return only {\"ok\":true} as JSON."}],
-  response_format={"type":"json_object"},
-  extra_headers={"x-api-key": os.environ["CHUTES_API_KEY"]},
-)
-print(resp.choices[0].message.get("content",""))
-```
+Per‑host chute (opt‑in; uv deploy)
+- Deploy from your template module (standard image; no Docker build required):
+  ```bash
+  uv run chutes build path/to/template.py:chute --wait
+  yes | uv run chutes deploy path/to/template.py:chute --accept-fee
+  ```
+- Readiness gate: `GET https://<slug>.chutes.ai/v1/models == 200`.
+- One‑shot doctor:
+  ```bash
+  PYTHONPATH=src:. CHUTES_API_KEY=... \
+  python scripts/chutes_host_doctor.py --slug <slug> --model <MODEL_ID>
+  # prints { overall_ok: true|false, readiness, single, batch }
+  ```
 
-Optional (experimental): Opt‑in to convert Bearer→x‑api‑key for non‑OpenAI bases:
-```
-export SCILLM_SAFE_MODE=0
-export SCILLM_ENABLE_AUTO_AUTH=1
-```
-
-Safe defaults:
-- `SCILLM_SAFE_MODE=1` (default) preserves legacy behavior and never mutates headers.
-- DEBUG-only names (no secrets) are exposed when `SCILLM_DEBUG_META=1`.
+Notes
+- Some models return fenced JSON (```json ... ```); use `litellm.extras.json_utils.clean_json_string()` to normalize.
+- Prefer the shared base for day‑to‑day batch jobs; use a per‑host chute when you need isolation/pinning.
+- Streaming transport: to force httpx (and avoid aiohttp shutdown noise), set `SCILLM_FORCE_HTTPX_STREAM=1` before running smokes/notebooks.
 
 Codex‑Agent Zero‑Guess Quickstart (no CodeWorld)
 - Start sidecar: `docker compose -f local/docker/compose.agents.yml up -d codex-sidecar`
@@ -453,6 +491,23 @@ POST `/bridge/complete` with:
   "max_seconds": 180
 }
 ```
+
+## Verified Tool‑Calling Models (Chutes)
+
+Tool‑calling support depends on the model and the gateway route. We only claim support for models we have live‑verified (tool_calls present) with exact endpoint, headers, and parameters.
+
+- moonshotai/Kimi‑K2‑Instruct‑0905
+  - Endpoint: `/v1/chat/completions`
+  - Auth: `Authorization: Bearer <key>`
+  - stream: `false`
+  - tool_choice: `"auto"`
+  - Verified: Oct 25, 2025 (ok_tools=true in `.artifacts/nb_advanced_streaming_tools.json`)
+
+All other models are “unverified” until a live check passes. Use the probe in local/docs/01_guides/TOOLS_SUPPORT.md to submit a working example; we’ll add it to the table.
+
+Notes
+- Alternate endpoints: some gateways expose tool‑calling on `/v1/responses`. Set `CHUTES_TOOLS_ENDPOINT` and re‑run smokes to verify.
+- Paved path recap: JSON = `x-api-key`; Streaming = `Authorization: Bearer`; Tools (Kimi‑K2) = non‑stream + Bearer + realistic function (e.g., `get_weather`).
 
 The response mirrors the scenario JSON (summary, statistics, proof_results, stdout, stderr, duration).
 Use `feature_recipes/lean4_bridge_client.py` to call the bridge directly.

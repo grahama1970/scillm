@@ -7,6 +7,7 @@ For handling OpenAI-like chat completions, like IBM WatsonX, etc.
 import json
 import os
 from typing import Any, Callable, Optional, Union, Tuple
+import time
 
 import httpx
 
@@ -21,7 +22,14 @@ from litellm.types.utils import CustomStreamingDecoder, ModelResponse
 from litellm.utils import CustomStreamWrapper, ProviderConfigManager
 
 from ..common_utils import OpenAILikeBase, OpenAILikeError
+from litellm.exceptions import AuthenticationError, NotFoundError, RateLimitError
 from .transformation import OpenAILikeChatConfig
+from litellm.secret_managers.main import get_secret_bool
+def _bool_env(name: str, default: bool) -> bool:
+    val = os.getenv(name)
+    if val is None:
+        return default
+    return str(val).strip().lower() in {"1","true","yes","on"}
 
 
 def _scillm_transport_name(api_base: str) -> str:
@@ -46,8 +54,9 @@ def _scillm_apply_auth_policy(api_base: str, headers: dict) -> Tuple[dict, str]:
         Prefer x-api-key for non api.openai.com; convert Bearer->x-api-key.
     Never log secrets; only style names are surfaced for DEBUG.
     """
-    safe_mode = os.getenv("SCILLM_SAFE_MODE", "1") == "1"
-    enable_auto_auth = os.getenv("SCILLM_ENABLE_AUTO_AUTH", "0") == "1"
+    # Defaults: SAFE_MODE=True (no mutation), ENABLE_AUTO_AUTH=False
+    safe_mode = _bool_env("SCILLM_SAFE_MODE", True)
+    enable_auto_auth = _bool_env("SCILLM_ENABLE_AUTO_AUTH", False)
     new_headers = dict(headers or {})
     is_openai = "api.openai.com" in (api_base or "")
 
@@ -67,6 +76,64 @@ def _scillm_apply_auth_policy(api_base: str, headers: dict) -> Tuple[dict, str]:
 
     # Default: no mutation, return detected style
     return new_headers, _scillm_detect_auth_style(new_headers)
+
+
+# --- SciLLM: minimal preflight (opt-in, cached) ---
+_SC_PREFLIGHT_CACHE: dict[str, float] = {}
+
+def _scillm_preflight(api_base: str, headers: dict, model: str) -> None:
+    """
+    If SCILLM_PREFLIGHT=1, do a tiny JSON echo to verify Chat is reachable.
+    Accept 200 or 429 (capacity). Fail on 401/403/404/5xx.
+    Cache per base for 300s.
+    """
+    try:
+        # Default ON for non-openai.com bases; can be disabled by SCILLM_PREFLIGHT=0
+        base = (api_base or "").strip()
+        default_on = ("api.openai.com" not in base)
+        if not _bool_env("SCILLM_PREFLIGHT", default_on):
+            return
+        now = time.time()
+        if _SC_PREFLIGHT_CACHE.get(base, 0) > now:
+            return
+        client = HTTPHandler(timeout=httpx.Timeout(timeout=20.0, connect=5.0))
+        payload = {
+            "model": model,
+            "messages": [{"role": "user", "content": 'Return only {"ok":true} as JSON.'}],
+            "response_format": {"type": "json_object"},
+            "max_tokens": 8,
+            "temperature": 0,
+        }
+        resp = client.post(url=base, headers=headers, data=json.dumps(payload))
+        code = resp.status_code
+        if code in (200, 429):
+            # TTL 300s
+            _SC_PREFLIGHT_CACHE[base] = now + 300.0
+            return
+        # Map helpful message
+        try:
+            msg = resp.text
+        except Exception:
+            msg = str(resp)
+        raise OpenAILikeError(status_code=code, message=f"preflight_failed: {msg}")
+    except OpenAILikeError:
+        raise
+    except Exception as e:
+        # Non-fatal unknown failure: let main call proceed
+        return
+
+
+def _scillm_guard_headers(headers: dict) -> None:
+    """Fail fast on obviously bad Authorization/x-api-key values (quoted/nested)."""
+    for k in ("Authorization", "x-api-key"):
+        v = headers.get(k)
+        if not isinstance(v, str) or not v:
+            continue
+        s = v.strip()
+        if s.startswith("CHUTES_API_KEY=") or (
+            (s.startswith('"') and s.endswith('"')) or (s.startswith("'") and s.endswith("'"))
+        ):
+            raise OpenAILikeError(status_code=400, message=f"invalid auth header for {k}: looks quoted or nested; fix your .env")
 
 
 async def make_call(
@@ -95,8 +162,9 @@ async def make_call(
         model_response = ModelResponse(**response.json())
         completion_stream = MockResponseIterator(model_response=model_response)
     else:
+        # Pass the response object so iterator can close it when finished
         completion_stream = ModelResponseIterator(
-            streaming_response=response.aiter_lines(), sync_stream=False
+            streaming_response=response.aiter_lines(), sync_stream=False, response_obj=response
         )
     # LOGGING
     logging_obj.post_call(
@@ -129,7 +197,35 @@ def make_sync_call(
     )
 
     if response.status_code != 200:
-        raise OpenAILikeError(status_code=response.status_code, message=response.read())
+        code = response.status_code
+        try:
+            msg = response.text
+        except Exception:
+            msg = str(response)
+        if code in (401, 403):
+            style = _scillm_detect_auth_style(headers)
+            hint = f"AuthError(header_style={style}); check .env and header style for non-openai base"
+            raise AuthenticationError(
+                message=hint if not msg else msg,
+                llm_provider="openai_like",
+                model=model,
+                response=response,
+            )
+        if code == 404:
+            raise NotFoundError(
+                message=f"model not found: {model}",
+                model=model,
+                llm_provider="openai_like",
+                response=response,
+            )
+        if code == 429:
+            raise RateLimitError(
+                message="capacity or rate limit",
+                llm_provider="openai_like",
+                model=model,
+                response=response,
+            )
+        raise OpenAILikeError(status_code=code, message=msg)
 
     if streaming_decoder is not None:
         completion_stream = streaming_decoder.iter_bytes(
@@ -197,6 +293,11 @@ class OpenAILikeChatHandler(OpenAILikeBase):
             custom_llm_provider=custom_llm_provider,
             logging_obj=logging_obj,
         )
+        # Attach client so downstream can close it when stream ends
+        try:
+            setattr(streamwrapper, "_sc_client", client)
+        except Exception:
+            pass
 
         return streamwrapper
 
@@ -233,15 +334,39 @@ class OpenAILikeChatHandler(OpenAILikeBase):
             response = await client.post(
                 api_base, headers=headers, data=json.dumps(data), timeout=timeout
             )
-            response.raise_for_status()
-        except httpx.HTTPStatusError as e:
-            raise OpenAILikeError(
-                status_code=e.response.status_code,
-                message=e.response.text,
-            )
+            if response.status_code != 200:
+                code = response.status_code
+                text = response.text
+                if code in (401, 403):
+                    style = _scillm_detect_auth_style(headers)
+                    hint = f"AuthError(header_style={style}); check .env and header style for non-openai base"
+                    raise AuthenticationError(
+                        message=hint if text is None or text == "" else text,
+                        llm_provider="openai_like",
+                        model=model,
+                        response=response,
+                    )
+                if code == 404:
+                    raise NotFoundError(
+                        message=f"model not found: {model}",
+                        model=model,
+                        llm_provider="openai_like",
+                        response=response,
+                    )
+                if code == 429:
+                    raise RateLimitError(
+                        message="capacity or rate limit",
+                        llm_provider="openai_like",
+                        model=model,
+                        response=response,
+                    )
+                raise OpenAILikeError(status_code=code, message=text)
         except httpx.TimeoutException:
             raise OpenAILikeError(status_code=408, message="Timeout error occurred.")
         except Exception as e:
+            # Preserve mapped LiteLLM exceptions; only wrap unknowns
+            if isinstance(e, (AuthenticationError, NotFoundError, RateLimitError)):
+                raise
             raise OpenAILikeError(status_code=500, message=str(e))
 
         return OpenAILikeChatConfig._transform_response(
@@ -302,6 +427,17 @@ class OpenAILikeChatHandler(OpenAILikeBase):
         # Do not log secrets; only capture style names.
         headers, __sc_auth_style = _scillm_apply_auth_policy(api_base=api_base, headers=headers)
         __sc_transport = _scillm_transport_name(api_base)
+        # Ensure required content headers are present when caller supplied headers
+        if headers is None:
+            headers = {}
+        if "Content-Type" not in headers:
+            headers["Content-Type"] = "application/json"
+        # Optional but helpful for some gateways
+        headers.setdefault("Accept", "application/json")
+        # Guard clearly bad headers (quoted/nested)
+        _scillm_guard_headers(headers)
+        # Optional preflight (cached)
+        _scillm_preflight(api_base=api_base, headers=headers, model=model)
 
         stream: bool = optional_params.pop("stream", None) or False
         extra_body = optional_params.pop("extra_body", {})
@@ -329,20 +465,34 @@ class OpenAILikeChatHandler(OpenAILikeBase):
         }
 
         ## LOGGING
-        _debug_meta = os.getenv("SCILLM_DEBUG_META", "0").lower() in {"1","true","yes"}
-        additional = {
-            "complete_input_dict": data,
-            "api_base": api_base,
-        }
-        if _debug_meta:
-            additional.update({
-                "scillm_transport": __sc_transport,
-                "scillm_auth_style": __sc_auth_style,
-            })
+        # Do not log raw headers. Optionally include names-only meta if SCILLM_DEBUG_META=1.
+        _debug_meta: dict = {}
+        try:
+            if get_secret_bool("SCILLM_DEBUG_META", default_value=False):
+                _auth_style = "none"
+                try:
+                    _hdrs = headers or {}
+                    if "x-api-key" in _hdrs:
+                        _auth_style = "x-api-key"
+                    elif "Authorization" in _hdrs:
+                        _auth_style = "authorization-bearer"
+                except Exception:
+                    pass
+                _debug_meta = {
+                    "scillm_transport": "openai_like",
+                    "scillm_auth_style": _auth_style,
+                }
+        except Exception:
+            _debug_meta = {}
+
         logging_obj.pre_call(
             input=messages,
             api_key=api_key,
-            additional_args=additional,
+            additional_args={
+                "complete_input_dict": data,
+                "api_base": api_base,
+                **_debug_meta,
+            },
         )
         if acompletion is True:
             if client is None or not isinstance(client, AsyncHTTPHandler):
@@ -428,18 +578,42 @@ class OpenAILikeChatHandler(OpenAILikeBase):
                     response = client.post(
                         url=api_base, headers=headers, data=json.dumps(data)
                     )
-                    response.raise_for_status()
-
-                except httpx.HTTPStatusError as e:
-                    raise OpenAILikeError(
-                        status_code=e.response.status_code,
-                        message=e.response.text,
-                    )
+                    if response.status_code != 200:
+                        code = response.status_code
+                        text = response.text
+                        if code in (401, 403):
+                            # Map to AuthenticationError with header style hint
+                            style = _scillm_detect_auth_style(headers)
+                            hint = f"AuthError(header_style={style}); check .env and header style for non-openai base"
+                            raise AuthenticationError(
+                                message=hint if text is None or text == "" else text,
+                                llm_provider="openai_like",
+                                model=model,
+                                response=response,
+                            )
+                        if code == 404:
+                            raise NotFoundError(
+                                message=f"model not found: {model}",
+                                model=model,
+                                llm_provider="openai_like",
+                                response=response,
+                            )
+                        if code == 429:
+                            raise RateLimitError(
+                                message="capacity or rate limit",
+                                llm_provider="openai_like",
+                                model=model,
+                                response=response,
+                            )
+                        # Fallback to generic
+                        raise OpenAILikeError(status_code=code, message=text)
                 except httpx.TimeoutException:
                     raise OpenAILikeError(
                         status_code=408, message="Timeout error occurred."
                     )
                 except Exception as e:
+                    if isinstance(e, (AuthenticationError, NotFoundError, RateLimitError)):
+                        raise
                     raise OpenAILikeError(status_code=500, message=str(e))
         return OpenAILikeChatConfig._transform_response(
             model=model,

@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import os
 from typing import Optional
+import subprocess
+import time
 
 from litellm.llms.codex_sidecar_manager import ensure_sidecar
 
@@ -79,10 +81,31 @@ def ensure_codex_agent(base: Optional[str] = None) -> str:
     env_base = os.getenv("CODEX_AGENT_API_BASE")
     if env_base:
         env_base = _strip_v1(env_base)
+        # If local and unhealthy, try to auto-start the docker sidecar
+        is_local = env_base.startswith("http://127.0.0.1:") or env_base.startswith("http://localhost:")
+        if is_local and not _probe_chat_base(env_base, os.getenv("OPENAI_API_KEY")):
+            try:
+                compose = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'local', 'docker', 'compose.agents.yml')
+                # 1) Attempt restart if an existing container is present
+                try:
+                    subprocess.run(['docker','restart','litellm-codex-agent'], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    for _ in range(5):
+                        if _probe_chat_base(env_base, os.getenv("OPENAI_API_KEY")):
+                            return env_base
+                        time.sleep(0.6)
+                except Exception:
+                    pass
+                subprocess.run(['docker','compose','-f', compose, 'up','-d','codex-sidecar'], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                for _ in range(10):
+                    if _probe_chat_base(env_base, os.getenv("OPENAI_API_KEY")):
+                        break
+                    time.sleep(0.6)
+            except Exception as e:
+                _dbg(f"auto-start codex-sidecar failed: {e}")
         _dbg(f"using env base={env_base}")
         return env_base
 
-    # Start sidecar lazily
+    # Start sidecar lazily (embedded) if no base set
     try:
         resolved = ensure_sidecar()
         os.environ["CODEX_AGENT_API_BASE"] = resolved

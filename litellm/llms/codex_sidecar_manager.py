@@ -10,8 +10,6 @@ from dataclasses import dataclass
 
 import httpx
 
-from .codex_sidecar_server import serve
-
 
 class SidecarError(RuntimeError):
     pass
@@ -43,6 +41,8 @@ class CodexSidecarManager:
             host = os.getenv("CODEX_SIDECAR_HOST", "127.0.0.1")
             port = int(os.getenv("CODEX_SIDECAR_PORT", "8077"))
 
+            # Lazy import to avoid module import side-effects if CLI is not present
+            from .codex_sidecar_server import serve  # type: ignore
             proc = multiprocessing.Process(target=serve, args=(host, port), daemon=True)
             proc.start()
 
@@ -77,3 +77,33 @@ def ensure_sidecar() -> str:
 
     return _MANAGER.ensure()
 
+
+def restart_sidecar(timeout: float = 20.0) -> str:
+    """Force a fresh embedded sidecar instance and return its base URL.
+
+    Local-only path used for ephemeral judge calls (no CODEX_AGENT_API_BASE set).
+    """
+    # If an explicit base is set, we must not mutate it here
+    if "CODEX_AGENT_API_BASE" in os.environ:
+        return os.environ["CODEX_AGENT_API_BASE"].rstrip("/")
+    try:
+        # Stop existing
+        if _MANAGER._state.process and _MANAGER._state.process.is_alive():  # type: ignore[attr-defined]
+            _MANAGER._state.process.terminate()  # type: ignore[attr-defined]
+            _MANAGER._state.process.join(timeout=5.0)  # type: ignore[attr-defined]
+    except Exception:
+        pass
+    # Start fresh
+    base = _MANAGER.ensure()
+    # Optionally wait a bit longer for health on cold start
+    end = time.time() + max(0.0, float(timeout))
+    with httpx.Client(timeout=1.0) as c:
+        while time.time() < end:
+            try:
+                r = c.get(f"{base}/healthz")
+                if r.status_code == 200:
+                    break
+            except Exception:
+                pass
+            time.sleep(0.25)
+    return base

@@ -1,63 +1,53 @@
 #!/usr/bin/env python3
-"""
-Local mock for an OpenAI-compatible gateway that rejects Bearer and
-requires x-api-key (or raw Authorization).
+from __future__ import annotations
 
-Endpoints:
-  GET  /v1/models               → 401 if Bearer; 200 when x-api-key or raw Authorization
-  POST /v1/chat/completions     → 200 when x-api-key or raw Authorization; returns OpenAI-style JSON
-
-Run:
-  uvicorn scripts.chutes_mock_server:app --port 18089 --host 127.0.0.1
-"""
+import os
 from fastapi import FastAPI, Request, Response
 from fastapi.responses import JSONResponse
 
 app = FastAPI()
 
-def _auth_style(req: Request) -> str:
-    auth = req.headers.get("authorization")
-    xkey = req.headers.get("x-api-key")
-    if xkey:
-        return "x-api-key"
-    if auth:
-        if auth.lower().startswith("bearer "):
-            return "bearer"
-        return "raw"
-    return "none"
-
 
 @app.get("/v1/models")
-async def models(request: Request):
-    style = _auth_style(request)
-    if style == "bearer":
-        return JSONResponse(status_code=401, content={"error": {"message": "Invalid token."}})
-    if style in ("x-api-key", "raw"):
-        return JSONResponse(status_code=200, content={"object": "list", "data": [{"id": "stub-model", "object": "model"}]})
-    return JSONResponse(status_code=401, content={"error": {"message": "Missing credentials"}})
+def list_models(request: Request):
+    # Accept either x-api-key or raw Authorization. Reject Bearer.
+    auth = request.headers.get("authorization") or request.headers.get("Authorization")
+    xk = request.headers.get("x-api-key")
+    if isinstance(auth, str) and auth.lower().startswith("bearer ") and not xk:
+        return JSONResponse({"error": "Bearer not accepted"}, status_code=401)
+    models = {
+        "object": "list",
+        "data": [
+            {"id": "mock-text-001", "object": "model"},
+            {"id": "mock-vlm-001", "object": "model"},
+        ],
+    }
+    return JSONResponse(models)
 
 
 @app.post("/v1/chat/completions")
-async def chat(request: Request):
-    style = _auth_style(request)
+async def chat_completions(request: Request):
     body = await request.json()
-    if style not in ("x-api-key", "raw"):
-        return JSONResponse(status_code=401, content={"error": {"message": "Invalid token."}})
+    # Same auth rule as /models
+    auth = request.headers.get("authorization") or request.headers.get("Authorization")
+    xk = request.headers.get("x-api-key")
+    if isinstance(auth, str) and auth.lower().startswith("bearer ") and not xk:
+        return JSONResponse({"error": "Missing or invalid auth header"}, status_code=401)
+
     content = "{\"ok\":true}"
-    return JSONResponse(
-        status_code=200,
-        content={
-            "id": "cmpl-stub",
-            "object": "chat.completion",
-            "model": body.get("model", "stub-model"),
-            "choices": [
-                {
-                    "index": 0,
-                    "message": {"role": "assistant", "content": content},
-                    "finish_reason": "stop",
-                }
-            ],
-            "usage": {"prompt_tokens": 5, "completion_tokens": 3, "total_tokens": 8},
-        },
-    )
+    resp = {
+        "id": "cmpl-mock",
+        "object": "chat.completion",
+        "choices": [
+            {"index": 0, "message": {"role": "assistant", "content": content}},
+        ],
+    }
+    return JSONResponse(resp)
+
+
+if __name__ == "__main__":
+    import uvicorn
+
+    port = int(os.getenv("CHUTES_MOCK_PORT", "18093"))
+    uvicorn.run(app, host="127.0.0.1", port=port)
 

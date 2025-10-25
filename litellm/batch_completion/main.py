@@ -178,9 +178,10 @@ def batch_completion_models(*args, **kwargs):
             "safety_identifier","functions","function_call","base_url","api_version","api_key","thinking",
             "custom_llm_provider","headers","extra_headers"
         }
-        futures = {}
+        future_to_index = {}
+        results = {}
         with ThreadPoolExecutor(max_workers=len(deployments)) as executor:
-            for deployment in deployments:
+            for idx, deployment in enumerate(deployments):
                 # compose per-call kwargs without mutating shared dicts
                 call_kwargs = dict(deployment)
                 for key, val in _base_kwargs.items():
@@ -188,44 +189,40 @@ def batch_completion_models(*args, **kwargs):
                         call_kwargs[key] = val
                 if nested_kwargs:
                     call_kwargs.update(nested_kwargs)
-                # Ensure auth headers survive provider normalization: merge extra_headers into headers
+                # Preserve headers: merge extra_headers into headers to survive provider normalization
                 eh = call_kwargs.pop("extra_headers", None)
                 if isinstance(eh, dict) and eh:
                     merged_headers = dict(call_kwargs.get("headers", {}) or {})
                     merged_headers.update(eh)
                     call_kwargs["headers"] = merged_headers
-                futures[deployment.get("model", "__unknown__")] = executor.submit(
-                    litellm.completion, **call_kwargs
-                )
+                    # Keep extra_headers too, if downstream expects it
+                    call_kwargs["extra_headers"] = eh
+                fut = executor.submit(litellm.completion, **call_kwargs)
+                future_to_index[fut] = idx
 
-            while futures:
-                # wait for the first returned future
+            # Deterministic selection: earliest successful by declared order
+            pending = set(future_to_index.keys())
+            while pending:
                 print_verbose("\n\n waiting for next result\n\n")
-                done, _ = wait(futures.values(), return_when=FIRST_COMPLETED)
+                done, _ = wait(pending, return_when=FIRST_COMPLETED)
                 print_verbose(f"done list\n{done}")
-                for future in done:
+                for fut in done:
+                    idx = future_to_index[fut]
+                    pending.discard(fut)
                     try:
-                        result = future.result()
-                        if result is not None:
-                            return result
-                    except Exception:
-                        # if model 1 fails, continue with response from other models
-                        print_verbose(
-                            "\n\ngot an exception, ignoring, removing from futures"
-                        )
-                    # remove completed/failed future and continue loop
-                    new_futures = {}
-                    for key, value in futures.items():
-                        if future == value:
-                            print_verbose(f"removing key{key}")
-                            continue
-                        else:
-                            new_futures[key] = value
-                    futures = new_futures
-                    print_verbose(f"new futures{futures}")
+                        res = fut.result()
+                        results[idx] = (True, res)
+                    except Exception as exc:
+                        results[idx] = (False, exc)
 
-                print_verbose("\n\ndone looping through futures\n\n")
-                print_verbose(futures)
+                for i in range(len(deployments)):
+                    if i in results:
+                        ok, val = results[i]
+                        if ok and val is not None:
+                            return val
+
+            print_verbose("\n\ndone looping through futures\n\n")
+            print_verbose(results)
 
     return None  # If no response is received from any model
 

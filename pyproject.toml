@@ -27,6 +27,7 @@ dependencies = [
   "pondpond>=1.4.1",
   "pytest-html>=4.1.1",
   "rapidfuzz>=3.9.7",
+  "chutes>=0.0.26",
 ]
 
 [project.urls]

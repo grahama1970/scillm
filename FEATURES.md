@@ -11,6 +11,7 @@ New in this revision:
 - Documented mini‑agent trace storage + security cautions
 - Clarified parallel results object shape
 - Explicit environment prefix guidance (SCILLM_* over legacy LITELLM_*)
+- Chutes (OpenAI‑compatible) paved path: Authorization header, Router batch, and a per‑host “doctor”
 
 > Conventions
 > - Imports assume: `from litellm import Router, completion, acompletion` (or `from scillm import ...` — re‑exported).
@@ -26,7 +27,7 @@ Prefer: `SCILLM_ENABLE_CODEWORLD=1` etc. (All `SCILLM_ENABLE_*` have `LITELLM_EN
 
 | Area | Feature | What It Does | How To Use (one‑liner) | Files/Notes |
 |---|---|---|---|---|
-| Providers | OpenAI‑compatible | Call any OpenAI‑style model (local or remote) | `completion(model="openai/<org>/<model>", messages=...)` or `Router(...).completion(...)` | litellm/main.py |
+| Providers | OpenAI‑compatible (Chutes, etc.) | Call OpenAI‑style gateways | `completion(model="<MODEL_ID>", api_base=$BASE, api_key=None, custom_llm_provider="openai_like", extra_headers={"x-api-key":$KEY}, messages=...)` | JSON=x-api-key; Streaming=Bearer; IDs from `/v1/models` |
 | Providers | codex‑agent (OpenAI‑compatible shim) | Route to your codex‑agent (tools, plans, MCP) via OpenAI Chat API | `completion(model="<MODEL_ID>", custom_llm_provider="codex-agent", api_base=$CODEX_AGENT_API_BASE, messages=[...])` | Provider adds `/v1` |
 | UX | Model‑only alias | Use “only change model” form (no provider arg) | `completion(model="codex-agent/gpt-5", api_base=$CODEX_AGENT_API_BASE, messages=[...])` | New guard ensures no OpenAI fallback |
 | Deprecated | codex‑cloud (remote best‑of‑N) | No public, stable Codex Cloud Tasks API; prefer codex‑agent or gateway best‑of‑N | — | Disabled by default |
@@ -257,6 +258,19 @@ Batch example (canonical envelope):
 | Feature | What It Does | How To Use | Files/Notes |
 |---|---|---|---|
 | JsonlCheckpoint | Resume long runs; avoid re‑processing | `cp = JsonlCheckpoint(path, id_key="id"); done = cp.processed_ids(); cp.append({...})` | litellm/contrib/batch.py; docs/guide/batch_helpers.md |
+
+## Verified Tool‑Calling Models (Chutes)
+
+We only mark models as supporting tool‑calling when live verification returns an OpenAI‑style `tool_calls` array.
+
+- Model: `moonshotai/Kimi‑K2‑Instruct‑0905`
+  - Endpoint: `/v1/chat/completions`
+  - Auth: `Authorization: Bearer <key>`
+  - stream: `false`
+  - tool_choice: `"auto"`
+  - Verified on: 2025‑10‑25
+
+Everything else is unverified until a probe succeeds. See `local/docs/01_guides/TOOLS_SUPPORT.md` for a curl/Python probe and how to add entries.
 | TokenBucket (sync) | Gentle in‑process throttling (threads) | `bucket = TokenBucket(rate_per_sec=3.0, capacity=6); with bucket.acquire(): call()` | Same |
 | AsyncTokenBucket | Async throttling (coroutines) | `bucket = AsyncTokenBucket(3.0, 6); async with (await bucket.acquire()): await call()` | Same |
 | run_batch | Tiny async runner: skip→throttle→call→append | `await run_batch(items, id_key, fn, checkpoint_path, bucket=bucket, max_concurrency=12)` | Same |
@@ -373,3 +387,36 @@ If you need a quick example for a specific provider or scenario, open the files 
 - Or per-call: `auto_json_sanitize=True`
 - Triggers when `response_format={"type":"json_object"}` or `response_mime_type="application/json"`.
 - Uses `litellm.extras.clean_json_string()` to repair and re-validate; stamps `_hidden_params.json_sanitized=true`.
+## Chutes (OpenAI‑compatible) — Paved Path
+
+- Shared base (recommended default)
+  - Headers: use `Authorization: Bearer $CHUTES_API_KEY` for `/v1/chat/completions`. `/v1/models` also accepts Bearer (and often `x-api-key`).
+  - Single call (Python):
+    ```python
+    from scillm import completion, os
+    out = completion(
+      model=os.environ["CHUTES_MODEL_ID"],
+      api_base=os.environ["CHUTES_API_BASE"],
+      api_key=os.environ["CHUTES_API_KEY"],  # Bearer
+      custom_llm_provider="openai_like",
+      messages=[{"role":"user","content":"Return only {\"ok\":true} as JSON."}],
+      response_format={"type":"json_object"}, temperature=0, max_tokens=16)
+    ```
+  - Batch (Router): set `api_key` in `model_list` so Bearer is sent:
+    ```python
+    from scillm import Router, os
+    r = Router(model_list=[{"model_name":"chutes","litellm_params":{
+      "model": os.environ["CHUTES_MODEL_ID"],
+      "api_base": os.environ["CHUTES_API_BASE"],
+      "api_key": os.environ["CHUTES_API_KEY"],
+      "custom_llm_provider": "openai_like"}}])
+    ```
+
+- Per‑host chute (opt‑in lifecycle)
+  - Deploy via `uv run chutes deploy <module>:chute --accept-fee`.
+  - Readiness gate: `GET https://<slug>.chutes.ai/v1/models == 200`.
+  - Verify + batch: `scripts/chutes_host_doctor.py --slug <slug> --model <id>` prints a one‑line summary and saves a JSON artifact.
+
+Notes
+- Prefer the shared base for day‑to‑day batch work; use per‑host when you need isolation/pinning.
+- Some models return fenced JSON (```json ... ```); strip fences in your client if you require raw JSON.
