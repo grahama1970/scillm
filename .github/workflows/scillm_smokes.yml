@@ -66,3 +66,24 @@ jobs:
         if: always()
         run: |
           echo "Warmup job completed (see logs for JSON)."
+
+  mock-auto-auth:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install uv
+        run: |
+          curl -LsSf https://astral.sh/uv/install.sh | sh
+          echo "$HOME/.cargo/bin" >> $GITHUB_PATH
+      - name: Sync deps
+        run: uv sync
+      - name: Run mock negotiation smoke
+        env:
+          SC_MOCK_BASE: http://127.0.0.1:18093/v1
+          SC_MOCK_KEY: sk_mock_key
+        run: |
+          # the script starts/stops the mock and runs both negative/positive checks
+          uv run -- python scripts/mock_auth_neg_smoke.py
