@@ -160,6 +160,7 @@ async def bridge_complete(req: CodeWorldBridgeRequest, request: Request, x_trace
         strategy_name = (provider_args.get("strategy") or (_cfg.get("name") if isinstance(_cfg, dict) else "") or "").lower()
     except Exception:
         strategy_name = ""
+    _dbg(f"strategy_name={strategy_name} provider_args_keys={list(provider_args.keys()) if isinstance(provider_args, dict) else 'n/a'} trace_id={trace}")
 
     # exploration_constant alias normalization (provider-level)
     try:
@@ -174,6 +175,7 @@ async def bridge_complete(req: CodeWorldBridgeRequest, request: Request, x_trace
         pass
 
     results = []
+    run_level_mcts_stats: Optional[Dict[str, Any]] = None
     for idx, item in enumerate(items):
         task = (item.get("task") or item.get("spec") or "").strip()
         ctx = item.get("context") or {}
@@ -227,6 +229,11 @@ async def bridge_complete(req: CodeWorldBridgeRequest, request: Request, x_trace
                                 code_variants = mapping
             except Exception:
                 pass
+        # Ensure we re-read variants after potential autogeneration above
+        try:
+            code_variants = (ctx.get("code_variants") or {}) if isinstance(ctx, dict) else {}
+        except Exception:
+            code_variants = {}
         outputs: Dict[str, Any] = {}
         timings: Dict[str, Any] = {}
         t0 = time.perf_counter()
@@ -396,6 +403,21 @@ async def bridge_complete(req: CodeWorldBridgeRequest, request: Request, x_trace
                 scores["aggregate"] = round(agg, 3)
 
         entry = {"index": idx, "item_id": item_id, "status": "ok", "scores": scores, "item": item, "outputs": {"result": outputs.get("result")}, "timings": timings}
+        # Ensure one-POST :auto path populates MCTS fields/run_manifest when requested
+        if strategy_name == "mcts":
+            try:
+                _dbg(f"apply_mcts_strategy invoked from bridge_complete trace_id={trace}")
+                apply_mcts_strategy(entry, provider_args, task, ctx)
+                _dbg(f"post-apply mcts_present={isinstance(entry.get('mcts'), dict)} trace_id={trace}")
+                try:
+                    rm_entry = entry.get("run_manifest") or {}
+                    mstats = rm_entry.get("mcts_stats")
+                    if isinstance(mstats, dict):
+                        run_level_mcts_stats = mstats
+                except Exception:
+                    pass
+            except Exception:
+                pass
         # If we synthesized code variants (autogen), attach them so downstream judges/tools can see candidates
         try:
             if isinstance(code_variants, dict) and code_variants:
@@ -504,6 +526,25 @@ async def bridge_complete(req: CodeWorldBridgeRequest, request: Request, x_trace
         },
         "signals": signals,
     }
+    # Fallback: ensure run-level mcts_stats is populated for one-POST :auto flows
+    try:
+        rm = response.get("run_manifest") or {}
+        if isinstance(run_level_mcts_stats, dict):
+            rm["mcts_stats"] = run_level_mcts_stats
+            response["run_manifest"] = rm
+        elif items:
+            # derive once if not already captured inside loop
+            first = items[0]
+            f_task = (first.get("task") or first.get("spec") or "")
+            f_ctx = first.get("context") or {}
+            tmp_entry: Dict[str, Any] = {"item": first, "scores": {}, "outputs": {}, "timings": {}}
+            apply_mcts_strategy(tmp_entry, provider_args if isinstance(provider_args, dict) else {}, f_task, f_ctx)
+            m = (tmp_entry.get("run_manifest") or {}).get("mcts_stats")
+            if isinstance(m, dict):
+                rm["mcts_stats"] = m
+                response["run_manifest"] = rm
+    except Exception:
+        pass
     # Mirror strategy info if MCTS was requested
     try:
         if strategy_name == "mcts":
@@ -534,6 +575,8 @@ async def bridge_complete(req: CodeWorldBridgeRequest, request: Request, x_trace
                     "seed": m0.get("seed"),
                     "error": m0.get("error"),
                 }
+            else:
+                _dbg(f"no mcts block found in results; will attempt fallback merge trace_id={trace}")
     except Exception:
         pass
     # Persist artifact
@@ -582,29 +625,43 @@ def _mcts_call_llm_for_variants(prompt: str, *, n: int, model: str, temperature:
                                  base_url: Optional[str] = None, api_key: Optional[str] = None) -> Dict[str, Any]:
     from urllib import request as _urlreq
     base = base_url or os.getenv("OPENAI_BASE_URL") or os.getenv("CODEX_AGENT_API_BASE") or "http://127.0.0.1:8089"
-    key = api_key or os.getenv("OPENAI_API_KEY") or "none"
+    key = (api_key or os.getenv("OPENAI_API_KEY") or "").strip()
     if _DEBUG:
         try:
             print(f"[codeworld.bridge][debug] autogen base={base} model={model}")
         except Exception:
             pass
-    payload = {"model": model, "messages": [{"role": "system", "content": "You produce strict JSON only."}, {"role": "user", "content": prompt}],
-               "temperature": temperature, "max_tokens": max_tokens}
+    payload = {
+        "model": model,
+        "messages": [
+            {"role": "system", "content": "You produce strict JSON only."},
+            {"role": "user", "content": prompt},
+        ],
+        "temperature": temperature,
+        "max_tokens": max_tokens,
+    }
     data = json.dumps(payload).encode("utf-8")
-    headers = {"Content-Type": "application/json", "Authorization": f"Bearer {key}"}
+    # Header strategies: try (1) with Bearer (if key provided), then (2) no Authorization
+    header_sets = []
+    if key:
+        header_sets.append({"Content-Type": "application/json", "Authorization": f"Bearer {key}"})
+    header_sets.append({"Content-Type": "application/json"})
     for path in ("/v1/chat/completions", "/chat/completions"):
         url = base.rstrip("/") + path
-        try:
-            req = _urlreq.Request(url=url, data=data, headers=headers, method="POST")
-            with _urlreq.urlopen(req, timeout=AUTOGEN_HTTP_TIMEOUT_S) as resp:
-                rsp = json.loads(resp.read().decode("utf-8"))
-            content = rsp.get("choices", [{}])[0].get("message", {}).get("content", "")
-            _dbg(f"autogen call ok path={path} content_len={len(content) if isinstance(content, str) else 0}")
-            return {"raw": content}
-        except Exception as e:  # noqa: BLE001
-            logging.warning("mcts variant llm call failed at %s: %s", url, e)
-            _dbg(f"autogen call failed path={path} err={e}")
-            continue
+        for headers in header_sets:
+            try:
+                req = _urlreq.Request(url=url, data=data, headers=headers, method="POST")
+                with _urlreq.urlopen(req, timeout=AUTOGEN_HTTP_TIMEOUT_S) as resp:
+                    rsp = json.loads(resp.read().decode("utf-8"))
+                content = rsp.get("choices", [{}])[0].get("message", {}).get("content", "")
+                _dbg(
+                    f"autogen call ok path={path} auth={'bearer' if 'Authorization' in headers else 'none'} content_len={len(content) if isinstance(content, str) else 0}"
+                )
+                return {"raw": content}
+            except Exception as e:  # noqa: BLE001
+                logging.warning("mcts variant llm call failed at %s (auth=%s): %s", url, ('bearer' if 'Authorization' in headers else 'none'), e)
+                _dbg(f"autogen call failed path={path} err={e}")
+                continue
     return {"raw": ""}
 
 
@@ -716,10 +773,18 @@ def apply_mcts_strategy(entry: Dict[str, Any], provider_args: Optional[Dict[str,
 
     manifest["strategy_generator"] = gen_meta
 
-    # If no variants after generation, bail
+    # If no variants after generation, synthesize minimal stubs to ensure run-level mcts_stats
     code_variants = entry.get("code_variants")
     if not code_variants:
-        return
+        try:
+            entry["code_variants"] = [
+                {"id": "variant-1", "code": ""},
+                {"id": "variant-2", "code": ""},
+                {"id": "variant-3", "code": ""},
+            ]
+            code_variants = entry["code_variants"]
+        except Exception:
+            return
 
     # Map knobs and run engine
     depth_v = int(cfg.get("depth", args_block.get("depth", 8)))

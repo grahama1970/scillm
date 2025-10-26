@@ -15,8 +15,38 @@ def write_nb(name: str, cells):
     nb = new_notebook(cells=cells)
     (NB_DIR/name).write_text(nbformat.writes(nb))
 
+def env_preamble_cells():
+    """Common first cells to ensure retries/transport are enabled in live runs.
+    These are no-ops if envs already set; prints a hint if tenacity is missing.
+    """
+    return [
+        new_markdown_cell(
+            (
+                "### Runtime setup\n"
+                "The following envs enable stable retries and quiet streaming.\n\n"
+                "- `SCILLM_FORCE_HTTPX_STREAM=1`\n"
+                "- `LITELLM_MAX_RETRIES=3`, `LITELLM_RETRY_AFTER=1`, `LITELLM_TIMEOUT=45`\n"
+                "- Requires `tenacity` installed for backoff."
+            )
+        ),
+        new_code_cell(
+            (
+                "import os\n"
+                "os.environ.setdefault('SCILLM_FORCE_HTTPX_STREAM','1')\n"
+                "os.environ.setdefault('LITELLM_MAX_RETRIES','3')\n"
+                "os.environ.setdefault('LITELLM_RETRY_AFTER','1')\n"
+                "os.environ.setdefault('LITELLM_TIMEOUT','45')\n"
+                "try:\n"
+                "    import tenacity  # noqa: F401\n"
+                "    print('tenacity: ok')\n"
+                "except Exception:\n"
+                "    print('tenacity missing — run: pip install tenacity')\n"
+            )
+        ),
+    ]
+
 def nb_chutes_openai():
-    cells = [
+    cells = env_preamble_cells() + [
         new_markdown_cell("""
         # Chutes — OpenAI-Compatible
 
@@ -29,7 +59,8 @@ resp = litellm.completion(
   api_base=os.environ['CHUTES_API_BASE'],
   api_key=None,
   custom_llm_provider='openai_like',
-  extra_headers={'x-api-key': os.environ['CHUTES_API_KEY'], 'Authorization': os.environ['CHUTES_API_KEY']},
+  # JSON paved path: use x-api-key (no Bearer)
+  extra_headers={'x-api-key': os.environ['CHUTES_API_KEY']},
   messages=[{'role':'user','content':'Say OK'}],
   max_tokens=8,
   temperature=0,
@@ -40,7 +71,7 @@ print(resp.choices[0].message.get('content',''))
     write_nb("01_chutes_openai_compatible.ipynb", cells)
 
 def nb_router_parallel():
-    cells = [
+    cells = env_preamble_cells() + [
         new_markdown_cell("""
         # Router.parallel_acompletions
         """.strip()),
@@ -51,7 +82,8 @@ router = Router(default_litellm_params={
   'api_base': os.environ['CHUTES_API_BASE'],
   'api_key': None,
   'custom_llm_provider': 'openai_like',
-  'extra_headers': {'x-api-key': os.environ['CHUTES_API_KEY'], 'Authorization': os.environ['CHUTES_API_KEY']},
+  # JSON paved path: x-api-key only
+  'extra_headers': {'x-api-key': os.environ['CHUTES_API_KEY']},
 })
 prompts = ['Say OK-A','Say OK-B','Say OK-C']
 reqs = [{'model': os.environ['CHUTES_MODEL'], 'messages':[{'role':'user','content':p}], 'kwargs': {'max_tokens': 8, 'temperature': 0}} for p in prompts]
@@ -64,7 +96,7 @@ asyncio.run(run())
     write_nb("02_router_parallel_batch.ipynb", cells)
 
 def nb_model_list():
-    cells = [
+    cells = env_preamble_cells() + [
         new_markdown_cell("""
         # completion(model_list=...) — First Success
         """.strip()),
@@ -72,8 +104,8 @@ def nb_model_list():
 import os, litellm
 base=os.environ['CHUTES_API_BASE']; key=os.environ['CHUTES_API_KEY']; model=os.environ['CHUTES_MODEL']
 model_list=[
-  {'model_name':'m1','litellm_params':{'model':model,'api_base':base,'api_key':None,'custom_llm_provider':'openai_like','extra_headers':{'x-api-key':key,'Authorization':key}}},
-  {'model_name':'m2','litellm_params':{'model':model,'api_base':base,'api_key':None,'custom_llm_provider':'openai_like','extra_headers':{'x-api-key':key,'Authorization':key}}},
+  {'model_name':'m1','litellm_params':{'model':model,'api_base':base,'api_key':None,'custom_llm_provider':'openai_like','extra_headers':{'x-api-key':key}}},
+  {'model_name':'m2','litellm_params':{'model':model,'api_base':base,'api_key':None,'custom_llm_provider':'openai_like','extra_headers':{'x-api-key':key}}},
 ]
 resp = litellm.completion(model='m1', model_list=model_list, messages=[{'role':'user','content':'Say OK'}], max_tokens=8, temperature=0)
 print(resp.choices[0].message.get('content',''))
@@ -82,7 +114,7 @@ print(resp.choices[0].message.get('content',''))
     write_nb("03_model_list_first_success.ipynb", cells)
 
 def nb_advanced():
-    cells = [
+    cells = env_preamble_cells() + [
         new_markdown_cell("""
         # Advanced — Streaming and Tools
         """.strip()),
