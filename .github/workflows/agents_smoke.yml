@@ -1,0 +1,33 @@
+name: Agents Notebooks Smoke
+
+on:
+  pull_request:
+  push:
+    branches: [ main ]
+
+jobs:
+  agents-notebooks-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v3
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Sync deps
+        run: |
+          uv sync --frozen
+      - name: Run agents smoke
+        env:
+          # These may be unset in CI; notebooks skip blocks when keys are missing
+          CHUTES_API_BASE: ${{ secrets.CHUTES_API_BASE }}
+          CHUTES_API_KEY: ${{ secrets.CHUTES_API_KEY }}
+        run: |
+          make agents-smoke
+      - name: Upload executed notebooks artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: agents-notebooks-executed
+          path: notebooks/*_executed.ipynb
+
