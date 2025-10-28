@@ -7,6 +7,7 @@ For handling OpenAI-like chat completions, like IBM WatsonX, etc.
 import json
 import os
 from typing import Any, Callable, Optional, Union, Tuple
+import asyncio
 import time
 
 import httpx
@@ -277,16 +278,57 @@ class OpenAILikeChatHandler(OpenAILikeBase):
         fake_stream: bool = False,
     ) -> CustomStreamWrapper:
         data["stream"] = True
-        completion_stream = await make_call(
-            client=client,
-            api_base=api_base,
-            headers=headers,
-            data=json.dumps(data),
-            model=model,
-            messages=messages,
-            logging_obj=logging_obj,
-            streaming_decoder=streaming_decoder,
-        )
+        # Absolute wall-clock timeout guard to prevent indefinite stalls
+        hard_timeout = None
+        try:
+            # Prefer explicit timeout on optional_params / litellm_params; fallback to env or 45s
+            hard_timeout = None
+        except Exception:
+            hard_timeout = None
+        completion_stream = None
+        try:
+            if hard_timeout and hard_timeout > 0:
+                try:
+                    async with asyncio.timeout(hard_timeout):
+                        completion_stream = await make_call(
+                            client=client,
+                            api_base=api_base,
+                            headers=headers,
+                            data=json.dumps(data),
+                            model=model,
+                            messages=messages,
+                            logging_obj=logging_obj,
+                            streaming_decoder=streaming_decoder,
+                        )
+                except AttributeError:
+                    # Py<3.11 fallback
+                    completion_stream = await asyncio.wait_for(
+                        make_call(
+                            client=client,
+                            api_base=api_base,
+                            headers=headers,
+                            data=json.dumps(data),
+                            model=model,
+                            messages=messages,
+                            logging_obj=logging_obj,
+                            streaming_decoder=streaming_decoder,
+                        ),
+                        timeout=hard_timeout,
+                    )
+            else:
+                completion_stream = await make_call(
+                    client=client,
+                    api_base=api_base,
+                    headers=headers,
+                    data=json.dumps(data),
+                    model=model,
+                    messages=messages,
+                    logging_obj=logging_obj,
+                    streaming_decoder=streaming_decoder,
+                )
+        except asyncio.TimeoutError as e:
+            # Propagate a typed timeout; downstream will surface consistently
+            raise litellm.Timeout(message="openai_like stream timeout", llm_provider="openai_like", model=model) from e
         streamwrapper = CustomStreamWrapper(
             completion_stream=completion_stream,
             model=model,
@@ -331,9 +373,33 @@ class OpenAILikeChatHandler(OpenAILikeBase):
             client = litellm.module_level_aclient
 
         try:
-            response = await client.post(
-                api_base, headers=headers, data=json.dumps(data), timeout=timeout
-            )
+            # Absolute timeout guard (in addition to transport timeout)
+            hard_t = None
+            # Try to infer a numeric seconds value from provided timeout (httpx.Timeout or float)
+            if isinstance(timeout, (int, float)):
+                hard_t = float(timeout)
+            try:
+                # httpx.Timeout has .read/.connect etc.; set a sane cap
+                if hard_t is None and isinstance(timeout, httpx.Timeout) and timeout.read is not None:
+                    hard_t = float(timeout.read)
+            except Exception:
+                pass
+
+            if hard_t and hard_t > 0:
+                try:
+                    async with asyncio.timeout(hard_t):
+                        response = await client.post(
+                            api_base, headers=headers, data=json.dumps(data), timeout=timeout
+                        )
+                except AttributeError:
+                    response = await asyncio.wait_for(
+                        client.post(api_base, headers=headers, data=json.dumps(data), timeout=timeout),
+                        timeout=hard_t,
+                    )
+            else:
+                response = await client.post(
+                    api_base, headers=headers, data=json.dumps(data), timeout=timeout
+                )
             if response.status_code != 200:
                 code = response.status_code
                 text = response.text
@@ -457,10 +523,22 @@ class OpenAILikeChatHandler(OpenAILikeBase):
                     messages=messages, model=model
                 )
 
+        def _json_safe(x):
+            if x is None or isinstance(x, (str, int, float, bool)):
+                return True
+            if isinstance(x, (list, tuple)):
+                return all(_json_safe(i) for i in x)
+            if isinstance(x, dict):
+                return all(isinstance(k, str) and _json_safe(v) for k, v in x.items())
+            return False
+
+        # Drop non-JSON-serializable values from optional_params to avoid logging/handler objects leaking into payload
+        safe_optional = {k: v for k, v in (optional_params or {}).items() if _json_safe(v)}
+
         data = {
             "model": model,
             "messages": messages,
-            **optional_params,
+            **safe_optional,
             **extra_body,
         }
 
@@ -469,18 +547,11 @@ class OpenAILikeChatHandler(OpenAILikeBase):
         _debug_meta: dict = {}
         try:
             if get_secret_bool("SCILLM_DEBUG_META", default_value=False):
-                _auth_style = "none"
-                try:
-                    _hdrs = headers or {}
-                    if "x-api-key" in _hdrs:
-                        _auth_style = "x-api-key"
-                    elif "Authorization" in _hdrs:
-                        _auth_style = "authorization-bearer"
-                except Exception:
-                    pass
+                _hdrs = headers or {}
+                auth_style = "x-api-key" if "x-api-key" in _hdrs else ("authorization-bearer" if "Authorization" in _hdrs else "none")
                 _debug_meta = {
                     "scillm_transport": "openai_like",
-                    "scillm_auth_style": _auth_style,
+                    "scillm_auth_style": auth_style,
                 }
         except Exception:
             _debug_meta = {}

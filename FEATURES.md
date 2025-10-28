@@ -12,6 +12,7 @@ New in this revision:
 - Clarified parallel results object shape
 - Explicit environment prefix guidance (SCILLM_* over legacy LITELLM_*)
 - Chutes (OpenAI‑compatible) paved path: Authorization header, Router batch, and a per‑host “doctor”
+ - Automatic selection & fallback helpers: `auto_router_from_env`, `infer_with_fallback`, `find_best_chutes_model`, and utilization‑aware ranking (hysteresis by default)
 
 > Conventions
 > - Imports assume: `from litellm import Router, completion, acompletion` (or `from scillm import ...` — re‑exported).
@@ -28,6 +29,9 @@ Prefer: `SCILLM_ENABLE_CODEWORLD=1` etc. (All `SCILLM_ENABLE_*` have `LITELLM_EN
 | Area | Feature | What It Does | How To Use (one‑liner) | Files/Notes |
 |---|---|---|---|---|
 | Providers | OpenAI‑compatible (Chutes, etc.) | Call OpenAI‑style gateways | `completion(model="<MODEL_ID>", api_base=$BASE, api_key=None, custom_llm_provider="openai_like", extra_headers={"x-api-key":$KEY}, messages=...)` | JSON=x-api-key; Streaming=Bearer; IDs from `/v1/models` |
+| UX | Auto Router (Chutes) | Discover, rank (availability+util), and route | `from scillm.extras import auto_router_from_env; router = auto_router_from_env(kind='text', require_json=True)` | Numbered envs `CHUTES_API_BASE_n/CHUTES_API_KEY_n` |
+| UX | Fallback with attribution | Do not fail; annotate served model + route | `from scillm.extras import infer_with_fallback` | `resp.scillm_meta` contains `served_model` |
+| UX | Best single under capacity | Choose one candidate under util threshold | `from scillm.extras import find_best_chutes_model` | Advisory; uses `/chutes/utilization` when present |
 | Providers | codex‑agent (OpenAI‑compatible shim) | Route to your codex‑agent (tools, plans, MCP) via OpenAI Chat API | `completion(model="<MODEL_ID>", custom_llm_provider="codex-agent", api_base=$CODEX_AGENT_API_BASE, messages=[...])` | Provider adds `/v1` |
 | UX | Model‑only alias | Use “only change model” form (no provider arg) | `completion(model="codex-agent/gpt-5", api_base=$CODEX_AGENT_API_BASE, messages=[...])` | New guard ensures no OpenAI fallback |
 | Deprecated | codex‑cloud (remote best‑of‑N) | No public, stable Codex Cloud Tasks API; prefer codex‑agent or gateway best‑of‑N | — | Disabled by default |

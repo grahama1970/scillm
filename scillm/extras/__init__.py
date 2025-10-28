@@ -47,3 +47,18 @@ try:
         import litellm.llms.chutes  # noqa: F401
 except Exception:
     pass
+from .json_utils import *  # re-export cleaners
+from .json_chat import (
+    json_chat,
+    strict_json_chat,
+    strict_json_completion,  # preferred name
+)
+from .utilization_ranker import *
+from .model_selector import *
+from .fallback_infer import *
+from .auto_router import *
+from .attribution import *
+from .auth_policy import *
+from .hedged import *
+from .preflight import *
+from .hedged_json_chat import hedged_json_chat, hedged_json_completion
