@@ -1,9 +1,6 @@
 from __future__ import annotations
 import typing as t
 
-# Minimal ASGI middleware to normalize auth headers on /v1/* endpoints.
-# Works with Starlette/FastAPI or any ASGI app.
-
 CANON = b"authorization"
 XAPI  = b"x-api-key"
 DEPRECATION_HEADERS = [
@@ -25,7 +22,7 @@ def _extract_token(raw_headers: list[tuple[bytes, bytes]]) -> tuple[str | None, 
             return s[7:].strip(), False
         if ls.startswith("basic "):
             return s[6:].strip(), True
-        return s, True  # legacy raw Authorization
+        return s, True
     v = h.get(XAPI)
     if v:
         return v.decode("latin1").strip(), True
