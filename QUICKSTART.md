@@ -117,6 +117,32 @@ Happy Path (shared base)
     temperature=0, max_tokens=16)
   print(r.choices[0].message.get("content",""))
   ```
+  
+  Strict JSON helper (preferred name, optional):
+  ```python
+  from scillm.extras import strict_json_completion, os
+  r = strict_json_completion(
+    api_base=os.environ["CHUTES_API_BASE"], api_key=None,
+    extra_headers={"Authorization": f"Bearer {os.environ['CHUTES_API_KEY']}"},
+    model=os.environ["CHUTES_TEXT_MODEL"],
+    messages=[{"role":"user","content":"Return only {\"ok\":true} as JSON."}],
+    timeout=30)
+  print(r["choices"][0]["message"]["content"])
+  ```
+
+  Hedge‑once helper (optional; races 2–3 header variants then caches winner):
+  ```python
+  import asyncio, os
+  from scillm.extras import hedged_json_completion
+  async def _run():
+    r = await hedged_json_completion(
+      api_base=os.environ["CHUTES_API_BASE"], key=os.environ["CHUTES_API_KEY"],
+      model=os.environ["CHUTES_TEXT_MODEL"],
+      messages=[{"role":"user","content":"Return only {\"ok\":true} as JSON."}],
+      timeout=30)
+    print(r.choices[0].message.get('content',''))
+  asyncio.run(_run())
+  ```
 - Streaming (text):
   ```python
   from scillm import acompletion, os, asyncio
@@ -152,6 +178,48 @@ Happy Path (shared base)
     "extra_headers": {"x-api-key": os.environ["CHUTES_API_KEY"]}}}])
   # then: await router.parallel_acompletions([...], concurrency=K)
   ```
+
+Automatic selection, fallbacks, and attribution (opt‑in)
+
+- One‑liner Router from env (discovers, ranks by availability + utilization):
+  ```python
+  from scillm.extras import auto_router_from_env
+  router = auto_router_from_env(kind="text", require_json=True)
+  out = router.completion(
+    model=router.model_list[0]["model_name"],
+    messages=[{"role":"user","content":'Return only {"ok":true} as JSON.'}],
+    response_format={"type":"json_object"},
+    max_retries=3, retry_after=1, timeout=45,
+  )
+  print(out.choices[0].message.get("content",""))
+  ```
+- “Do not fail; attribute who served”:
+  ```python
+  from scillm.extras import infer_with_fallback
+  resp, meta = infer_with_fallback(
+      messages=[{"role":"user","content":'Return only {"ok":true} as JSON.'}],
+      kind="text", require_json=True,
+      max_retries=3, retry_after=1, timeout=45,
+  )
+  print(resp.choices[0].message.get('content',''))
+  print(meta)  # includes served_model and route
+  ```
+- Pick a single “not‑near‑capacity” candidate:
+  ```python
+  from scillm.extras import find_best_chutes_model
+  entry = find_best_chutes_model(kind="text", require_json=True, util_threshold=0.85)
+  print(entry)
+  ```
+- Warm caches at process start (optional):
+  ```python
+  from scillm.extras import warm_chutes_caches
+  warm_chutes_caches(router.model_list)
+  ```
+
+Environment (multiple chutes, no code edits)
+- `CHUTES_API_BASE_1`, `CHUTES_API_KEY_1`, `CHUTES_API_BASE_2`, `CHUTES_API_KEY_2`, ...
+- Optional per‑kind model pins: `CHUTES_TEXT_MODEL_1`, `CHUTES_VLM_MODEL_1`, `CHUTES_TOOLS_MODEL_1`
+- Tuning (optional): `SCILLM_UTIL_TTL_S=45`, `SCILLM_UTIL_HI=0.85`, `SCILLM_UTIL_LO=0.50`, `SCILLM_UTIL_K=2`
 
 Per‑host chute (opt‑in; uv deploy)
 - Deploy from your template module (standard image; no Docker build required):

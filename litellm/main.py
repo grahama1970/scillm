@@ -1497,16 +1497,31 @@ def completion(  # type: ignore # noqa: PLR0915
             resp = litellm.batch_completion_models(deployments=deployments, **args)
             if resp is not None:
                 return resp
-            # Fallback: if no model responded (e.g., exceptions filtered), try first deployment directly
+            # Fallback: sequentially try each deployment until first success
             if deployments:
-                first = dict(deployments[0])
                 fb_args = {k: v for k, v in dict(args).items() if v is not None}
                 fb_args.pop("model_list", None)
-                # Do not let base args override explicit deployment params
-                for k, v in list(fb_args.items()):
-                    if k in first:
-                        fb_args.pop(k)
-                return litellm.completion(**first, **fb_args)
+                last_exc = None
+                for dep in deployments:
+                    try:
+                        dep_args = dict(dep)
+                        # Preserve headers: merge extra_headers into headers
+                        _eh = dep_args.pop("extra_headers", None)
+                        if isinstance(_eh, dict) and _eh:
+                            _hdr = dict(dep_args.get("headers", {}) or {})
+                            _hdr.update(_eh)
+                            dep_args["headers"] = _hdr
+                            dep_args["extra_headers"] = _eh
+                        # Do not let base args override explicit deployment params
+                        for k in list(fb_args.keys()):
+                            if k in dep_args:
+                                fb_args.pop(k)
+                        return litellm.completion(**dep_args, **fb_args)
+                    except Exception as _e:
+                        last_exc = _e
+                        continue
+                if last_exc is not None:
+                    raise last_exc
             return None
         if litellm.model_alias_map and model in litellm.model_alias_map:
             model = litellm.model_alias_map[
