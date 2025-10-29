@@ -16,6 +16,8 @@ def json_chat(
     max_tokens: Optional[int] = None,
     extra_headers: Optional[Dict[str,str]] = None,
     sanitize: Optional[bool] = None,
+    require_nonempty: Optional[bool] = None,
+    require_nonempty_keys: Optional[list[str]] = None,
 ) -> Any:
     """Strict JSON completion helper with hard timeout and optional sanitization.
 
@@ -41,7 +43,37 @@ def json_chat(
         kwargs["extra_headers"] = extra_headers
     if sanitize:
         kwargs["auto_json_sanitize"] = True
-    return scillm.completion(**kwargs)
+    resp = scillm.completion(**kwargs)
+    # Optional post-processing: map empty strings to null for specified keys
+    try:
+        if require_nonempty or require_nonempty_keys:
+            content = getattr(resp.choices[0].message, "content", None)
+            if isinstance(content, str) and content.strip():
+                import json as _json
+                try:
+                    obj = _json.loads(content)
+                    if isinstance(obj, dict):
+                        keys = None
+                        if require_nonempty_keys:
+                            keys = set(require_nonempty_keys)
+                        elif require_nonempty:
+                            # apply to all top-level string keys
+                            keys = set(k for k, v in obj.items() if isinstance(v, str))
+                        if keys:
+                            changed = False
+                            for k in keys:
+                                if k in obj and isinstance(obj.get(k), str) and obj.get(k) == "":
+                                    obj[k] = None
+                                    changed = True
+                            if changed:
+                                resp.choices[0].message["content"] = _json.dumps(obj, ensure_ascii=False)
+                except Exception:
+                    # If not parseable JSON, leave as-is
+                    pass
+    except Exception:
+        # Never let helper post-processing raise
+        pass
+    return resp
 
 # Aliases for clarity; keep API flexible without churn
 def strict_json_chat(**kwargs):

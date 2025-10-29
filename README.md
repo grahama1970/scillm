@@ -1000,15 +1000,15 @@ Each notebook below is self‑contained and runnable. Use the “executed” ver
 
 - 01 Chutes — OpenAI‑Compatible
   - Source: `notebooks/01_chutes_openai_compatible.ipynb` — When you want a single JSON response via Chutes (Bearer header), quick sanity for pipelines.
-  - Executed: `notebooks/01_chutes_openai_compatible_executed.ipynb`
+  - Executed: `notebooks/executed/01_chutes_openai_compatible_executed.ipynb`
 
 - 02 Router.parallel_acompletions
   - Source: `notebooks/02_router_parallel_batch.ipynb` — When you need fast, concurrent batch calls; shows per‑item timeouts and loop‑safe async.
-  - Executed: `notebooks/02_router_parallel_batch_executed.ipynb`
+  - Executed: `notebooks/executed/02_router_parallel_batch_executed.ipynb`
 
 - 03 Model List — First Success
   - Source: `notebooks/03_model_list_first_success.ipynb` — Prefer primary then auto‑fallback; per‑deployment headers included.
-  - Executed: `notebooks/03_model_list_first_success_executed.ipynb`
+  - Executed: `notebooks/executed/03_model_list_first_success_executed.ipynb`
 
 - 04a Advanced — Tools (smoke‑safe)
   - Source: `notebooks/04a_tools_only.ipynb` — When you need function/tool calling with OpenAI‑format tools; includes rate‑limit tips.
@@ -1019,40 +1019,40 @@ Each notebook below is self‑contained and runnable. Use the “executed” ver
 
 - 05 Codex‑Agent — Doctor
   - Source: `notebooks/05_codex_agent_doctor.ipynb` — Verifies health and a minimal JSON chat through the Codex agent.
-  - Executed: `notebooks/05_codex_agent_doctor_executed.ipynb`
+  - Executed: `notebooks/executed/05_codex_agent_doctor_executed.ipynb`
 
 - 06 Mini‑Agent — Doctor
   - Source: `notebooks/06_mini_agent_doctor.ipynb` — Validates mini‑agent surfaces and prints a minimal JSON chat.
-  - Executed: `notebooks/06_mini_agent_doctor_executed.ipynb`
+  - Executed: `notebooks/executed/06_mini_agent_doctor_executed.ipynb`
 
 - 07 CodeWorld — MCTS
   - Source: `notebooks/07_codeworld_mcts.ipynb` — Starts the bridge and runs an MCTS scenario; expect `run_manifest.mcts_stats`.
-  - Executed: `notebooks/07_codeworld_mcts_executed.ipynb`
+  - Executed: `notebooks/executed/07_codeworld_mcts_executed.ipynb`
 
 - 08 Certainly Bridge — Doctor
   - Source: `notebooks/08_certainly_bridge.ipynb` — Confirms the bridge responds and proves ≥1 item; includes quick triage.
-  - Executed: `notebooks/08_certainly_bridge_executed.ipynb`
+  - Executed: `notebooks/executed/08_certainly_bridge_executed.ipynb`
 
 - 09 Fallback Inference + Attribution
   - Source: `notebooks/09_fallback_infer_with_meta.ipynb` — Reliability path; returns first success and `served_model` in meta.
-  - Executed: `notebooks/09_fallback_infer_with_meta_executed.ipynb`
+  - Executed: `notebooks/executed/09_fallback_infer_with_meta_executed.ipynb`
 
 - 10 Auto Router — One Liner
   - Source: `notebooks/10_auto_router_one_liner.ipynb` — Builds a Router from env (availability + utilization) and routes JSON.
-  - Executed: `notebooks/10_auto_router_one_liner_executed.ipynb`
+  - Executed: `notebooks/executed/10_auto_router_one_liner_executed.ipynb`
 
 - 11 Perplexity — Sonar Family
   - Source: `notebooks/11_provider_perplexity.ipynb` — Sonar model guide + live model list; examples for sync/async/batch; default `sonar`.
-  - Executed: `notebooks/11_provider_perplexity_executed.ipynb`
+  - Executed: `notebooks/executed/11_provider_perplexity_executed.ipynb`
 
 - 12 Provider — OpenAI
   - Source: `notebooks/12_provider_openai.ipynb` — Baseline OpenAI usage via SciLLM; simple “OK” sanity.
-  - Executed: `notebooks/12_provider_openai_executed.ipynb`
+  - Executed: `notebooks/executed/12_provider_openai_executed.ipynb`
 
 - 13 Provider — Anthropic
   - Source: `notebooks/13_provider_anthropic.ipynb` — Baseline Claude usage via SciLLM; error‑safe when key missing.
-  - Executed: `notebooks/13_provider_anthropic_executed.ipynb`
+  - Executed: `notebooks/executed/13_provider_anthropic_executed.ipynb`
 
 - 14 Provider Matrix — OpenAI, Anthropic, Perplexity, Chutes
   - Source: `notebooks/14_provider_matrix.ipynb` — First‑time environment triage; each section skips when its key is missing.
-  - Executed: `notebooks/14_provider_matrix_executed.ipynb`
+  - Executed: `notebooks/executed/14_provider_matrix_executed.ipynb`

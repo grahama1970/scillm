@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 from dataclasses import dataclass
+import re
 from typing import Dict, Iterable, List, Optional
 
 from .utilization_ranker import rank_chutes_by_availability_and_utilization, _get_models  # type: ignore
@@ -37,6 +38,23 @@ def _infer_caps_from_id(model_id: str) -> Dict[str, bool]:
         "tools": any(k in mid for k in ["-tool", "-function", "-tools", "-func"]),
         "json": any(k in mid for k in ["-json", "json"]),
     }
+
+
+_SIZE_RE = re.compile(r"([0-9]+)\s*(B|T)\b", re.IGNORECASE)
+
+
+def _approx_params(model_id: str) -> float:
+    """Approximate parameter count from model id, in billions.
+
+    Recognizes patterns like 235B, 78B, 1.8T (T as thousands of B).
+    Falls back to 0 when unknown.
+    """
+    m = _SIZE_RE.search(model_id or "")
+    if not m:
+        return 0.0
+    n = float(m.group(1))
+    unit = (m.group(2) or "B").lower()
+    return n * (1000.0 if unit == "t" else 1.0)
 
 
 def _modality_ok(spec: DesiredSpec, caps: Dict[str, bool]) -> bool:
@@ -74,6 +92,14 @@ def build_dynamic_model_list(
     """
     out: List[Dict] = []
     caps_override = _load_caps_override()
+    # Prefer peers near a declared primary when available
+    primary_env = {
+        "text": "CHUTES_TEXT_MODEL",
+        "vlm": "CHUTES_VLM_MODEL",
+        "tools": "CHUTES_TEXT_MODEL",
+    }.get(spec.kind, "CHUTES_TEXT_MODEL")
+    primary_id = os.getenv(primary_env, "").strip()
+    primary_size = _approx_params(primary_id) if primary_id else 0.0
 
     for b in bases:
         base = (b.get("api_base") or "").strip()
@@ -89,24 +115,29 @@ def build_dynamic_model_list(
         if not ids:
             continue
 
-        scored: List[tuple[int, str]] = []
+        scored: List[tuple[int, float, str]] = []
         for mid in ids:
             caps = {**_infer_caps_from_id(mid), **caps_override.get(mid, {})}
             if not _modality_ok(spec, caps):
                 continue
-            scored.append((_distance(spec, caps), mid))
-
-        scored.sort(key=lambda x: (x[0], x[1]))
-        for _, mid in scored[:max_candidates_per_base]:
+            caps_d = _distance(spec, caps)
+            # Secondary key: absolute size distance to primary (peers first)
+            size_d = abs(_approx_params(mid) - primary_size) if primary_size > 0 else -_approx_params(mid)
+            scored.append((caps_d, size_d, mid))
+        # Sort by: capability distance, then peer closeness (or largest first when no primary), then id
+        scored.sort(key=lambda x: (x[0], x[1], x[2]))
+        group = "chutes/text" if spec.kind != "vlm" else "chutes/vlm"
+        for _, __, mid in scored[:max_candidates_per_base]:
             out.append(
                 {
-                    "model_name": f"{b.get('name','chute')}:{mid}",
+                    "model_name": group,
                     "litellm_params": {
                         "custom_llm_provider": "openai_like",
                         "api_base": base,
                         "api_key": None,
                         "extra_headers": {"x-api-key": key, "Authorization": f"Bearer {key}"},
                         "model": mid,
+                        "order": 1,
                     },
                 }
             )
