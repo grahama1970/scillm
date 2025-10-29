@@ -10,6 +10,10 @@ try:
     from scillm.telemetry import metrics as sc_metrics  # type: ignore
 except Exception:  # pragma: no cover
     sc_metrics = None
+try:
+    from scillm.telemetry import pacing as sc_pacing  # type: ignore
+except Exception:  # pragma: no cover
+    sc_pacing = None
 
 
 def _bearer_headers() -> Dict[str, str]:
@@ -72,6 +76,11 @@ def chutes_chat_json(
         tenacious = True
 
     if not tenacious:
+        if sc_pacing:
+            try:
+                sc_pacing.wait_if_needed()
+            except Exception:
+                pass
         _t0 = __import__("time").time()
         _resp = completion(
             model=model,
@@ -98,9 +107,16 @@ def chutes_chat_json(
     # Tenacious outer loop (single model)
     start = __import__("time").time()
     attempt = 0
+    total_sleep_s = 0.0
+    last_retry_after_s = None
     while True:
         attempt += 1
         try:
+            if sc_pacing:
+                try:
+                    total_sleep_s += sc_pacing.wait_if_needed()
+                except Exception:
+                    pass
             r = completion(
                 model=model,
                 api_base=base,
@@ -124,6 +140,15 @@ def chutes_chat_json(
                     )
             except Exception:
                 pass
+            try:
+                setattr(r, "scillm_meta", {
+                    "tenacious": True,
+                    "attempts": attempt,
+                    "total_sleep_s": total_sleep_s,
+                    "last_retry_after_s": last_retry_after_s,
+                })
+            except Exception:
+                pass
             return r
         except Exception as e:
             if not _tenacious_should_retry(e):
@@ -142,7 +167,13 @@ def chutes_chat_json(
                     if tok.isdigit():
                         hint = int(tok)
                         break
+            last_retry_after_s = hint
             _tenacious_sleep(attempt, hint, base=backoff_base, cap_s=backoff_cap_s)
+            if sc_pacing and ("429" in txt or "capacity" in txt):
+                try:
+                    sc_pacing.note_429_capacity()
+                except Exception:
+                    pass
             if __import__("time").time() - start > max_wall_time_s:
                 raise Timeout(f"tenacious wall time exceeded after {attempt} attempts") from e
 
@@ -201,9 +232,16 @@ def chutes_router_json(
         if tenacious and len(model_list) == 1:
             start = __import__("time").time()
             attempt = 0
+            total_sleep_s = 0.0
+            last_retry_after_s = None
             while True:
                 attempt += 1
                 try:
+                    if sc_pacing:
+                        try:
+                            total_sleep_s += sc_pacing.wait_if_needed()
+                        except Exception:
+                            pass
                     try:
                         if sc_metrics:
                             sc_metrics.record_request(
@@ -214,7 +252,7 @@ def chutes_router_json(
                             )
                     except Exception:
                         pass
-                    return router.completion(
+                    r = router.completion(
                         model=group,
                         messages=messages,
                         response_format={"type": "json_object"},
@@ -222,6 +260,16 @@ def chutes_router_json(
                         retry_after=retry_after,
                         timeout=timeout,
                     )
+                    try:
+                        setattr(r, "scillm_meta", {
+                            "tenacious": True,
+                            "attempts": attempt,
+                            "total_sleep_s": total_sleep_s,
+                            "last_retry_after_s": last_retry_after_s,
+                        })
+                    except Exception:
+                        pass
+                    return r
                 except Exception as e:
                     if not _tenacious_should_retry(e):
                         raise type(e)(f"{e} (not retried: auth/mapping/schema)") from e
@@ -239,10 +287,21 @@ def chutes_router_json(
                             if tok.isdigit():
                                 hint = int(tok)
                                 break
+                    last_retry_after_s = hint
                     _tenacious_sleep(attempt, hint, base=backoff_base, cap_s=backoff_cap_s)
+                    if sc_pacing and ("429" in txt or "capacity" in txt):
+                        try:
+                            sc_pacing.note_429_capacity()
+                        except Exception:
+                            pass
                     if __import__("time").time() - start > max_wall_time_s:
                         raise Timeout(f"tenacious wall time exceeded after {attempt} attempts") from e
         else:
+            if sc_pacing:
+                try:
+                    sc_pacing.wait_if_needed()
+                except Exception:
+                    pass
             _t0 = __import__("time").time()
             _r = router.completion(
                 model=group,
@@ -268,6 +327,11 @@ def chutes_router_json(
         e.setdefault("litellm_params", {}).setdefault("extra_headers", {}).update(auth)
         e["litellm_params"]["api_key"] = None
         e["litellm_params"]["custom_llm_provider"] = "openai_like"
+    if sc_pacing:
+        try:
+            sc_pacing.wait_if_needed()
+        except Exception:
+            pass
     _t0 = __import__("time").time()
     _r2 = router.completion(
         model=router.model_list[0]["model_name"],

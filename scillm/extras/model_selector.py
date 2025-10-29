@@ -106,7 +106,8 @@ def build_dynamic_model_list(
         key = (b.get("api_key") or "").strip()
         if not (base and key):
             continue
-        headers = {"x-api-key": key}
+        # Prefer Bearer for chat/completions to avoid ambiguity
+        headers = {"Authorization": f"Bearer {key}"}
 
         try:
             ids = sorted(_get_models(base, headers))
@@ -135,7 +136,7 @@ def build_dynamic_model_list(
                         "custom_llm_provider": "openai_like",
                         "api_base": base,
                         "api_key": None,
-                        "extra_headers": {"x-api-key": key, "Authorization": f"Bearer {key}"},
+                        "extra_headers": {"Authorization": f"Bearer {key}"},
                         "model": mid,
                         "order": 1,
                     },
@@ -212,7 +213,7 @@ def auto_model_list_from_env(
                     "custom_llm_provider": "openai_like",
                     "api_base": b["api_base"],
                     "api_key": None,
-                    "extra_headers": {"x-api-key": b["api_key"]},
+                    "extra_headers": {"Authorization": f"Bearer {b['api_key']}"},
                     "model": model,
                 },
             }

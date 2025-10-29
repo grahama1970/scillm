@@ -1,0 +1,52 @@
+name: ci-chutes
+
+on:
+  push:
+    branches: [ feature/openai-bearer-auth ]
+  pull_request:
+    branches: [ feature/openai-bearer-auth ]
+
+jobs:
+  unit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install deps
+        run: |
+          python -m pip install -U pip
+          pip install -e .
+          pip install prometheus-client
+          pip install pytest
+      - name: Run helper tests
+        run: |
+          pytest -q tests/local_testing/test_chutes_simple_args.py tests/local_testing/test_chutes_tenacious_chat.py tests/local_testing/test_chutes_tenacious_hint.py tests/local_testing/test_chutes_router_stub.py
+
+  doctor:
+    if: ${{ secrets.CHUTES_API_BASE != '' && secrets.CHUTES_API_KEY != '' && secrets.CHUTES_TEXT_MODEL != '' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install deps
+        run: |
+          python -m pip install -U pip
+          pip install -e .
+          pip install prometheus-client
+      - name: Run doctor
+        env:
+          CHUTES_API_BASE: ${{ secrets.CHUTES_API_BASE }}
+          CHUTES_API_KEY: ${{ secrets.CHUTES_API_KEY }}
+          CHUTES_TEXT_MODEL: ${{ secrets.CHUTES_TEXT_MODEL }}
+        run: |
+          python scripts/chutes_doctor.py | tee doctor.json
+          python - <<'PY'
+import json,sys
+js=json.load(open('doctor.json'))
+assert js.get('ok') is True, f"doctor failed: {js}"
+print('doctor ok')
+PY
