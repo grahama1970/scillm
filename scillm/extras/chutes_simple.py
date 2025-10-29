@@ -22,7 +22,7 @@ def _tenacious_should_retry(err: Exception) -> bool:
         or "429" in msg
         or "capacity" in msg
         or "try again" in msg
-        or "503" in msg or "502" in msg
+        or "503" in msg or "502" in msg or "504" in msg
         or "timeout" in msg
     ) and not any(x in msg for x in ("400", "401", "403", "404", "422"))
 
@@ -103,7 +103,7 @@ def chutes_chat_json(
             return r
         except Exception as e:
             if not _tenacious_should_retry(e):
-                raise
+                raise type(e)(f"{e} (not retried: auth/mapping/schema)") from e
             # Parse retry-after hint if present
             hint = None
             txt = (str(e) or "").lower()
@@ -184,7 +184,7 @@ def chutes_router_json(
                     )
                 except Exception as e:
                     if not _tenacious_should_retry(e):
-                        raise
+                        raise type(e)(f"{e} (not retried: auth/mapping/schema)") from e
                     # Retry-After parsing
                     hint = None
                     txt = (str(e) or "").lower()
