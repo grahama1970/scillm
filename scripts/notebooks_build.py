@@ -24,6 +24,7 @@ def env_preamble_cells():
             (
                 "### Runtime setup\n"
                 "The following envs enable stable retries and quiet streaming.\n\n"
+                "- `SCILLM_DISABLE_AIOHTTP=1` (httpx-only async stability)\n"
                 "- `SCILLM_FORCE_HTTPX_STREAM=1`\n"
                 "- `LITELLM_MAX_RETRIES=3`, `LITELLM_RETRY_AFTER=1`, `LITELLM_TIMEOUT=45`\n"
                 "- Requires `tenacity` installed for backoff."
@@ -32,6 +33,7 @@ def env_preamble_cells():
         new_code_cell(
             (
                 "import os\n"
+                "os.environ.setdefault('SCILLM_DISABLE_AIOHTTP','1')\n"
                 "os.environ.setdefault('SCILLM_FORCE_HTTPX_STREAM','1')\n"
                 "os.environ.setdefault('LITELLM_MAX_RETRIES','3')\n"
                 "os.environ.setdefault('LITELLM_RETRY_AFTER','1')\n"
@@ -63,10 +65,8 @@ from scillm import completion
 resp = completion(
   model=os.environ['CHUTES_MODEL'],
   api_base=os.environ['CHUTES_API_BASE'],
-  api_key=None,
+  api_key=os.environ['CHUTES_API_KEY'],
   custom_llm_provider='openai_like',
-  # JSON for this tenant: Authorization Bearer
-  extra_headers={'Authorization': f"Bearer {os.environ['CHUTES_API_KEY']}"},
   messages=[{'role':'user','content':'Say OK'}],
   max_tokens=8,
   temperature=0,
@@ -87,9 +87,8 @@ import nest_asyncio; nest_asyncio.apply()
 from scillm import Router
 router = Router(default_litellm_params={
   'api_base': os.environ['CHUTES_API_BASE'],
-  'api_key': None,
+  'api_key': os.environ['CHUTES_API_KEY'],
   'custom_llm_provider': 'openai_like',
-  'extra_headers': {'Authorization': f"Bearer {os.environ['CHUTES_API_KEY']}"},
 })
 prompts = ['OK-A','OK-B','OK-C']
 reqs = [{
@@ -116,8 +115,8 @@ import os
 from scillm import completion
 base=os.environ['CHUTES_API_BASE']; key=os.environ['CHUTES_API_KEY']; model=os.environ['CHUTES_MODEL']
 model_list=[
-  {'model_name':'m1','litellm_params':{'model':model,'api_base':base,'api_key':None,'custom_llm_provider':'openai_like','extra_headers':{'Authorization': f"Bearer {key}"}}},
-  {'model_name':'m2','litellm_params':{'model':model,'api_base':base,'api_key':None,'custom_llm_provider':'openai_like','extra_headers':{'Authorization': f"Bearer {key}"}}},
+  {'model_name':'m1','litellm_params':{'model':model,'api_base':base,'api_key':key,'custom_llm_provider':'openai_like'}},
+  {'model_name':'m2','litellm_params':{'model':model,'api_base':base,'api_key':key,'custom_llm_provider':'openai_like'}},
 ]
 resp = completion(model='m1', model_list=model_list, messages=[{'role':'user','content':'Say OK'}], max_tokens=8, temperature=0)
 print(resp.choices[0].message.get('content',''))
@@ -154,9 +153,8 @@ async def demo_stream():
   stream = await acompletion(
     model=os.environ.get('CHUTES_VLM_MODEL', os.environ['CHUTES_MODEL']),
     api_base=os.environ['CHUTES_API_BASE'],
-    api_key=None,
+    api_key=os.environ['CHUTES_API_KEY'],
     custom_llm_provider='openai_like',
-    extra_headers={'Authorization': f"Bearer {os.environ['CHUTES_API_KEY']}"},
     messages=[{'role':'user','content':'In one word, say OK'}],
     temperature=0,
     max_tokens=8,
@@ -185,9 +183,8 @@ tools=[{'type':'function','function':{'name':'ack','description':'Acknowledge','
 resp = completion(
   model=os.environ.get('CHUTES_TOOLS_MODEL', os.environ.get('CHUTES_MODEL_ADVANCED', os.environ['CHUTES_MODEL'])),
   api_base=os.environ['CHUTES_API_BASE'],
-  api_key=None,
+  api_key=os.environ['CHUTES_API_KEY'],
   custom_llm_provider='openai_like',
-  extra_headers={'Authorization': f"Bearer {os.environ['CHUTES_API_KEY']}"},
   messages=[{'role':'user','content':'Call ack with ok=true'}],
   tools=tools,
   temperature=0,
@@ -431,7 +428,7 @@ resp = completion(
   api_base=os.environ.get('CHUTES_API_BASE'),
   api_key=None,
   custom_llm_provider='openai_like',
-  extra_headers={'x-api-key': os.environ.get('CHUTES_API_KEY',''), 'Authorization': os.environ.get('CHUTES_API_KEY','')},
+  api_key=os.environ.get('CHUTES_API_KEY',''),
   messages=[{'role':'user','content':'Return only {"ok":true} as JSON.'}],
   response_format={'type':'json_object'},
   temperature=0,

@@ -1,5 +1,7 @@
 .python-version
 .venv
+.venv-*
+.venv-auth
 .env
 .newenv
 newenv/*
@@ -101,3 +103,5 @@ update_model_cost_map.py
 .artifacts/
 /artifacts/
 /screenshots/
+.pr-venv
+notebooks/executed/

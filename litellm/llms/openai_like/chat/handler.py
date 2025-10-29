@@ -219,7 +219,8 @@ def make_sync_call(
                 llm_provider="openai_like",
                 response=response,
             )
-        if code == 429:
+        # Treat classic capacity signals as retryable
+        if code == 429 or code == 503 or (isinstance(msg, str) and "capacity" in msg.lower()):
             raise RateLimitError(
                 message="capacity or rate limit",
                 llm_provider="openai_like",
@@ -419,7 +420,8 @@ class OpenAILikeChatHandler(OpenAILikeBase):
                         llm_provider="openai_like",
                         response=response,
                     )
-                if code == 429:
+                # Treat classic capacity signals as retryable
+                if code == 429 or code == 503 or (isinstance(text, str) and "capacity" in text.lower()):
                     raise RateLimitError(
                         message="capacity or rate limit",
                         llm_provider="openai_like",
@@ -678,6 +680,34 @@ class OpenAILikeChatHandler(OpenAILikeBase):
                             )
                         # Fallback to generic
                         raise OpenAILikeError(status_code=code, message=text)
+                except httpx.HTTPStatusError as he:
+                    resp = getattr(he, "response", None)
+                    code = getattr(resp, "status_code", None)
+                    text = getattr(resp, "text", "") if resp is not None else str(he)
+                    if code in (401, 403):
+                        style = _scillm_detect_auth_style(headers)
+                        hint = f"AuthError(header_style={style}); check .env and header style for non-openai base"
+                        raise AuthenticationError(
+                            message=hint if not text else text,
+                            llm_provider="openai_like",
+                            model=model,
+                            response=resp,
+                        )
+                    if code == 404:
+                        raise NotFoundError(
+                            message=f"model not found: {model}",
+                            model=model,
+                            llm_provider="openai_like",
+                            response=resp,
+                        )
+                    if code == 429 or code == 503 or (isinstance(text, str) and "capacity" in text.lower()):
+                        raise RateLimitError(
+                            message="capacity or rate limit",
+                            llm_provider="openai_like",
+                            model=model,
+                            response=resp,
+                        )
+                    raise OpenAILikeError(status_code=code or 500, message=text)
                 except httpx.TimeoutException:
                     raise OpenAILikeError(
                         status_code=408, message="Timeout error occurred."

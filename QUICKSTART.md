@@ -179,6 +179,36 @@ Happy Path (shared base)
   # then: await router.parallel_acompletions([...], concurrency=K)
   ```
 
+Auto-pick peer alternates (CLI)
+
+- When you don’t know which vendor IDs on your tenant are peer‑tier to your primary, use the helper to probe `/models`, pick size/quality peers, and optionally verify each with a minimal JSON chat. It prints a `.env` snippet and a ready‑to‑paste Router example:
+  ```bash
+  # Text models
+  python scripts/chutes_auto_peers.py --kind text --verify \
+    --base "$CHUTES_API_BASE" --key "$CHUTES_API_KEY" 
+
+  # Vision models
+  python scripts/chutes_auto_peers.py --kind vlm --verify \
+    --base "$CHUTES_API_BASE" --key "$CHUTES_API_KEY"
+  ```
+  Paste the suggested `CHUTES_*_MODEL[_ALT*]=...` lines into your `.env` and use the Router example as‑is.
+
+Tenacious single‑model (dataset‑safe)
+
+- For reproducible datasets where you must use exactly one vendor model (no alternates), enable a long‑running, capacity‑aware retry with a single flag. This keeps retrying on 429/5xx/timeouts until the model is available, honoring Retry‑After when present.
+
+  Python (3 lines):
+  ```python
+  from scillm.extras.chutes_simple import chutes_chat_json
+  r = chutes_chat_json(messages=[{"role":"user","content":'Return only {"ok":true} as JSON.'}], tenacious=True, max_wall_time_s=6*3600)
+  print(r.choices[0].message.content)
+  ```
+
+  - Required env: `CHUTES_API_BASE`, `CHUTES_API_KEY`, `CHUTES_TEXT_MODEL` (your single vendor id)
+  - Retry classes: 429/“capacity”, 503/502, timeouts, transient connection errors.
+  - Not retried: 401/403, 404/unmapped, 400/422.
+  - Env toggle (no code change): `SCILLM_TENACIOUS=1`
+
 Automatic selection, fallbacks, and attribution (opt‑in)
 
 - One‑liner Router from env (discovers, ranks by availability + utilization):
@@ -487,6 +517,74 @@ Notes:
 - Model discovery: run `preflight_models()` once per session and enable `SCILLM_MODEL_PREFLIGHT=1` to avoid per‑call `/v1/models` hits.
 - Caching: enable `initialize_litellm_cache()` to dedupe identical prompts on retries.
 - 429 handling: capacity and rate‑limit 429s look the same from clients; the helper pacer inserts a global cool‑down window after a 429 if you enable it.
+
+### Chutes: Router + Fallbacks (Recommended)
+
+For Chutes’ OpenAI‑compatible `/v1` endpoints, standardize on Router with primary + alternates and enable sensible retry/backoff. This avoids capacity flaps (429/503) and header quirks.
+
+- Environment
+  - `export SCILLM_CHUTES_CANONICALIZE_OPENAI_AUTH=1`
+  - `export LITELLM_MAX_RETRIES=3 LITELLM_RETRY_AFTER=2`
+  - `export SCILLM_COOLDOWN_429_S=120 SCILLM_RATE_LIMIT_QPS=2`
+  - Optional async stability: `export SCILLM_DISABLE_AIOHTTP=1 LITELLM_TIMEOUT=45`
+
+- Text Router (primary first, then alternates)
+  ```python
+  import os
+  from litellm import Router
+
+  router_text = Router(model_list=[
+    {"model_name": "chutes/text",
+     "litellm_params": {"custom_llm_provider": "openai_like",
+                         "model": os.environ["CHUTES_TEXT_MODEL"],
+                         "api_base": os.environ["CHUTES_API_BASE"],
+                         "api_key": os.environ["CHUTES_API_KEY"],
+                         "order": 1}},
+    {"model_name": "chutes/text",
+     "litellm_params": {"custom_llm_provider": "openai_like",
+                         "model": os.environ.get("CHUTES_TEXT_MODEL_ALT1", ""),
+                         "api_base": os.environ["CHUTES_API_BASE"],
+                         "api_key": os.environ["CHUTES_API_KEY"],
+                         "order": 2}},
+  ])
+
+  out = router_text.completion(
+    model="chutes/text",
+    messages=[{"role":"user","content":"Return only {\"ok\": true} as JSON."}],
+    response_format={"type":"json_object"},
+  )
+  print(out.choices[0].message.get("content",""))
+  ```
+
+- VLM Router (same pattern)
+  ```python
+  router_vlm = Router(model_list=[
+    {"model_name": "chutes/vlm",
+     "litellm_params": {"custom_llm_provider": "openai_like",
+                         "model": os.environ.get("CHUTES_VLM_MODEL", ""),
+                         "api_base": os.environ["CHUTES_API_BASE"],
+                         "api_key": os.environ["CHUTES_API_KEY"],
+                         "order": 1}},
+    {"model_name": "chutes/vlm",
+     "litellm_params": {"custom_llm_provider": "openai_like",
+                         "model": os.environ.get("CHUTES_VLM_MODEL_ALT1", ""),
+                         "api_base": os.environ["CHUTES_API_BASE"],
+                         "api_key": os.environ["CHUTES_API_KEY"],
+                         "order": 2}},
+  ])
+
+  out = router_vlm.completion(
+    model="chutes/vlm",
+    messages=[{"role":"user","content":[{"type":"text","text":"Return only {\"ok\": true} as JSON."}]}],
+    response_format={"type":"json_object"},
+  )
+  print(out.choices[0].message.get("content",""))
+  ```
+
+Notes
+- Alternates are additional deployments sharing the same `model_name`; `order` clarifies human intent. Router cools down a throttled deployment and tries the next automatically.
+- Capacity responses (429/503/strings containing “capacity”) are treated as retryable; backoff uses `LITELLM_MAX_RETRIES`/`LITELLM_RETRY_AFTER`.
+- Auth is canonicalized once per base; a 401 triggers a one‑time switch to `x-api-key` and is cached. No header drift at call sites.
 
 
 ## 3) Run release scenarios (fast confidence)

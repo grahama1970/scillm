@@ -27,10 +27,15 @@ def annotate(path: Path):
     path.write_text(json.dumps(nb, indent=2))
 
 def main():
+    # annotate any executed notebooks in root or notebooks/executed/
     for p in NB_DIR.glob('*_executed.ipynb'):
         annotate(p)
         print('annotated', p)
+    exec_dir = NB_DIR / 'executed'
+    if exec_dir.exists():
+        for p in exec_dir.glob('*_executed.ipynb'):
+            annotate(p)
+            print('annotated', p)
 
 if __name__ == '__main__':
     main()
-
