@@ -21,7 +21,7 @@ def _tenacious_should_retry(err: Exception) -> bool:
         isinstance(err, (RateLimitError, APIConnectionError, Timeout, APIError))
         or "429" in msg
         or "capacity" in msg
-        or "try again" in msg
+        or "try again" in msg or "temporarily unavailable" in msg
         or "503" in msg or "502" in msg or "504" in msg
         or "timeout" in msg
     ) and not any(x in msg for x in ("400", "401", "403", "404", "422"))
