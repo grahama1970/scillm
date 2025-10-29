@@ -6,6 +6,10 @@ from typing import Any, Dict, List, Optional, Tuple
 from scillm import Router, completion
 from litellm.exceptions import RateLimitError, APIConnectionError, APIError, Timeout
 from .auto_router import auto_router_from_env
+try:
+    from scillm.telemetry import metrics as sc_metrics  # type: ignore
+except Exception:  # pragma: no cover
+    sc_metrics = None
 
 
 def _bearer_headers() -> Dict[str, str]:
@@ -68,7 +72,8 @@ def chutes_chat_json(
         tenacious = True
 
     if not tenacious:
-        return completion(
+        _t0 = __import__("time").time()
+        _resp = completion(
             model=model,
             api_base=base,
             api_key=None,
@@ -80,6 +85,15 @@ def chutes_chat_json(
             temperature=temperature,
             timeout=timeout,
         )
+        try:
+            if sc_metrics:
+                sc_metrics.record_request(
+                    route="direct", result="ok", retried="0", model_tier="text",
+                    latency_s=__import__("time").time() - _t0
+                )
+        except Exception:
+            pass
+        return _resp
 
     # Tenacious outer loop (single model)
     start = __import__("time").time()
@@ -100,6 +114,16 @@ def chutes_chat_json(
                 timeout=timeout,
                 max_retries=0,
             )
+            try:
+                if sc_metrics:
+                    sc_metrics.record_request(
+                        route="direct", result="ok",
+                        retried=("1" if attempt > 1 else "0"),
+                        model_tier="text",
+                        latency_s=__import__("time").time() - start
+                    )
+            except Exception:
+                pass
             return r
         except Exception as e:
             if not _tenacious_should_retry(e):
@@ -107,6 +131,12 @@ def chutes_chat_json(
             # Parse retry-after hint if present
             hint = None
             txt = (str(e) or "").lower()
+            try:
+                if sc_metrics:
+                    reason = "429_capacity" if ("429" in txt or "capacity" in txt) else ("5xx" if any(x in txt for x in ("503", "502", "504")) else ("timeout" if "timeout" in txt else "other"))
+                    sc_metrics.record_retry(reason=reason)
+            except Exception:
+                pass
             if "retry-after" in txt:
                 for tok in txt.replace(",", " ").split():
                     if tok.isdigit():
@@ -174,6 +204,16 @@ def chutes_router_json(
             while True:
                 attempt += 1
                 try:
+                    try:
+                        if sc_metrics:
+                            sc_metrics.record_request(
+                                route="router", result="ok",
+                                retried=("1" if attempt > 1 else "0"),
+                                model_tier=("vlm" if kind == "vlm" else "text"),
+                                latency_s=__import__("time").time() - start
+                            )
+                    except Exception:
+                        pass
                     return router.completion(
                         model=group,
                         messages=messages,
@@ -188,6 +228,12 @@ def chutes_router_json(
                     # Retry-After parsing
                     hint = None
                     txt = (str(e) or "").lower()
+                    try:
+                        if sc_metrics:
+                            reason = "429_capacity" if ("429" in txt or "capacity" in txt) else ("5xx" if any(x in txt for x in ("503", "502", "504")) else ("timeout" if "timeout" in txt else "other"))
+                            sc_metrics.record_retry(reason=reason)
+                    except Exception:
+                        pass
                     if "retry-after" in txt:
                         for tok in txt.replace(",", " ").split():
                             if tok.isdigit():
@@ -197,7 +243,8 @@ def chutes_router_json(
                     if __import__("time").time() - start > max_wall_time_s:
                         raise Timeout(f"tenacious wall time exceeded after {attempt} attempts") from e
         else:
-            return router.completion(
+            _t0 = __import__("time").time()
+            _r = router.completion(
                 model=group,
                 messages=messages,
                 response_format={"type": "json_object"},
@@ -205,13 +252,24 @@ def chutes_router_json(
                 retry_after=retry_after,
                 timeout=timeout,
             )
+            try:
+                if sc_metrics:
+                    sc_metrics.record_request(
+                        route="router", result="ok", retried="0",
+                        model_tier=("vlm" if kind == "vlm" else "text"),
+                        latency_s=__import__("time").time() - _t0
+                    )
+            except Exception:
+                pass
+            return _r
     # Fallback: dynamic discovery when no env pins present
     router: Router = auto_router_from_env(kind=kind, require_json=True)
     for e in router.model_list:
         e.setdefault("litellm_params", {}).setdefault("extra_headers", {}).update(auth)
         e["litellm_params"]["api_key"] = None
         e["litellm_params"]["custom_llm_provider"] = "openai_like"
-    return router.completion(
+    _t0 = __import__("time").time()
+    _r2 = router.completion(
         model=router.model_list[0]["model_name"],
         messages=messages,
         response_format={"type": "json_object"},
@@ -219,6 +277,16 @@ def chutes_router_json(
         retry_after=retry_after,
         timeout=timeout,
     )
+    try:
+        if sc_metrics:
+            sc_metrics.record_request(
+                route="router", result="ok", retried="0",
+                model_tier=("vlm" if kind == "vlm" else "text"),
+                latency_s=__import__("time").time() - _t0
+            )
+    except Exception:
+        pass
+    return _r2
 
 
 __all__ = ["chutes_chat_json", "chutes_router_json"]
