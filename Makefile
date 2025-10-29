@@ -41,3 +41,16 @@ agents-smoke:
 	  uv run -- python -m nbconvert --ExecutePreprocessor.timeout=180 --to notebook --execute $$nb --output $$(basename $$nb .ipynb)_executed.ipynb --output-dir notebooks/executed; \
 	done
 	@echo "Agents OK"
+
+# One-shot live doctor for Chutes (skips if env missing)
+chutes-doctor:
+	@if [ -z "$$CHUTES_API_BASE" ] || [ -z "$$CHUTES_API_KEY" ] || [ -z "$$CHUTES_TEXT_MODEL" ]; then \
+	  echo "skip: set CHUTES_API_BASE, CHUTES_API_KEY, CHUTES_TEXT_MODEL"; \
+	  exit 0; \
+	fi; \
+	python scripts/chutes_doctor.py
+
+# Guard: ensure logs do not contain raw Authorization/x-api-key values
+check-no-secrets-logs:
+	@! rg -n "Authorization:\s*Bearer\s+\w" -S . || (echo "Found Authorization token in repo logs/text" && exit 1)
+	@! rg -n "x-api-key:\s*\w" -S . || (echo "Found x-api-key in repo logs/text" && exit 1)
