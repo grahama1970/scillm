@@ -3,6 +3,10 @@ import os
 from typing import Any, Dict, List, Optional
 
 import scillm
+try:
+    from scillm.telemetry import metrics as sc_metrics  # type: ignore
+except Exception:  # pragma: no cover
+    sc_metrics = None
 
 def json_chat(
     *,
@@ -43,7 +47,21 @@ def json_chat(
         kwargs["extra_headers"] = extra_headers
     if sanitize:
         kwargs["auto_json_sanitize"] = True
-    resp = scillm.completion(**kwargs)
+    _t0 = __import__("time").time()
+    try:
+        resp = scillm.completion(**kwargs)
+    except Exception:
+        try:
+            if sc_metrics:
+                sc_metrics.record_request(route="direct", result="error", retried="0", model_tier="text", latency_s=__import__("time").time()-_t0)
+        except Exception:
+            pass
+        raise
+    try:
+        if sc_metrics:
+            sc_metrics.record_request(route="direct", result="ok", retried="0", model_tier="text", latency_s=__import__("time").time()-_t0)
+    except Exception:
+        pass
     # Optional post-processing: map empty strings to null for specified keys
     try:
         if require_nonempty or require_nonempty_keys:

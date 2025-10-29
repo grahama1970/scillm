@@ -4,6 +4,10 @@ import os
 from typing import Any, Dict, List, Optional, Tuple
 
 from scillm import Router, completion
+try:
+    from scillm.telemetry import metrics as sc_metrics  # type: ignore
+except Exception:  # pragma: no cover
+    sc_metrics = None
 from .attribution import extract_served_model
 
 from .model_selector import auto_model_list_from_env
@@ -61,6 +65,7 @@ def infer_with_fallback(
     attempts: List[Dict[str, Any]] = []
 
     try:
+        _t0 = __import__("time").time()
         resp = router.completion(
             model=preferred,
             messages=messages,
@@ -69,6 +74,11 @@ def infer_with_fallback(
             retry_after=retry_after,
             timeout=timeout,
         )
+        try:
+            if sc_metrics:
+                sc_metrics.record_request(route="router", result="ok", retried="0", model_tier=("vlm" if kind=="vlm" else "text"), latency_s=__import__("time").time()-_t0)
+        except Exception:
+            pass
         served_model = extract_served_model(resp)
         meta = {
             "routing": "router",
@@ -79,12 +89,18 @@ def infer_with_fallback(
         _embed_meta(resp, meta)
         return resp, meta
     except Exception as e:
+        try:
+            if sc_metrics:
+                sc_metrics.record_router_fallback(reason="router_error")
+        except Exception:
+            pass
         attempts.append({"via": "router", "error": str(e)})
 
     # Fallback: try each entry sequentially with direct completion
     for entry in model_list:
         p = entry.get("litellm_params", {})
         try:
+            _t1 = __import__("time").time()
             resp = completion(
                 model=p.get("model"),
                 custom_llm_provider=p.get("custom_llm_provider"),
@@ -97,6 +113,11 @@ def infer_with_fallback(
                 retry_after=retry_after,
                 timeout=timeout,
             )
+            try:
+                if sc_metrics:
+                    sc_metrics.record_request(route="direct", result="ok", retried="1", model_tier=("vlm" if kind=="vlm" else "text"), latency_s=__import__("time").time()-_t1)
+            except Exception:
+                pass
             served_model = extract_served_model(resp)
             meta = {
                 "routing": "sequential",
