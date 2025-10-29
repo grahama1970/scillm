@@ -1,0 +1,30 @@
+{
+  "annotations": {"list": [{"builtIn": 1, "type": "dashboard", "name": "Annotations & Alerts", "enable": true, "hide": false}]},
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 0,
+  "id": null,
+  "links": [],
+  "liveNow": false,
+  "panels": [
+    {"type": "stat", "title": "Requests / s", "gridPos": {"h": 4, "w": 6, "x": 0, "y": 0}, "targets": [{"expr": "sum(rate(scillm_requests_total[1m]))", "legendFormat": "all"}]},
+    {"type": "stat", "title": "Retry Rate (%)", "gridPos": {"h": 4, "w": 6, "x": 6, "y": 0}, "targets": [{"expr": "100 * (sum(rate(scillm_requests_total{retried=\"1\"}[5m])) / sum(rate(scillm_requests_total[5m])))", "legendFormat": "retry %"}]},
+    {"type": "graph", "title": "Latency p95 by route", "gridPos": {"h": 8, "w": 12, "x": 0, "y": 4}, "targets": [{"expr": "histogram_quantile(0.95, sum(rate(scillm_request_latency_seconds_bucket[5m])) by (le, route))", "legendFormat": "p95 {{route}}"}], "lines": true, "fill": 1},
+    {"type": "graph", "title": "Requests by result", "gridPos": {"h": 8, "w": 12, "x": 12, "y": 4}, "targets": [{"expr": "sum(rate(scillm_requests_total[5m])) by (result, route)", "legendFormat": "{{result}} {{route}}"}], "lines": true, "fill": 1},
+    {"type": "graph", "title": "Retries by reason", "gridPos": {"h": 8, "w": 12, "x": 0, "y": 12}, "targets": [{"expr": "sum(rate(scillm_retries_total[5m])) by (reason)", "legendFormat": "{{reason}}"}], "lines": true, "fill": 1},
+    {"type": "graph", "title": "Router fallbacks", "gridPos": {"h": 8, "w": 12, "x": 12, "y": 12}, "targets": [{"expr": "sum(rate(scillm_router_fallbacks_total[5m])) by (reason)", "legendFormat": "{{reason}}"}], "lines": true, "fill": 1},
+    {"type": "graph", "title": "In-flight requests", "gridPos": {"h": 6, "w": 12, "x": 0, "y": 20}, "targets": [{"expr": "sum(scillm_requests_in_flight) by (route)", "legendFormat": "{{route}}"}], "lines": true, "fill": 1}
+  ],
+  "refresh": "10s",
+  "schemaVersion": 39,
+  "style": "dark",
+  "tags": ["scillm", "litellm", "chutes"],
+  "templating": {"list": []},
+  "time": {"from": "now-6h", "to": "now"},
+  "timepicker": {},
+  "timezone": "",
+  "title": "SciLLM (Chutes) — Prometheus",
+  "version": 1,
+  "weekStart": ""
+}
+
