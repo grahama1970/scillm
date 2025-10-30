@@ -235,99 +235,110 @@ def chutes_router_json(
                 },
             })
         router = Router(model_list=model_list, default_litellm_params={"timeout": timeout})
-        # Tenacious only applies when exactly one entry
-        if tenacious and len(model_list) == 1:
-            start = __import__("time").time()
-            attempt = 0
-            total_sleep_s = 0.0
-            last_retry_after_s = None
-            while True:
-                attempt += 1
-                try:
-                    if sc_pacing:
+        result = None
+        try:
+            # Tenacious only applies when exactly one entry
+            if tenacious and len(model_list) == 1:
+                start = __import__("time").time()
+                attempt = 0
+                total_sleep_s = 0.0
+                last_retry_after_s = None
+                while True:
+                    attempt += 1
+                    try:
+                        if sc_pacing:
+                            try:
+                                total_sleep_s += sc_pacing.wait_if_needed()
+                            except Exception:
+                                pass
                         try:
-                            total_sleep_s += sc_pacing.wait_if_needed()
+                            if sc_metrics:
+                                sc_metrics.record_request(
+                                    route="router", result="ok",
+                                    retried=("1" if attempt > 1 else "0"),
+                                    model_tier=("vlm" if kind == "vlm" else "text"),
+                                    latency_s=__import__("time").time() - start
+                                )
                         except Exception:
                             pass
-                    try:
-                        if sc_metrics:
-                            sc_metrics.record_request(
-                                route="router", result="ok",
-                                retried=("1" if attempt > 1 else "0"),
-                                model_tier=("vlm" if kind == "vlm" else "text"),
-                                latency_s=__import__("time").time() - start
-                            )
-                    except Exception:
-                        pass
-                    r = router.completion(
-                        model=group,
-                        messages=messages,
-                        response_format={"type": "json_object"},
-                        max_retries=0,
-                        retry_after=retry_after,
-                        timeout=timeout,
-                    )
-                    try:
-                        setattr(r, "scillm_meta", {
-                            "tenacious": True,
-                            "attempts": attempt,
-                            "total_sleep_s": total_sleep_s,
-                            "last_retry_after_s": last_retry_after_s,
-                        })
-                    except Exception:
-                        pass
-                    return r
-                except Exception as e:
-                    if not _tenacious_should_retry(e):
-                        raise type(e)(f"{e} (not retried: auth/mapping/schema)") from e
-                    # Retry-After parsing
-                    hint = None
-                    txt = (str(e) or "").lower()
-                    try:
-                        if sc_metrics:
-                            reason = "429_capacity" if ("429" in txt or "capacity" in txt) else ("5xx" if any(x in txt for x in ("503", "502", "504")) else ("timeout" if "timeout" in txt else "other"))
-                            sc_metrics.record_retry(reason=reason)
-                    except Exception:
-                        pass
-                    if "retry-after" in txt:
-                        for tok in txt.replace(",", " ").split():
-                            if tok.isdigit():
-                                hint = int(tok)
-                                break
-                    last_retry_after_s = hint
-                    _tenacious_sleep(attempt, hint, base=backoff_base, cap_s=backoff_cap_s)
-                    if sc_pacing and ("429" in txt or "capacity" in txt):
+                        r = router.completion(
+                            model=group,
+                            messages=messages,
+                            response_format={"type": "json_object"},
+                            max_retries=0,
+                            retry_after=retry_after,
+                            timeout=timeout,
+                        )
                         try:
-                            sc_pacing.note_429_capacity()
+                            setattr(r, "scillm_meta", {
+                                "tenacious": True,
+                                "attempts": attempt,
+                                "total_sleep_s": total_sleep_s,
+                                "last_retry_after_s": last_retry_after_s,
+                            })
                         except Exception:
                             pass
-                    if __import__("time").time() - start > max_wall_time_s:
-                        raise Timeout(f"tenacious wall time exceeded after {attempt} attempts") from e
-        else:
-            if sc_pacing:
+                        result = r
+                        break
+                    except Exception as e:
+                        if not _tenacious_should_retry(e):
+                            raise type(e)(f"{e} (not retried: auth/mapping/schema)") from e
+                        # Retry-After parsing
+                        hint = None
+                        txt = (str(e) or "").lower()
+                        try:
+                            if sc_metrics:
+                                reason = "429_capacity" if ("429" in txt or "capacity" in txt) else ("5xx" if any(x in txt for x in ("503", "502", "504")) else ("timeout" if "timeout" in txt else "other"))
+                                sc_metrics.record_retry(reason=reason)
+                        except Exception:
+                            pass
+                        if "retry-after" in txt:
+                            for tok in txt.replace(",", " ").split():
+                                if tok.isdigit():
+                                    hint = int(tok)
+                                    break
+                        last_retry_after_s = hint
+                        _tenacious_sleep(attempt, hint, base=backoff_base, cap_s=backoff_cap_s)
+                        if sc_pacing and ("429" in txt or "capacity" in txt):
+                            try:
+                                sc_pacing.note_429_capacity()
+                            except Exception:
+                                pass
+                        if __import__("time").time() - start > max_wall_time_s:
+                            raise Timeout(f"tenacious wall time exceeded after {attempt} attempts") from e
+                if result is None:
+                    raise RuntimeError("tenacious routing exited without result")
+            else:
+                if sc_pacing:
+                    try:
+                        sc_pacing.wait_if_needed()
+                    except Exception:
+                        pass
+                _t0 = __import__("time").time()
+                _r = router.completion(
+                    model=group,
+                    messages=messages,
+                    response_format={"type": "json_object"},
+                    max_retries=max_retries,
+                    retry_after=retry_after,
+                    timeout=timeout,
+                )
                 try:
-                    sc_pacing.wait_if_needed()
+                    if sc_metrics:
+                        sc_metrics.record_request(
+                            route="router", result="ok", retried="0",
+                            model_tier=("vlm" if kind == "vlm" else "text"),
+                            latency_s=__import__("time").time() - _t0
+                        )
                 except Exception:
                     pass
-            _t0 = __import__("time").time()
-            _r = router.completion(
-                model=group,
-                messages=messages,
-                response_format={"type": "json_object"},
-                max_retries=max_retries,
-                retry_after=retry_after,
-                timeout=timeout,
-            )
+                result = _r
+        finally:
             try:
-                if sc_metrics:
-                    sc_metrics.record_request(
-                        route="router", result="ok", retried="0",
-                        model_tier=("vlm" if kind == "vlm" else "text"),
-                        latency_s=__import__("time").time() - _t0
-                    )
+                router.close()
             except Exception:
                 pass
-            return _r
+        return result
     # LOCKED: require CHUTES_*_MODEL pin; no discovery fallback
     raise RuntimeError("LOCKED: Set a single pinned CHUTES_TEXT_MODEL/CHUTES_VLM_MODEL. Discovery is disabled.")
 
