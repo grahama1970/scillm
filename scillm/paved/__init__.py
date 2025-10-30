@@ -9,10 +9,11 @@ from __future__ import annotations
 from scillm.extras.chutes_simple import (
     chutes_chat_json,
     chutes_router_json,
+    chutes_healthcheck,
 )
 
 __all__ = [
     "chutes_chat_json",
     "chutes_router_json",
+    "chutes_healthcheck",
 ]
-
