@@ -31,6 +31,7 @@ _RETRYABLE_HTTP_STATUSES = {502, 503, 504}
 _RATE_LIMIT_HTTP_STATUSES = {409, 429}
 _MAX_TRANSIENT_BACKOFF_S = 3.0
 _BASE_BACKOFF_S = 0.25
+_PROVIDER_NAME = "chutes"
 
 
 if not hasattr(Router, "is_closed"):
@@ -82,6 +83,9 @@ def _extract_retry_after_seconds(err: Exception) -> Optional[float]:
 
 
 def _classify_transient(err: Exception) -> Tuple[Optional[str], Optional[float]]:
+    reason_attr = getattr(err, "reason", None)
+    if isinstance(reason_attr, str) and reason_attr:
+        return reason_attr, _extract_retry_after_seconds(err)
     status = _extract_status_code(err)
     txt = (str(err) or "").lower()
     if isinstance(err, RateLimitError) or (status in _RATE_LIMIT_HTTP_STATUSES):
@@ -156,6 +160,85 @@ def _attach_metadata(resp: Any, *, model: str, attempts: int, tenacious: bool = 
         pass
 
 
+class EmptyContentError(APIError):
+    def __init__(self, model: str):
+        super().__init__(
+            502,
+            "Empty response content",
+            _PROVIDER_NAME,
+            model,
+        )
+        self.reason = "empty_content"
+        self.retry_after = None
+
+
+def _fail_on_empty_enabled() -> bool:
+    return os.getenv("SCILLM_ALLOW_EMPTY_RESPONSES", "0").lower() not in {"1", "true", "yes", "y"}
+
+
+def _message_has_substantive_content(payload: Any) -> bool:
+    if isinstance(payload, str):
+        return bool(payload.strip())
+    if isinstance(payload, list):
+        for part in payload:
+            if isinstance(part, dict):
+                if part.get("type") == "text" and str(part.get("text", "")).strip():
+                    return True
+                if "content" in part and _message_has_substantive_content(part.get("content")):
+                    return True
+            elif isinstance(part, str) and part.strip():
+                return True
+        return False
+    if isinstance(payload, dict):
+        for value in payload.values():
+            if _message_has_substantive_content(value):
+                return True
+        return False
+    return False
+
+
+def _request_has_meaningful_prompt(messages: List[Dict[str, Any]]) -> bool:
+    for msg in messages:
+        role = (msg.get("role") or "").lower()
+        if role not in {"user", "system"}:
+            continue
+        if _message_has_substantive_content(msg.get("content")):
+            return True
+    return False
+
+
+def _ensure_nonempty_response(
+    resp: Any,
+    *,
+    request_messages: List[Dict[str, Any]],
+    model: str,
+    attempts: int,
+) -> None:
+    if not _fail_on_empty_enabled():
+        return
+    if not _request_has_meaningful_prompt(request_messages):
+        return
+    try:
+        choice = resp.choices[0]
+        content = getattr(choice.message, "content", None)
+        if content is None and hasattr(choice.message, "get"):
+            try:
+                content = choice.message.get("content")
+            except Exception:
+                content = None
+    except Exception:
+        return
+    if _message_has_substantive_content(content):
+        return
+    err = EmptyContentError(model=model)
+    setattr(err, "scillm_meta", {
+        "reason": "empty_content",
+        "served_model": getattr(resp, "model", model),
+        "attempts": attempts,
+    })
+    raise err
+
+
 def _record_success(route: str, model_tier: str, attempts: int, started_at: float) -> None:
     try:
         if sc_metrics:
@@ -177,12 +260,14 @@ def _with_transient_retries(
     model_tier: str,
     route: str,
     served_model: str,
+    request_messages: List[Dict[str, Any]],
 ) -> Any:
     attempt = 0
     started = time.time()
     while True:
         try:
             resp = call()
+            _ensure_nonempty_response(resp, request_messages=request_messages, model=served_model, attempts=attempt + 1)
             _attach_metadata(resp, model=served_model, attempts=attempt + 1)
             _record_success(route, model_tier, attempt + 1, started)
             return resp
@@ -250,6 +335,7 @@ def chutes_chat_json(
             model_tier="text",
             route="direct",
             served_model=model,
+            request_messages=messages,
         )
 
     # Tenacious loop: keep trying single model until success or wall time
@@ -278,6 +364,7 @@ def chutes_chat_json(
                 timeout=timeout,
                 max_retries=0,
             )
+            _ensure_nonempty_response(resp, request_messages=messages, model=model, attempts=attempt)
             _attach_metadata(resp, model=model, attempts=attempt, tenacious=True)
             try:
                 meta = dict(getattr(resp, "scillm_meta", {}) or {})
@@ -380,6 +467,7 @@ def chutes_router_json(
                             retry_after=retry_after,
                             timeout=timeout,
                         )
+                        _ensure_nonempty_response(resp, request_messages=messages, model=env_primary or group, attempts=attempt)
                         _attach_metadata(resp, model=env_primary or group, attempts=attempt, tenacious=True)
                         meta = dict(getattr(resp, "scillm_meta", {}) or {})
                         meta.update({
@@ -430,6 +518,7 @@ def chutes_router_json(
                     model_tier="vlm" if kind == "vlm" else "text",
                     route="router",
                     served_model=env_primary or group,
+                    request_messages=messages,
                 )
                 return result
         finally:

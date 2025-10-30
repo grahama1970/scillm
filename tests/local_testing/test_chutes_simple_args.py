@@ -37,6 +37,43 @@ def test_chutes_chat_json_builds_bearer_headers(monkeypatch):
     assert call["extra_headers"]["Authorization"].startswith("Bearer ")
 
 
+def test_chutes_chat_json_empty_failure(monkeypatch):
+    monkeypatch.setenv("CHUTES_API_BASE", "https://llm.chutes.ai/v1")
+    monkeypatch.setenv("CHUTES_API_KEY", "sk-test")
+    monkeypatch.setenv("CHUTES_TEXT_MODEL", "foo/Bar-235B-Instruct")
+
+    class _EmptySpy:
+        def __init__(self):
+            self.calls = 0
+
+        def __call__(self, **kwargs):
+            self.calls += 1
+            class _Msg:
+                def __init__(self):
+                    self.content = ""
+
+                def get(self, k, d=None):
+                    if k == "content":
+                        return self.content
+                    return d
+
+            class _Choice:
+                message = _Msg()
+
+            class _Resp:
+                choices = [_Choice()]
+
+            return _Resp()
+
+    spy = _EmptySpy()
+    monkeypatch.setattr(cs, "completion", spy)
+    monkeypatch.setattr(cs, "_sleep_with_backoff", lambda attempt, hint: 0)
+    with pytest.raises(APIError) as excinfo:
+        cs.chutes_chat_json(messages=[{"role": "user", "content": "ping"}], transient_retries=1)
+    assert "Empty response content" in str(excinfo.value)
+    assert spy.calls == 2  # initial + retry
+
+
 def test_chutes_router_json_adds_headers(monkeypatch):
     monkeypatch.setenv("CHUTES_API_BASE", "https://llm.chutes.ai/v1")
     monkeypatch.setenv("CHUTES_API_KEY", "sk-test")
@@ -131,6 +168,64 @@ def test_chutes_router_json_retries_transient(monkeypatch):
     resp = cs.chutes_router_json(messages=[{"role": "user", "content": "ping"}], max_retries=2)
     assert fake.calls == 2
     assert getattr(resp, "scillm_meta", {}).get("attempts") == 2
+    assert fake.closed is True
+
+
+def test_chutes_router_json_empty_retry(monkeypatch):
+    monkeypatch.setenv("CHUTES_API_BASE", "https://llm.chutes.ai/v1")
+    monkeypatch.setenv("CHUTES_API_KEY", "sk-test")
+    monkeypatch.setenv("CHUTES_TEXT_MODEL", "foo/Bar-235B-Instruct")
+    for env_name in (
+        "CHUTES_TEXT_MODEL_ALT1",
+        "CHUTES_TEXT_MODEL_ALT2",
+        "CHUTES_VLM_MODEL",
+        "CHUTES_VLM_MODEL_ALT1",
+        "CHUTES_VLM_MODEL_ALT2",
+    ):
+        monkeypatch.delenv(env_name, raising=False)
+
+    class _EmptyThenOkRouter:
+        def __init__(self, *args, **kwargs):
+            self.calls = 0
+            self.closed = False
+
+        def completion(self, **kwargs):
+            self.calls += 1
+            class _Msg:
+                def __init__(self, payload: str):
+                    self._payload = payload
+
+                def get(self, k, d=None):
+                    if k == "content":
+                        return self._payload
+                    return d
+
+                @property
+                def content(self):
+                    return self._payload
+
+            class _Choice:
+                def __init__(self, payload: str):
+                    self.message = _Msg(payload)
+
+            class _Resp:
+                def __init__(self, payload: str):
+                    self.choices = [_Choice(payload)]
+
+            if self.calls == 1:
+                return _Resp("   ")
+            return _Resp('{"ok":true}')
+
+        def close(self):
+            self.closed = True
+
+    fake = _EmptyThenOkRouter()
+    monkeypatch.setattr(cs, "Router", lambda **_: fake)
+    monkeypatch.setattr(cs, "_sleep_with_backoff", lambda attempt, hint: 0)
+    resp = cs.chutes_router_json(messages=[{"role": "user", "content": "ping"}], max_retries=2)
+    assert fake.calls == 2
+    meta = getattr(resp, "scillm_meta", {})
+    assert meta.get("attempts") == 2
     assert fake.closed is True
 
 
