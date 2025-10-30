@@ -220,8 +220,35 @@ except Exception:
 try:
     import atexit, asyncio
 
+    def _run_coro_sync(coro):
+        try:
+            loop = asyncio.get_event_loop()
+        except RuntimeError:
+            loop = None
+
+        if loop and loop.is_running():
+            try:
+                fut = asyncio.run_coroutine_threadsafe(coro, loop)
+                return fut.result(timeout=5)
+            except Exception:
+                try:
+                    fut.cancel()
+                except Exception:
+                    pass
+
+        if loop and not loop.is_closed():
+            try:
+                return loop.run_until_complete(coro)
+            except Exception:
+                pass
+
+        new_loop = asyncio.new_event_loop()
+        try:
+            return new_loop.run_until_complete(coro)
+        finally:
+            new_loop.close()
+
     def _scillm_cleanup():
-        # Close aiohttp base handler if present
         try:
             from litellm.main import base_llm_aiohttp_handler  # type: ignore
 
@@ -231,37 +258,29 @@ try:
                 except Exception:
                     pass
 
-            try:
-                loop = asyncio.get_event_loop()
-                if loop.is_running():
-                    loop.create_task(_close_aiohttp())
-                else:
-                    loop.run_until_complete(_close_aiohttp())
-            except Exception:
-                try:
-                    asyncio.run(_close_aiohttp())
-                except Exception:
-                    pass
+            _run_coro_sync(_close_aiohttp())
         except Exception:
             pass
-        # Close module-level httpx async client if present
+
         try:
             acl = getattr(_litellm, "module_level_aclient", None)
             if acl is not None and hasattr(acl, "close"):
-                try:
-                    loop = asyncio.get_event_loop()
-                    if loop.is_running():
-                        loop.create_task(acl.close())
-                    else:
-                        loop.run_until_complete(acl.close())
-                except Exception:
+                async def _close_httpx():
                     try:
-                        asyncio.run(acl.close())
+                        await acl.close()
                     except Exception:
                         pass
+
+                _run_coro_sync(_close_httpx())
         except Exception:
             pass
 
     atexit.register(_scillm_cleanup)
+
+    def shutdown_clients():
+        """Public entry point to close global HTTP clients immediately."""
+        _scillm_cleanup()
+
+    shutdown = shutdown_clients
 except Exception:
     pass
