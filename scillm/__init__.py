@@ -108,6 +108,66 @@ def _sc_canon_headers_for_chutes(api_base: str | None, api_key: str | None, head
 _orig_completion = _litellm.completion
 _orig_acompletion = _litellm.acompletion
 
+
+class EmptyContentError(APIError):
+    def __init__(self, model: str, provider: str):
+        super().__init__(502, "Empty response content", provider, model)
+        self.reason = "empty_content"
+        self.retry_after = None
+
+
+def _sc_allow_empty_responses() -> bool:
+    return _os.getenv("SCILLM_ALLOW_EMPTY_RESPONSES", "0").lower() in {"1", "true", "yes", "y"}
+
+
+def _sc_messages_have_prompt(messages: list[dict]) -> bool:
+    for msg in messages or []:
+        role = (msg.get("role") or "").lower()
+        if role not in {"user", "system"}:
+            continue
+        content = msg.get("content")
+        if _sc_has_substantive_content(content):
+            return True
+    return False
+
+
+def _sc_has_substantive_content(content) -> bool:
+    if content is None:
+        return False
+    if isinstance(content, str):
+        return bool(content.strip())
+    if isinstance(content, list):
+        for part in content:
+            if isinstance(part, dict):
+                if part.get("type") == "text" and _sc_has_substantive_content(part.get("text")):
+                    return True
+                if "content" in part and _sc_has_substantive_content(part.get("content")):
+                    return True
+            elif isinstance(part, str) and part.strip():
+                return True
+        return False
+    if isinstance(content, dict):
+        for value in content.values():
+            if _sc_has_substantive_content(value):
+                return True
+        return False
+    return False
+
+
+def _sc_response_is_empty(resp) -> bool:
+    try:
+        choice = resp.choices[0]
+        msg = choice.message
+        payload = getattr(msg, "content", None)
+        if payload is None and hasattr(msg, "get"):
+            try:
+                payload = msg.get("content")
+            except Exception:
+                payload = None
+        return not _sc_has_substantive_content(payload)
+    except Exception:
+        return False
+
 def _sc_postprocess_require_nonempty(resp):
     """Optional: map empty strings to null for selected JSON keys in content.
     Controlled by env:
@@ -155,30 +215,66 @@ def completion(*args, **kwargs):  # type: ignore[no-redef]
     api_key, headers = _sc_canon_headers_for_chutes(api_base, api_key, headers)
     if headers is not None:
         kwargs["extra_headers"] = headers
-    try:
-        resp = _orig_completion(*args, **kwargs)
-        return _sc_postprocess_require_nonempty(resp)
-    except (_AuthErr, _OAILikeErr) as e:
-        msg = str(getattr(e, "message", e))
-        if "401" in msg or "Unauthorized" in msg or "invalid auth" in msg.lower():
-            # Retry with alternate header style and cache winner
-            token = (headers or {}).get("Authorization") or (headers or {}).get("x-api-key") or api_key or ""
-            token = str(token)
-            if token.lower().startswith("bearer "):
-                token = token.split(" ",1)[-1]
-            alt_headers = dict(headers or {})
-            # Flip to x-api-key
-            alt_headers.pop("Authorization", None); alt_headers.pop("authorization", None)
-            alt_headers["x-api-key"] = token
-            # Bypass canon for retry to avoid converting back
-            kwargs_alt = dict(kwargs)
-            kwargs_alt["extra_headers"] = alt_headers
-            kwargs_alt["_sc_no_canon"] = True
-            resp = _orig_completion(*args, **kwargs_alt)
-            if _sc_is_chutes_base(api_base):
-                _SC_WINNERS[str(api_base)] = ("x-api-key", _time.time() + 300.0)
+    retry_on_empty = kwargs.pop("retry_on_empty", True)
+    empty_retries = int(kwargs.pop("empty_retries", 1) or 0)
+    empty_backoff_ms = int(kwargs.pop("empty_backoff_ms", 100))
+    bump_tokens = bool(kwargs.pop("bump_max_tokens_on_empty", False))
+    bump_amount = int(kwargs.pop("max_tokens_bump", 160))
+    model = args[0] if args else kwargs.get("model")
+    messages = kwargs.get("messages") or []
+    attempts = 0
+    base_max_tokens = kwargs.get("max_tokens")
+    last_exc = None
+    while True:
+        attempts += 1
+        try:
+            resp = _orig_completion(*args, **kwargs)
+        except (_AuthErr, _OAILikeErr) as e:
+            msg = str(getattr(e, "message", e))
+            if "401" in msg or "Unauthorized" in msg or "invalid auth" in msg.lower():
+                token = (headers or {}).get("Authorization") or (headers or {}).get("x-api-key") or api_key or ""
+                token = str(token)
+                if token.lower().startswith("bearer "):
+                    token = token.split(" ",1)[-1]
+                alt_headers = dict(headers or {})
+                alt_headers.pop("Authorization", None); alt_headers.pop("authorization", None)
+                alt_headers["x-api-key"] = token
+                kwargs_alt = dict(kwargs)
+                kwargs_alt["extra_headers"] = alt_headers
+                kwargs_alt["_sc_no_canon"] = True
+                resp = _orig_completion(*args, **kwargs_alt)
+                if _sc_is_chutes_base(api_base):
+                    _SC_WINNERS[str(api_base)] = ("x-api-key", _time.time() + 300.0)
+            else:
+                raise
+        if not (retry_on_empty and not _sc_allow_empty_responses() and _sc_messages_have_prompt(messages)):
             return _sc_postprocess_require_nonempty(resp)
-        raise
+        if not _sc_response_is_empty(resp):
+            result = _sc_postprocess_require_nonempty(resp)
+            try:
+                meta = dict(getattr(result, "scillm_meta", {}) or {})
+                meta.setdefault("attempts", attempts)
+                setattr(result, "scillm_meta", meta)
+            except Exception:
+                pass
+            return result
+        if attempts > empty_retries + 1:
+            last_exc = EmptyContentError(model=model or "unknown", provider="chutes")
+            try:
+                setattr(last_exc, "scillm_meta", {"reason": "empty_content", "attempts": attempts})
+            except Exception:
+                pass
+            break
+        if bump_tokens and kwargs.get("max_tokens") is not None:
+            try:
+                kwargs["max_tokens"] = int(kwargs.get("max_tokens") or base_max_tokens or 0) + bump_amount
+            except Exception:
+                pass
+        if empty_backoff_ms > 0:
+            _time.sleep(empty_backoff_ms / 1000.0)
+    if last_exc:
+        raise last_exc
+    return _sc_postprocess_require_nonempty(resp)
 
 async def acompletion(*args, **kwargs):  # type: ignore[no-redef]
     api_base = kwargs.get("api_base")
@@ -187,27 +283,65 @@ async def acompletion(*args, **kwargs):  # type: ignore[no-redef]
     api_key, headers = _sc_canon_headers_for_chutes(api_base, api_key, headers)
     if headers is not None:
         kwargs["extra_headers"] = headers
-    try:
-        resp = await _orig_acompletion(*args, **kwargs)
-        return _sc_postprocess_require_nonempty(resp)
-    except (_AuthErr, _OAILikeErr) as e:
-        msg = str(getattr(e, "message", e))
-        if "401" in msg or "Unauthorized" in msg or "invalid auth" in msg.lower():
-            token = (headers or {}).get("Authorization") or (headers or {}).get("x-api-key") or api_key or ""
-            token = str(token)
-            if token.lower().startswith("bearer "):
-                token = token.split(" ",1)[-1]
-            alt_headers = dict(headers or {})
-            alt_headers.pop("Authorization", None); alt_headers.pop("authorization", None)
-            alt_headers["x-api-key"] = token
-            kwargs_alt = dict(kwargs)
-            kwargs_alt["extra_headers"] = alt_headers
-            kwargs_alt["_sc_no_canon"] = True
-            resp = await _orig_acompletion(*args, **kwargs_alt)
-            if _sc_is_chutes_base(api_base):
-                _SC_WINNERS[str(api_base)] = ("x-api-key", _time.time() + 300.0)
+    retry_on_empty = kwargs.pop("retry_on_empty", True)
+    empty_retries = int(kwargs.pop("empty_retries", 1) or 0)
+    empty_backoff_ms = int(kwargs.pop("empty_backoff_ms", 100))
+    bump_tokens = bool(kwargs.pop("bump_max_tokens_on_empty", False))
+    bump_amount = int(kwargs.pop("max_tokens_bump", 160))
+    model = args[0] if args else kwargs.get("model")
+    messages = kwargs.get("messages") or []
+    attempts = 0
+    base_max_tokens = kwargs.get("max_tokens")
+    last_exc = None
+    while True:
+        attempts += 1
+        try:
+            resp = await _orig_acompletion(*args, **kwargs)
+        except (_AuthErr, _OAILikeErr) as e:
+            msg = str(getattr(e, "message", e))
+            if "401" in msg or "Unauthorized" in msg or "invalid auth" in msg.lower():
+                token = (headers or {}).get("Authorization") or (headers or {}).get("x-api-key") or api_key or ""
+                token = str(token)
+                if token.lower().startswith("bearer "):
+                    token = token.split(" ",1)[-1]
+                alt_headers = dict(headers or {})
+                alt_headers.pop("Authorization", None); alt_headers.pop("authorization", None)
+                alt_headers["x-api-key"] = token
+                kwargs_alt = dict(kwargs)
+                kwargs_alt["extra_headers"] = alt_headers
+                kwargs_alt["_sc_no_canon"] = True
+                resp = await _orig_acompletion(*args, **kwargs_alt)
+                if _sc_is_chutes_base(api_base):
+                    _SC_WINNERS[str(api_base)] = ("x-api-key", _time.time() + 300.0)
+            else:
+                raise
+        if not (retry_on_empty and not _sc_allow_empty_responses() and _sc_messages_have_prompt(messages)):
             return _sc_postprocess_require_nonempty(resp)
-        raise
+        if not _sc_response_is_empty(resp):
+            result = _sc_postprocess_require_nonempty(resp)
+            try:
+                meta = dict(getattr(result, "scillm_meta", {}) or {})
+                meta.setdefault("attempts", attempts)
+                setattr(result, "scillm_meta", meta)
+            except Exception:
+                pass
+            return result
+        if attempts > empty_retries + 1:
+            last_exc = EmptyContentError(model=model or "unknown", provider="chutes")
+            try:
+                setattr(last_exc, "scillm_meta", {"reason": "empty_content", "attempts": attempts})
+            except Exception:
+                pass
+            break
+        if bump_tokens and kwargs.get("max_tokens") is not None:
+            try:
+                kwargs["max_tokens"] = int(kwargs.get("max_tokens") or base_max_tokens or 0) + bump_amount
+            except Exception:
+                pass
+        if empty_backoff_ms > 0:
+            await asyncio.sleep(empty_backoff_ms / 1000.0)
+    if last_exc:
+        raise last_exc
 
 # Ensure Router and any code calling litellm.completion/acompletion see the wrapper
 try:
