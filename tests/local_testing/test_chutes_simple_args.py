@@ -2,6 +2,8 @@ import os
 import types
 from typing import Any, Dict
 
+import pytest
+
 import scillm.extras.chutes_simple as cs
 
 
@@ -37,6 +39,12 @@ def test_chutes_chat_json_builds_bearer_headers(monkeypatch):
 def test_chutes_router_json_adds_headers(monkeypatch):
     monkeypatch.setenv("CHUTES_API_BASE", "https://llm.chutes.ai/v1")
     monkeypatch.setenv("CHUTES_API_KEY", "sk-test")
+    monkeypatch.setenv("CHUTES_TEXT_MODEL", "foo/Bar-235B-Instruct")
+    monkeypatch.delenv("CHUTES_TEXT_MODEL_ALT1", raising=False)
+    monkeypatch.delenv("CHUTES_TEXT_MODEL_ALT2", raising=False)
+    monkeypatch.delenv("CHUTES_VLM_MODEL", raising=False)
+    monkeypatch.delenv("CHUTES_VLM_MODEL_ALT1", raising=False)
+    monkeypatch.delenv("CHUTES_VLM_MODEL_ALT2", raising=False)
     # Fake a tiny router
     class _FakeRouter:
         def __init__(self, model_list=None, default_litellm_params=None):
@@ -54,3 +62,13 @@ def test_chutes_router_json_adds_headers(monkeypatch):
     monkeypatch.setattr(cs, "Router", _FakeRouter)
     r = cs.chutes_router_json(messages=[{"role":"user","content":"ping"}])
     assert hasattr(r, "choices")
+
+
+def test_chutes_router_json_rejects_alternates(monkeypatch):
+    monkeypatch.setenv("CHUTES_API_BASE", "https://llm.chutes.ai/v1")
+    monkeypatch.setenv("CHUTES_API_KEY", "sk-test")
+    monkeypatch.setenv("CHUTES_TEXT_MODEL", "foo/Bar-235B-Instruct")
+    monkeypatch.setenv("CHUTES_TEXT_MODEL_ALT1", "foo/Alt")
+    with pytest.raises(RuntimeError) as excinfo:
+        cs.chutes_router_json(messages=[{"role":"user","content":"ping"}])
+    assert "LOCKED" in str(excinfo.value)

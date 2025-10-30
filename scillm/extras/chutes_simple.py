@@ -20,6 +20,13 @@ def _bearer_headers() -> Dict[str, str]:
     key = os.environ.get("CHUTES_API_KEY", "").strip()
     if not key:
         raise RuntimeError("CHUTES_API_KEY not set")
+    # Warn if an incompatible auth style was requested via env
+    style = (os.environ.get("CHUTES_AUTH_STYLE") or "bearer").strip().lower()
+    if style and style != "bearer":
+        try:
+            print(f"[scillm.chutes] WARNING: CHUTES_AUTH_STYLE='{style}' ignored for chat; using Bearer header.")
+        except Exception:
+            pass
     return {"Authorization": f"Bearer {key}"}
 
 
@@ -202,11 +209,11 @@ def chutes_router_json(
         raise RuntimeError("CHUTES_API_BASE not set")
     auth = _bearer_headers()
     env_primary = os.environ.get("CHUTES_TEXT_MODEL" if kind != "vlm" else "CHUTES_VLM_MODEL", "").strip()
-    env_alts = [
-        os.environ.get(("CHUTES_TEXT_MODEL_ALT1" if kind != "vlm" else "CHUTES_VLM_MODEL_ALT1"), "").strip(),
-        os.environ.get(("CHUTES_TEXT_MODEL_ALT2" if kind != "vlm" else "CHUTES_VLM_MODEL_ALT2"), "").strip(),
-    ]
-    env_alts = [m for m in env_alts if m]
+    # LOCKED MODE: single pinned model only. Alternates are ignored and will error to prevent ambiguity.
+    env_alts = []
+    if os.environ.get("CHUTES_TEXT_MODEL_ALT1") or os.environ.get("CHUTES_TEXT_MODEL_ALT2") or \
+       os.environ.get("CHUTES_VLM_MODEL_ALT1") or os.environ.get("CHUTES_VLM_MODEL_ALT2"):
+        raise RuntimeError("LOCKED: Only one pinned CHUTES_*_MODEL is allowed. Remove ALT1/ALT2 envs.")
 
     model_list = []
     group = "chutes/text" if kind != "vlm" else "chutes/vlm"
@@ -321,36 +328,8 @@ def chutes_router_json(
             except Exception:
                 pass
             return _r
-    # Fallback: dynamic discovery when no env pins present
-    router: Router = auto_router_from_env(kind=kind, require_json=True)
-    for e in router.model_list:
-        e.setdefault("litellm_params", {}).setdefault("extra_headers", {}).update(auth)
-        e["litellm_params"]["api_key"] = None
-        e["litellm_params"]["custom_llm_provider"] = "openai_like"
-    if sc_pacing:
-        try:
-            sc_pacing.wait_if_needed()
-        except Exception:
-            pass
-    _t0 = __import__("time").time()
-    _r2 = router.completion(
-        model=router.model_list[0]["model_name"],
-        messages=messages,
-        response_format={"type": "json_object"},
-        max_retries=max_retries,
-        retry_after=retry_after,
-        timeout=timeout,
-    )
-    try:
-        if sc_metrics:
-            sc_metrics.record_request(
-                route="router", result="ok", retried="0",
-                model_tier=("vlm" if kind == "vlm" else "text"),
-                latency_s=__import__("time").time() - _t0
-            )
-    except Exception:
-        pass
-    return _r2
+    # LOCKED: require CHUTES_*_MODEL pin; no discovery fallback
+    raise RuntimeError("LOCKED: Set a single pinned CHUTES_TEXT_MODEL/CHUTES_VLM_MODEL. Discovery is disabled.")
 
 
 __all__ = ["chutes_chat_json", "chutes_router_json"]

@@ -66,11 +66,11 @@ Executed snapshots live under `notebooks/executed/` for “known‑good” refer
 
 - How should I choose alternates (fallback models)?
   - Prefer same family/tier first (e.g., Qwen3‑235B‑A22B → Qwen3‑235B‑A22B‑Thinking for VLM; Kimi‑K2 → DeepSeek‑V3.1 for text). Keep context windows comparable.
-  - Or skip manual selection: use `auto_router_from_env(kind='text'|'vlm')` to discover and rank candidates automatically.
+  - Or skip manual selection: set `SCILLM_AUTO_ROUTER=1` first, then use `auto_router_from_env(kind='text'|'vlm')` to discover and rank candidates automatically.
 
 - Can I target multiple Chutes bases (regions/orgs)?
   - Yes. Set numbered envs: `CHUTES_API_BASE_1`, `CHUTES_API_KEY_1`, `CHUTES_API_BASE_2`, `CHUTES_API_KEY_2`, …
-  - `auto_router_from_env(...)` will probe each base and build a combined model list ordered by availability/utilization.
+  - With `SCILLM_AUTO_ROUTER=1` enabled, `auto_router_from_env(...)` will probe each base and build a combined model list ordered by availability/utilization.
 
 - Why am I seeing 401 on an OpenAI‑compatible base?
   - Some gateways accept `x-api-key` but reject `Authorization: Bearer`. SciLLM normalizes automatically when `SCILLM_CHUTES_CANONICALIZE_OPENAI_AUTH=1`. Use the “curl header check” cell in 00_quickstart to confirm.

@@ -7,6 +7,59 @@
 
 # SciLLM Multi‑Surface Quickstart
 
+## SciLLM Paved Path (Chutes) — Copy/Paste Recipe (Bearer‑only for this tenant)
+
+Use this single, verified path for Chutes (OpenAI‑compatible) JSON chat. It hides provider quirks and uses Bearer‑only auth on the openai_like transport.
+
+- Env
+  - `CHUTES_API_BASE=https://llm.chutes.ai/v1`
+  - `CHUTES_API_KEY=cpk_…`
+  - `CHUTES_TEXT_MODEL=moonshotai/Kimi-K2-Instruct-0905`
+
+- Code (deterministic JSON, closes Router internally)
+
+```python
+from scillm.paved import chutes_chat_json
+
+out = chutes_chat_json(
+    messages=[
+        {"role": "system", "content": 'Return only {"ok":true} as JSON.'},
+        {"role": "user", "content": "ping"},
+    ],
+    max_tokens=64,
+    temperature=0.0,
+    timeout=20.0,
+    tenacious=False,
+)
+print(out.choices[0].message.get("content"))  # → {"ok":true}
+```
+
+- Router variant (batching / alternates via env):
+
+```python
+from scillm.paved import chutes_router_json
+
+out = chutes_router_json(
+    messages=[{"role": "user", "content": "ping"}],
+    kind="text",        # or "vlm"
+    timeout=20.0,
+    tenacious=False,
+)
+print(out.choices[0].message.get("content"))
+```
+
+- Sanity probes
+  - `curl -H "Authorization: Bearer $CHUTES_API_KEY" "$CHUTES_API_BASE/models"` → 200
+  - `curl -H "Authorization: Bearer $CHUTES_API_KEY" -H "content-type: application/json" \`
+    `-d '{"model":"'$CHUTES_TEXT_MODEL'","messages":[{"role":"user","content":"ping"}],"response_format":{"type":"json_object"}}' \`
+    `"$CHUTES_API_BASE/chat/completions"` → 200
+
+- Notes
+  - For this tenant, use Bearer‑only for chat; do not add `x-api-key`.
+  - JSON mode content may be string or dict; normalize both if you post‑process.
+  - If you construct Router yourself, call `await router.aclose()` when done.
+  - Pin exactly one `CHUTES_TEXT_MODEL`/`CHUTES_VLM_MODEL` (alternates are disabled in locked bearer mode).
+
 > Environment Prefix Preference: Use `SCILLM_` (e.g. `SCILLM_ENABLE_CODEX_AGENT=1`). Legacy `LITELLM_` variables still work.
 > Model IDs: Replace `<MODEL_ID>` placeholders with real IDs from `GET $CODEX_AGENT_API_BASE/v1/models`.
 
@@ -211,15 +264,18 @@ Tenacious single‑model (dataset‑safe)
 
 Automatic selection, fallbacks, and attribution (opt‑in)
 
-- One‑liner Router from env (discovers, ranks by availability + utilization):
+- One‑liner Router from env (discovers, ranks by availability + utilization). Enable it explicitly for local triage by setting `SCILLM_AUTO_ROUTER=1`:
   ```python
+  import os
+  os.environ.setdefault("SCILLM_AUTO_ROUTER", "1")
   from scillm.extras import auto_router_from_env
+
   router = auto_router_from_env(kind="text", require_json=True)
   out = router.completion(
-    model=router.model_list[0]["model_name"],
-    messages=[{"role":"user","content":'Return only {"ok":true} as JSON.'}],
-    response_format={"type":"json_object"},
-    max_retries=3, retry_after=1, timeout=45,
+      model=router.model_list[0]["model_name"],
+      messages=[{"role":"user","content":'Return only {"ok":true} as JSON.'}],
+      response_format={"type":"json_object"},
+      max_retries=3, retry_after=1, timeout=45,
   )
   print(out.choices[0].message.get("content",""))
   ```

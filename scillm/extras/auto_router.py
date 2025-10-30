@@ -20,6 +20,12 @@ def auto_router_from_env(
 
     One‑liner: router = auto_router_from_env(kind="text", require_json=True)
     """
+    # Respect SCILLM_AUTO_ROUTER: default disabled; enable explicitly for local triage
+    from os import getenv
+    if getenv("SCILLM_AUTO_ROUTER", "0").lower() not in {"1","true","yes","y"}:
+        raise RuntimeError(
+            "SCILLM_AUTO_ROUTER is disabled (default). Set CHUTES_* model pins or enable SCILLM_AUTO_ROUTER=1 for dev triage."
+        )
     model_list = auto_model_list_from_env(
         kind=kind,
         require_json=require_json,
@@ -35,4 +41,3 @@ def auto_router_from_env(
 __all__ = [
     "auto_router_from_env",
 ]
-
