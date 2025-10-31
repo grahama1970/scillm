@@ -14,6 +14,11 @@ except Exception:  # pragma: no cover
 # Keeps caller code minimal: set SCILLM_CACHE=1 and REDIS_* if available.
 import os as _os
 from litellm.llms.custom_httpx.http_handler import AsyncHTTPHandler as _AsyncHTTPHandler
+# Suppress noisy debug banners by default
+try:
+    _litellm.suppress_debug_info = True
+except Exception:
+    pass
 try:  # best-effort; never fail import
     if (_os.getenv("SCILLM_CACHE") or "").strip().lower() in {"1", "true", "yes", "on"}:
         from litellm.extras import initialize_litellm_cache  # type: ignore
