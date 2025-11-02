@@ -1,8 +1,8 @@
 <p align="center">
-  <!-- Use existing exported assets -->
-  <img src="local/artifacts/logo/SciLLM_balanced.svg" alt="SciLLM" width="100" />
+  <!-- Use PNG for GitHub rendering reliability -->
+  <img src="local/artifacts/logo/SciLLM_balanced.light@2x.png" alt="SciLLM" width="100" />
   <br/>
-  <img src="local/artifacts/logo/SciLLM_mark.light.svg" alt="SciLLM Icon" width="32" />
+  <img src="local/artifacts/logo/scillm_mark_32.png" alt="SciLLM Icon" width="32" />
 </p>
 
 # SciLLM Multi‑Surface Quickstart

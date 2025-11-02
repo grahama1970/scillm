@@ -1,8 +1,9 @@
 <p align="center">
  <!-- Use exported assets that exist in local/artifacts/logo/ -->
- <img src="local/artifacts/logo/SciLLM_balanced.svg" alt="SciLLM" width="140" />
+ <!-- Use PNG for GitHub rendering reliability -->
+ <img src="local/artifacts/logo/SciLLM_balanced.light@2x.png" alt="SciLLM" width="140" />
   <br/>
- <img src="local/artifacts/logo/SciLLM_mark.light.svg" alt="SciLLM Icon" width="44" />
+ <img src="local/artifacts/logo/scillm_mark_64.png" alt="SciLLM Icon" width="44" />
   <br/>
   <em>Balanced wordmark (default) + icon (logo‑only). The favicon (.ico) should use the icon only, no text.</em>
  </p>
@@ -324,15 +325,15 @@ Future backends (e.g., Coq) will plug into the same surface, but are out of scop
 <details>
   <summary>Logo variants</summary>
   <p>
-    <img src="local/artifacts/logo/SciLLM_balanced.svg" alt="SciLLM Balanced" height="36" />
+    <img src="local/artifacts/logo/SciLLM_balanced.light@2x.png" alt="SciLLM Balanced (PNG)" height="36" />
     &nbsp;&nbsp;
-    <img src="local/artifacts/logo/SciLLM_balanced.light.svg" alt="SciLLM Balanced (light)" height="36" />
+    <img src="local/artifacts/logo/SciLLM_balanced.light@2x.png" alt="SciLLM Balanced (light, PNG)" height="36" />
     &nbsp;&nbsp;
-    <img src="local/artifacts/logo/SciLLM_mark.light.svg" alt="SciLLM Icon (light)" height="36" />
+    <img src="local/artifacts/logo/scillm_mark_64.png" alt="SciLLM Icon (PNG)" height="36" />
     &nbsp;&nbsp;
-    <img src="local/artifacts/logo/SciLLM_balanced.dark.svg" alt="SciLLM Balanced (dark)" height="36" />
+    <img src="local/artifacts/logo/SciLLM_balanced.dark@2x.png" alt="SciLLM Balanced (dark, PNG)" height="36" />
     &nbsp;&nbsp;
-    <img src="local/artifacts/logo/SciLLM_mark.dark.svg" alt="SciLLM Icon (dark)" height="36" />
+    <img src="local/artifacts/logo/scillm_mark_dark_64.png" alt="SciLLM Icon (dark, PNG)" height="36" />
   </p>
   <p>Use <code>make logo-export</code> to produce outlined SVGs and favicons in <code>local/artifacts/logo/</code>. The generated <code>favicon.ico</code> uses the icon only (no text).</p>
 </details>
