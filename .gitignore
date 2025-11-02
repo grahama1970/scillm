@@ -72,6 +72,11 @@ tests/llm_translation/log.txt
 venv/
 tests/local_testing/log.txt
 
+# Secrets & local env backups (never commit)
+.env.*
+*.env
+!.env.example
+
 .codegpt
 litellm/proxy/_new_new_secret_config.yaml
 litellm/proxy/custom_guardrail.py
