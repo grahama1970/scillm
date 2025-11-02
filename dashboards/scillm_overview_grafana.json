@@ -1,0 +1,220 @@
+{
+  "title": "SciLLM Overview",
+  "schemaVersion": 38,
+  "version": 1,
+  "templating": {
+    "list": [
+      {
+        "name": "DS_PROMETHEUS",
+        "type": "datasource",
+        "query": "prometheus",
+        "label": "Prometheus",
+        "hide": 0
+      },
+      {
+        "name": "env",
+        "type": "query",
+        "datasource": "${DS_PROMETHEUS}",
+        "query": "label_values(sc_calls_total, env)",
+        "includeAll": true,
+        "refresh": 1
+      },
+      {
+        "name": "feature",
+        "type": "custom",
+        "query": "text,router,images,embeddings,mcp,tools,files,extractor,gateway",
+        "multi": true,
+        "includeAll": true
+      },
+      {
+        "name": "window",
+        "type": "custom",
+        "query": "5m,15m,1h",
+        "current": {
+          "text": "15m",
+          "value": "15m"
+        }
+      }
+    ]
+  },
+  "panels": [
+  {
+    "type": "stat",
+    "title": "Requests OK (QPS)",
+    "datasource": "${DS_PROMETHEUS}",
+      "targets": [
+        {
+          "expr": "sum by (env) (rate(sc_calls_total{result=\"ok\", env=~\"$env\"}[$window]))"
+        }
+      ]
+  },
+  {
+    "type": "timeseries",
+    "title": "Cost by Provider/Model (USD, 24h)",
+    "datasource": "${DS_PROMETHEUS}",
+    "gridPos": {"h": 8, "w": 12, "x": 12, "y": 0},
+    "targets": [
+      {
+        "expr": "sum by (vendor,model) (increase(sc_cost_usd_total[24h]))",
+        "legendFormat": "{{vendor}} · {{model}}",
+        "refId": "A"
+      }
+    ]
+  },
+    {
+      "type": "stat",
+      "title": "Error Rate (%)",
+      "datasource": "${DS_PROMETHEUS}",
+      "targets": [
+        {
+          "expr": "100 * (sum(rate(sc_calls_total{result=~\"error|5xx|timeout|cancel\", env=~\"$env\"}[$window])) / sum(rate(sc_calls_total{env=~\"$env\"}[$window])))"
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "P95 Latency (ms)",
+      "datasource": "${DS_PROMETHEUS}",
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(sc_request_seconds_bucket{env=~\"$env\"}[$window]))) * 1000"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Requests by Feature (QPS)",
+      "datasource": "${DS_PROMETHEUS}",
+      "targets": [
+        {
+          "expr": "sum by (feature) (rate(sc_calls_total{env=~\"$env\", feature=~\"$feature\"}[$window]))"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Errors by Feature (QPS)",
+      "datasource": "${DS_PROMETHEUS}",
+      "targets": [
+        {
+          "expr": "sum by (feature, result) (rate(sc_calls_total{result=~\"error|5xx|timeout\", env=~\"$env\", feature=~\"$feature\"}[$window]))"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "P95 Latency by Feature (ms)",
+      "datasource": "${DS_PROMETHEUS}",
+      "targets": [
+        {
+          "expr": "label_replace(histogram_quantile(0.95, sum by (feature, le) (rate(sc_request_seconds_bucket{env=~\"$env\", feature=~\"$feature\"}[$window])) )*1000, \"__name__\", \"p95_latency_ms\", \"feature\", \"$feature\")"
+        }
+      ]
+    },
+    {
+      "type": "row",
+      "title": "Router & Streaming"
+    },
+    {
+      "type": "timeseries",
+      "title": "Router Failovers (rate)",
+      "datasource": "${DS_PROMETHEUS}",
+      "targets": [
+        {
+          "expr": "sum(rate(sc_router_failover_total{env=~\"$env\"}[$window]))"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Stream Chunks (rate)",
+      "datasource": "${DS_PROMETHEUS}",
+      "targets": [
+        {
+          "expr": "sum(rate(sc_stream_chunks_total{env=~\"$env\"}[$window]))"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "First Byte P95 (ms)",
+      "datasource": "${DS_PROMETHEUS}",
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(sc_stream_first_byte_seconds_bucket{env=~\"$env\"}[$window])) ) * 1000"
+        }
+      ]
+    },
+    {
+      "type": "row",
+      "title": "Budgets / Capacity"
+    },
+    {
+      "type": "stat",
+      "title": "Remaining Calls",
+      "datasource": "${DS_PROMETHEUS}",
+      "targets": [
+        {
+          "expr": "sum(sc_budget_remaining{env=~\"$env\"})"
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "Daily Limit",
+      "datasource": "${DS_PROMETHEUS}",
+      "targets": [
+        {
+          "expr": "sum(sc_budget_limit{env=~\"$env\"})"
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "Time To Reset (min)",
+      "datasource": "${DS_PROMETHEUS}",
+      "targets": [
+        {
+          "expr": "(max(sc_reset_timestamp_seconds{env=~\"$env\"}) - time()) / 60"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "429s (rate)",
+      "datasource": "${DS_PROMETHEUS}",
+      "targets": [
+        {
+          "expr": "sum by (env) (rate(sc_calls_total{result=\"429\", env=~\"$env\"}[$window]))"
+        },
+        {
+          "expr": "sum by (kind) (rate(chutes_429_total{env=~\"$env\"}[$window]))"
+        }
+      ]
+    },
+    {
+      "type": "row",
+      "title": "Tenacious"
+    },
+    {
+      "type": "timeseries",
+      "title": "Retries by Reason (rate)",
+      "datasource": "${DS_PROMETHEUS}",
+      "targets": [
+        {
+          "expr": "sum by (reason) (rate(sc_retries_total{env=~\"$env\"}[$window]))"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Sleep Seconds (rate)",
+      "datasource": "${DS_PROMETHEUS}",
+      "targets": [
+        {
+          "expr": "rate(sc_tenacious_sleep_seconds_total{env=~\"$env\"}[$window])"
+        }
+      ]
+    }
+  ]
+}

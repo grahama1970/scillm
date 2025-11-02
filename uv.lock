@@ -9079,9 +9079,13 @@ source = { editable = "." }
 dependencies = [
     { name = "aiohttp", version = "3.10.11", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.9'" },
     { name = "aiohttp", version = "3.12.15", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.9'" },
+    { name = "apscheduler" },
     { name = "chutes" },
     { name = "click", version = "8.1.8", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.10'" },
     { name = "click", version = "8.3.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.10'" },
+    { name = "email-validator" },
+    { name = "fastapi-sso", version = "0.17.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.9'" },
+    { name = "fastapi-sso", version = "0.18.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.9'" },
     { name = "fastuuid" },
     { name = "httpx" },
     { name = "importlib-metadata" },
@@ -9091,6 +9095,7 @@ dependencies = [
     { name = "jsonschema", version = "4.25.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.9'" },
     { name = "openai" },
     { name = "pondpond" },
+    { name = "prometheus-client" },
     { name = "pydantic", version = "2.10.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.9'" },
     { name = "pydantic", version = "2.11.10", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.9'" },
     { name = "pytest-html" },
@@ -9103,6 +9108,11 @@ dependencies = [
     { name = "tiktoken", version = "0.11.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.9'" },
     { name = "tokenizers", version = "0.21.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.9'" },
     { name = "tokenizers", version = "0.22.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.9'" },
+    { name = "uvicorn", version = "0.33.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.9'" },
+    { name = "uvicorn", version = "0.37.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.9'" },
+    { name = "uvloop" },
+    { name = "websockets", version = "13.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.9'" },
+    { name = "websockets", version = "15.0.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.9'" },
 ]
 
 [package.optional-dependencies]
@@ -9209,6 +9219,7 @@ proxy-dev = [
 [package.metadata]
 requires-dist = [
     { name = "aiohttp", specifier = ">=3.10" },
+    { name = "apscheduler", specifier = ">=3.11.0" },
     { name = "apscheduler", marker = "extra == 'proxy'", specifier = ">=3.10.4" },
     { name = "azure-identity", marker = "extra == 'extra-proxy'", specifier = ">=1.15.0" },
     { name = "azure-identity", marker = "extra == 'proxy'", specifier = ">=1.15.0" },
@@ -9220,7 +9231,9 @@ requires-dist = [
     { name = "click" },
     { name = "cryptography", marker = "extra == 'proxy'" },
     { name = "diskcache", marker = "extra == 'caching'", specifier = ">=5.6.1" },
+    { name = "email-validator", specifier = ">=2.3.0" },
     { name = "fastapi", marker = "extra == 'proxy'", specifier = ">=0.115.5" },
+    { name = "fastapi-sso", specifier = ">=0.17.0" },
     { name = "fastapi-sso", marker = "extra == 'proxy'", specifier = ">=0.16.0" },
     { name = "fastuuid", specifier = ">=0.12.0" },
     { name = "google-cloud-iam", marker = "extra == 'extra-proxy'", specifier = ">=2.19.1" },
@@ -9241,6 +9254,7 @@ requires-dist = [
     { name = "polars", marker = "python_full_version >= '3.10' and extra == 'proxy'", specifier = ">=1.31.0" },
     { name = "pondpond", specifier = ">=1.4.1" },
     { name = "prisma", marker = "extra == 'extra-proxy'", specifier = "==0.11.0" },
+    { name = "prometheus-client", specifier = ">=0.20.0" },
     { name = "pydantic", specifier = ">=2.5.0" },
     { name = "pyjwt", marker = "extra == 'proxy'", specifier = ">=2.8.0" },
     { name = "pynacl", marker = "extra == 'proxy'", specifier = ">=1.5.0" },
@@ -9255,8 +9269,11 @@ requires-dist = [
     { name = "rq", marker = "extra == 'proxy'" },
     { name = "tiktoken", specifier = ">=0.7.0" },
     { name = "tokenizers" },
+    { name = "uvicorn", specifier = ">=0.33.0" },
     { name = "uvicorn", marker = "extra == 'proxy'", specifier = ">=0.29.0" },
+    { name = "uvloop", specifier = ">=0.21.0" },
     { name = "uvloop", marker = "sys_platform != 'win32' and extra == 'proxy'", specifier = ">=0.21.0" },
+    { name = "websockets", specifier = ">=13.1" },
     { name = "websockets", marker = "extra == 'proxy'", specifier = ">=13.1.0" },
 ]
 provides-extras = ["proxy", "extra-proxy", "utils", "caching", "mlflow"]

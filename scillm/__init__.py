@@ -14,9 +14,41 @@ except Exception:  # pragma: no cover
 # Keeps caller code minimal: set SCILLM_CACHE=1 and REDIS_* if available.
 import os as _os
 from litellm.llms.custom_httpx.http_handler import AsyncHTTPHandler as _AsyncHTTPHandler
-# Suppress noisy debug banners by default
+# Suppress noisy debug banners and disable loop-sensitive background logging.
 try:
     _litellm.suppress_debug_info = True
+except Exception:
+    pass
+try:
+    from litellm.litellm_core_utils import logging_worker as _lw  # type: ignore
+
+    class _NoopLoggingWorker(_lw.LoggingWorker):
+        def __init__(self):
+            super().__init__()
+            self._queue = None
+
+        def _ensure_queue(self) -> None:
+            return
+
+        def start(self) -> None:
+            return
+
+        def enqueue(self, coroutine):  # type: ignore[override]
+            return
+
+        def ensure_initialized_and_enqueue(self, async_coroutine):  # type: ignore[override]
+            return
+
+        async def stop(self):  # type: ignore[override]
+            return
+
+        async def flush(self):  # type: ignore[override]
+            return
+
+        async def clear_queue(self):  # type: ignore[override]
+            return
+
+    _lw.GLOBAL_LOGGING_WORKER = _NoopLoggingWorker()
 except Exception:
     pass
 try:  # best-effort; never fail import

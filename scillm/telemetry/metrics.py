@@ -3,160 +3,181 @@ from __future__ import annotations
 import os
 from typing import Optional
 
-_ENABLED = False
-_MODE = None
-_INIT_DONE = False
-
-try:
-    from prometheus_client import Counter, Histogram, Gauge, start_http_server  # type: ignore
-    _PROM_OK = True
-except Exception:  # pragma: no cover
-    # No-op fallbacks if prometheus-client is not installed
-    _PROM_OK = False
-    class _Noop:
-        def labels(self, *a, **k): return self
-        def inc(self, *a, **k): return None
-        def dec(self, *a, **k): return None
-        def observe(self, *a, **k): return None
-        def set(self, *a, **k): return None
-    def Counter(*a, **k): return _Noop()  # type: ignore
-    def Histogram(*a, **k): return _Noop()  # type: ignore
-    def Gauge(*a, **k): return _Noop()  # type: ignore
-    def start_http_server(*a, **k): return None  # type: ignore
-
-# Core metric primitives (low-cardinality)
-_REQUESTS = Counter(
-    "scillm_requests_total", "Total SciLLM requests",
-    labelnames=("route", "result", "retried", "model_tier")
-)
-_LATENCY = Histogram(
-    "scillm_request_latency_seconds", "SciLLM request latency (seconds)",
-    labelnames=("route", "model_tier"),
-    buckets=(0.05, 0.1, 0.2, 0.5, 1, 2, 5, 10, 30, 60, 120, 300)
-)
-_RETRIES = Counter(
-    "scillm_retries_total", "Total SciLLM retries",
-    labelnames=("reason",)
-)
-_ROUTER_FALLBACKS = Counter(
-    "scillm_router_fallbacks_total", "Router fallbacks triggered",
-    labelnames=("reason",)
-)
-_IN_FLIGHT = Gauge(
-    "scillm_requests_in_flight", "In-flight SciLLM requests",
-    labelnames=("route",)
-)
+_PROM = None
 
 
-def _bool_env(name: str, default: bool = False) -> bool:
-    v = os.getenv(name)
-    if v is None:
-        return default
-    return str(v).strip().lower() in {"1", "true", "yes", "on"}
+def _reg():
+    global _PROM
+    if _PROM is not None:
+        return _PROM
+    try:
+        from prometheus_client import Counter, Gauge, Histogram  # type: ignore
+
+        _PROM = {
+            "calls": Counter(
+                "sc_calls_total",
+                "SciLLM calls",
+                labelnames=("feature", "result", "env"),
+            ),
+            "latency": Histogram(
+                "sc_request_seconds",
+                "SciLLM request duration seconds",
+                labelnames=("feature", "env"),
+                buckets=(0.05, 0.1, 0.2, 0.5, 1, 2, 5, 10, 30),
+            ),
+            "retries": Counter(
+                "sc_retries_total",
+                "SciLLM retries",
+                labelnames=("feature", "reason", "env"),
+            ),
+            "budget_limit": Gauge(
+                "sc_budget_limit",
+                "Budget limit (calls per window)",
+                labelnames=("feature", "env"),
+            ),
+            "budget_remaining": Gauge(
+                "sc_budget_remaining",
+                "Budget remaining (calls)",
+                labelnames=("feature", "env"),
+            ),
+            "reset_ts": Gauge(
+                "sc_reset_timestamp_seconds",
+                "Next budget reset epoch seconds",
+                labelnames=("feature", "env"),
+            ),
+            "spend_today": Gauge(
+                "sc_spend_usd_today",
+                "Spend today in USD (provider runtime reported)",
+                labelnames=("feature", "env"),
+            ),
+            "payg_active": Gauge(
+                "sc_payg_active",
+                "PAYG mode active (0/1)",
+                labelnames=("feature", "env"),
+            ),
+            "payg_decisions": Counter(
+                "sc_payg_prompts_total",
+                "PAYG policy prompts/decisions",
+                labelnames=("decision", "env"),
+            ),
+            "cost_total": Counter(
+                "sc_cost_usd_total",
+                "Accumulated request cost in USD",
+                labelnames=("feature", "vendor", "model", "env"),
+            ),
+        }
+    except Exception:
+        _PROM = {}
+    return _PROM
 
 
-def init_from_env() -> None:
-    """
-    Initialize metrics exporter based on environment variables.
-    - SCILLM_METRICS=prom | prometheus   Start a /metrics server.
-    - SCILLM_METRICS_ADDR=0.0.0.0        Bind address for /metrics (default 0.0.0.0)
-    - SCILLM_METRICS_PORT=9464           Port for /metrics (default 9464)
-    Safe to call multiple times.
-    """
-    global _ENABLED, _MODE, _INIT_DONE
-    if _INIT_DONE:
+def _labels(feature: str):
+    env = os.getenv("METRICS_ENV", "")
+    return feature, env
+
+
+def record_call(feature: str, result: str) -> None:
+    p = _reg()
+    if not p:
         return
-    mode = (os.getenv("SCILLM_METRICS") or "").strip().lower()
-    if mode in {"prom", "prometheus"} and _PROM_OK:
-        addr = os.getenv("SCILLM_METRICS_ADDR", "0.0.0.0")
-        try:
-            port = int(os.getenv("SCILLM_METRICS_PORT", "9464"))
-        except Exception:
-            port = 9464
-        try:
-            start_http_server(port, addr=addr)  # type: ignore[call-arg]
-            _ENABLED = True
-            _MODE = "prom"
-        except Exception:
-            # If server cannot start, stay disabled (no-op)
-            _ENABLED = False
-            _MODE = None
-    _INIT_DONE = True
-
-
-def _ensure_init() -> None:
-    if not _INIT_DONE:
-        init_from_env()
-
-
-def record_request(*, route: str, result: str, retried: str, model_tier: str, latency_s: Optional[float] = None) -> None:
-    """
-    Record a completed request outcome and latency.
-    route: "direct" | "router"
-    result: "ok" | "error"
-    retried: "0" | "1"
-    model_tier: "text" | "vlm" | "tools"
-    """
-    _ensure_init()
     try:
-        _REQUESTS.labels(route, result, retried, model_tier).inc()
-        if latency_s is not None:
-            _LATENCY.labels(route, model_tier).observe(float(latency_s))
+        f, e = _labels(feature)
+        p["calls"].labels(f, result, e).inc()
     except Exception:
         pass
 
 
-def record_retry(*, reason: str) -> None:
-    """
-    reason: "429_capacity" | "timeout" | "5xx" | "other"
-    """
-    _ensure_init()
+def record_latency(feature: str, seconds: float) -> None:
+    p = _reg()
+    if not p:
+        return
     try:
-        _RETRIES.labels(reason).inc()
+        f, e = _labels(feature)
+        p["latency"].labels(f, e).observe(float(seconds))
     except Exception:
         pass
 
 
-def record_router_fallback(*, reason: str) -> None:
-    _ensure_init()
+def record_retry(feature: str, reason: str) -> None:
+    p = _reg()
+    if not p:
+        return
     try:
-        _ROUTER_FALLBACKS.labels(reason).inc()
+        f, e = _labels(feature)
+        p["retries"].labels(f, reason, e).inc()
     except Exception:
         pass
 
 
-class track_in_flight:
-    """
-    Context manager for tracking in-flight counts.
-    Usage:
-        with track_in_flight(route="router"):
-            ...
-    """
-    def __init__(self, *, route: str):
-        self.route = route
-
-    def __enter__(self):
-        _ensure_init()
-        try:
-            _IN_FLIGHT.labels(self.route).inc()
-        except Exception:
-            pass
-        return self
-
-    def __exit__(self, exc_type, exc, tb):
-        try:
-            _IN_FLIGHT.labels(self.route).dec()
-        except Exception:
-            pass
-        # Do not suppress exceptions
-        return False
+def set_budget(feature: str, *, limit: Optional[int], remaining: Optional[int], reset_epoch: Optional[float]) -> None:
+    p = _reg()
+    if not p:
+        return
+    try:
+        f, e = _labels(feature)
+        if limit is not None:
+            p["budget_limit"].labels(f, e).set(float(limit))
+        if remaining is not None:
+            p["budget_remaining"].labels(f, e).set(float(remaining))
+        if reset_epoch is not None:
+            p["reset_ts"].labels(f, e).set(float(reset_epoch))
+    except Exception:
+        pass
 
 
 __all__ = [
-    "init_from_env",
-    "record_request",
+    "record_call",
+    "record_latency",
     "record_retry",
-    "record_router_fallback",
-    "track_in_flight",
+    "set_budget",
+    "set_spend_today",
+    "set_payg_active",
+    "record_payg_decision",
+    "record_cost_usd",
 ]
 
+
+def set_spend_today(feature: str, usd: float) -> None:
+    p = _reg()
+    if not p:
+        return
+    try:
+        f, e = _labels(feature)
+        p["spend_today"].labels(f, e).set(float(usd))
+    except Exception:
+        pass
+
+
+def set_payg_active(feature: str, active: bool) -> None:
+    p = _reg()
+    if not p:
+        return
+    try:
+        f, e = _labels(feature)
+        p["payg_active"].labels(f, e).set(1.0 if active else 0.0)
+    except Exception:
+        pass
+
+
+def record_payg_decision(decision: str) -> None:
+    p = _reg()
+    if not p:
+        return
+    try:
+        e = os.getenv("METRICS_ENV", "")
+        p["payg_decisions"].labels(decision, e).inc()
+    except Exception:
+        pass
+
+
+def record_cost_usd(feature: str, usd: float, *, vendor: str = "", model: str = "") -> None:
+    p = _reg()
+    if not p:
+        return
+    try:
+        f, e = _labels(feature)
+        v = (vendor or "").strip() or "unknown"
+        m = (model or "").strip() or "unknown"
+        p["cost_total"].labels(f, v, m, e).inc(float(max(0.0, usd)))
+    except Exception:
+        pass

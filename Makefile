@@ -54,3 +54,50 @@ chutes-doctor:
 check-no-secrets-logs:
 	@! rg -n "Authorization:\s*Bearer\s+\w" -S . || (echo "Found Authorization token in repo logs/text" && exit 1)
 	@! rg -n "x-api-key:\s*\w" -S . || (echo "Found x-api-key in repo logs/text" && exit 1)
+grafana-import:
+	@if [ -z "$$GRAFANA_URL" ] || [ -z "$$GRAFANA_TOKEN" ]; then \
+	  echo "Usage: GRAFANA_URL=... GRAFANA_TOKEN=... make grafana-import"; \
+	  exit 2; \
+	fi
+	python3 scripts/grafana_import_dashboards.py
+proxy-run-uv:
+	@if ! command -v uv >/dev/null 2>&1; then echo "uv not installed"; exit 2; fi
+	@if [ ! -f local/proxy_server_config.yaml ]; then echo "missing local/proxy_server_config.yaml"; exit 2; fi
+	LITELLM_MASTER_KEY=$${LITELLM_MASTER_KEY:-sk-dev-proxy-123} METRICS_ENV=$${METRICS_ENV:-dev} \
+	CHUTES_PRICING_FILE=$${CHUTES_PRICING_FILE:-local/pricing/chutes.prices.json} \
+	uv run litellm --config local/proxy_server_config.yaml --host 0.0.0.0 --port $${PORT:-4010} --log_level warning
+
+prom-run-docker:
+	@cat >/tmp/prom.yml <<'YAML'
+global:
+  scrape_interval: 15s
+scrape_configs:
+- job_name: litellm
+  static_configs:
+  - targets: ['host.docker.internal:$${PORT:-4010}']
+YAML
+	@docker rm -f scillm-prom >/dev/null 2>&1 || true
+	docker run -d --name scillm-prom --add-host=host.docker.internal:host-gateway -p 9090:9090 -v /tmp/prom.yml:/etc/prometheus/prometheus.yml prom/prometheus:latest
+	@echo "Prometheus listening on :9090"
+
+compose-up:
+	@echo "Starting SCILLM stack via compose (proxy+db+prom+grafana+ollama)"
+	@docker compose -f local/docker/compose.scillm.yml up -d
+	@echo "Waiting 5s for services to settle..."; sleep 5
+	@docker compose -f local/docker/compose.scillm.yml ps
+
+compose-down:
+	@docker compose -f local/docker/compose.scillm.yml down -v
+
+compose-logs:
+	@docker compose -f local/docker/compose.scillm.yml logs -f --tail=200
+
+compose-ps:
+	@docker compose -f local/docker/compose.scillm.yml ps
+smoke-budget-cost:
+	@echo "Running budget+cost smoke via proxy"
+	@PROXY_BASE=$${PROXY_BASE:-http://127.0.0.1:4010} \
+	PROM_BASE=$${PROM_BASE:-http://127.0.0.1:9090} \
+	PROXY_KEY=$${LITELLM_MASTER_KEY:-sk-dev-proxy-123} \
+	SMOKE_MODEL=$${SMOKE_MODEL:-text-auto} \
+	uv run -- python scripts/smoke_budget_cost.py

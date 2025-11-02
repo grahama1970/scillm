@@ -238,6 +238,9 @@ from litellm.proxy.litellm_pre_call_utils import add_litellm_data_to_request
 from litellm.proxy.management_endpoints.budget_management_endpoints import (
     router as budget_management_router,
 )
+from litellm.proxy.management_endpoints.budget_status_endpoints import (
+    router as budget_status_router,
+)
 from litellm.proxy.management_endpoints.callback_management_endpoints import (
     router as callback_management_endpoints_router,
 )
@@ -679,6 +682,62 @@ app = FastAPI(
     root_path=server_root_path,  # check if user passed root path, FastAPI defaults this value to ""
     lifespan=proxy_startup_event,
 )
+
+# Expose Prometheus /metrics if prometheus_client is available
+try:
+    from prometheus_client import make_asgi_app  # type: ignore
+
+    app.mount("/metrics", make_asgi_app())
+except Exception:
+    pass
+
+# Lightweight budget status endpoint
+try:
+    from chutes.middleware.budget_guard import payg_snapshot
+except Exception:
+    payg_snapshot = None  # type: ignore
+
+@app.get("/v1/budget", include_in_schema=False)
+async def budget_status():
+    """Return current budget snapshot for Chutes provider in a simple shape.
+
+    {"limit": int, "remaining": int, "reset_at": iso, "price_per_call_usd": float}
+    price_per_call_usd is read from CHUTES_PRICE_PER_CALL_USD (fallback 0.0).
+    """
+    out = {"limit": None, "remaining": None, "reset_at": None}
+    try:
+        if payg_snapshot is not None:
+            ps = payg_snapshot(ttl_s=30)
+            if ps and ps.get("ok"):
+                out["limit"] = int(ps.get("limit")) if ps.get("limit") is not None else None
+                out["remaining"] = int(ps.get("remaining")) if ps.get("remaining") is not None else None
+                out["reset_at"] = ps.get("reset_at")
+    except Exception:
+        pass
+    import os
+    try:
+        p = float(os.getenv("CHUTES_PRICE_PER_CALL_USD", "0") or 0)
+    except Exception:
+        p = 0.0
+    out["price_per_call_usd"] = p
+    # Normalize None → empty to keep response small and predictable
+    return {k: (v if v is not None else (0 if k in {"limit", "remaining"} else "")) for k, v in out.items()}
+
+
+# Optional: expose current pricing map resolved from env/API
+try:
+    from chutes.middleware.pricing import get_pricing  # type: ignore
+except Exception:
+    get_pricing = None  # type: ignore
+
+@app.get("/v1/pricing", include_in_schema=False)
+async def pricing_status():
+    if get_pricing is None:
+        return {}
+    try:
+        return get_pricing(ttl_s=300)
+    except Exception:
+        return {}
 
 
 ### CUSTOM API DOCS [ENTERPRISE FEATURE] ###
@@ -9456,6 +9515,7 @@ app.include_router(ui_crud_endpoints_router)
 app.include_router(openai_files_router)
 app.include_router(team_callback_router)
 app.include_router(budget_management_router)
+app.include_router(budget_status_router)
 app.include_router(model_management_router)
 app.include_router(tag_management_router)
 app.include_router(user_agent_analytics_router)

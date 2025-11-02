@@ -1,4 +1,6 @@
 import asyncio
+import time
+import os
 import json
 import logging
 import traceback
@@ -33,6 +35,10 @@ from litellm.litellm_core_utils.dd_tracing import tracer
 from litellm.litellm_core_utils.litellm_logging import Logging as LiteLLMLoggingObj
 from litellm.litellm_core_utils.safe_json_dumps import safe_dumps
 from litellm.proxy._types import ProxyException, UserAPIKeyAuth
+from chutes.middleware.budget_guard import preflight_usage, normalize_ratelimit_to_budget, budget_snapshot, payg_snapshot
+from chutes.middleware.metrics import inc_call, inc_429, set_budget
+from scillm.telemetry.metrics import record_call as sc_record_call, record_latency as sc_record_latency, set_budget as sc_set_budget, set_spend_today as sc_set_spend_today, set_payg_active as sc_set_payg_active, record_payg_decision as sc_record_payg_decision
+from litellm.exceptions import RateLimitError
 from litellm.proxy.auth.auth_utils import check_response_size_is_safe
 from litellm.proxy.common_utils.callback_utils import (
     get_logging_caching_headers,
@@ -239,6 +245,18 @@ class ProxyBaseLLMRequestProcessing:
             if logging_caching_headers:
                 headers.update(logging_caching_headers)
 
+        # Budget headers (if tracker/preflight available)
+        try:
+            snap = budget_snapshot()
+            if snap:
+                if snap.get("reset_at"):
+                    headers["x-budget-reset-at"] = str(snap["reset_at"])
+                headers["x-ratelimit-remaining-requests"] = str(snap.get("remaining", ""))
+                if snap.get("limit") is not None:
+                    headers["x-ratelimit-limit"] = str(snap.get("limit"))
+        except Exception:
+            pass
+
         try:
             return {
                 key: str(value)
@@ -288,6 +306,7 @@ class ProxyBaseLLMRequestProcessing:
         model: Optional[str] = None,
     ) -> Tuple[dict, LiteLLMLoggingObj]:
         start_time = datetime.now()  # start before calling guardrail hooks
+        self.data["_sc_started_at"] = time.monotonic()
         self.data = await add_litellm_data_to_request(
             data=self.data,
             request=request,
@@ -323,11 +342,167 @@ class ProxyBaseLLMRequestProcessing:
         ):
             self.data["model"] = litellm.model_alias_map[self.data["model"]]
 
+        # Optional auto vendor selection: 'text-auto' → choose chutes or moonshot
+        try:
+            if isinstance(self.data.get("model"), str) and self.data.get("model") == "text-auto":
+                from chutes.middleware.budget_guard import payg_snapshot  # type: ignore
+                from chutes.middleware.pricing import get_model_pricing  # type: ignore
+
+                # Defaults
+                selected = "chutes-text"
+                pref = (os.getenv("SCILLM_PAYG_VENDOR", "auto").strip().lower())
+                allow_payg = (os.getenv("SCILLM_ALLOW_PAYG", "0").strip().lower() in {"1", "true", "yes"})
+                max_mult = 1.3
+                try:
+                    max_mult = float(os.getenv("SCILLM_MAX_COST_MULTIPLIER", "1.3") or 1.3)
+                except Exception:
+                    max_mult = 1.3
+
+                if pref in {"chutes", "moonshot"}:
+                    selected = "moonshot-text" if pref == "moonshot" else "chutes-text"
+                else:
+                    # auto: if PAYG active and allowed, consider moonshot when price within multiplier
+                    ps = payg_snapshot() or {}
+                    payg_active = bool(ps.get("payg_active"))
+                    if payg_active and allow_payg:
+                        chutes_id = os.getenv("CHUTES_TEXT_MODEL", "")
+                        moonshot_id = os.getenv("MOONSHOT_MODEL", "")
+                        ch_p = get_model_pricing(chutes_id)
+                        ms_p = get_model_pricing(moonshot_id)
+                        def _sum(p):
+                            try:
+                                a, b = p
+                                return float((a or 0)) + float((b or 0))
+                            except Exception:
+                                return None
+                        ch_cost = _sum(ch_p)
+                        ms_cost = _sum(ms_p)
+                        if ch_cost and ms_cost:
+                            try:
+                                ratio = ms_cost / ch_cost if ch_cost > 0 else None
+                            except Exception:
+                                ratio = None
+                            if ratio is not None and ratio <= max_mult:
+                                selected = "moonshot-text"
+                        else:
+                            # If we can't resolve both prices, stay on chutes
+                            selected = "chutes-text"
+                    else:
+                        selected = "chutes-text"
+                self.data["model"] = selected
+        except Exception:
+            # On any error, keep original model
+            pass
+
         self.data["litellm_call_id"] = request.headers.get(
             "x-litellm-call-id", str(uuid.uuid4())
         )
-        ### CALL HOOKS ### - modify/reject incoming data before calling the model
+        # Optional preflight: short-circuit if Chutes daily budget exhausted or PAYG confirmation required
+        try:
+            pf = preflight_usage()
+            if pf and pf.get("ok") and int(pf.get("remaining", 0)) <= 0:
+                # Budget exhausted path (429)
+                cooldown = int(os.getenv("SCILLM_COOLDOWN_429_S", "120") or "120")
+                raise ProxyException(
+                    message="Provider daily budget exhausted",
+                    type="budget_exhausted",
+                    param=None,
+                    code=429,
+                    headers={"Retry-After": str(cooldown)},
+                )
+            # PAYG policy: if daily limit is reached and policy requires confirmation, block with 402
+            ps = payg_snapshot()
+            if ps and ps.get("ok") and bool(ps.get("payg_active")):
+                cost_today = ps.get("cost_usd_today")
+                reset_at = ps.get("reset_at")
+                limit_val = ps.get("limit")
+                try:
+                    sc_set_payg_active("text", True)
+                    if isinstance(cost_today, (int, float)):
+                        sc_set_spend_today("text", float(cost_today))
+                except Exception:
+                    pass
+                # Strict 'do_not_charge' guard (per-request or env) → always 429 budget_exhausted
+                strict_stop = False
+                try:
+                    strict_stop = bool(self.data.get("do_not_charge", False))
+                except Exception:
+                    strict_stop = False
+                if not strict_stop:
+                    strict_stop = (os.getenv("SCILLM_DO_NOT_CHARGE", "0").strip().lower() in {"1", "true", "yes"})
+                if strict_stop:
+                    sc_record_payg_decision("strict_stop")
+                    raise ProxyException(
+                        message="Budget exhausted and do_not_charge is set; overage blocked.",
+                        type="budget_exhausted",
+                        param=None,
+                        code=429,
+                        headers={
+                            "x-payg-active": "1",
+                            "x-ratelimit-remaining-requests": "0",
+                            "x-ratelimit-limit": (str(limit_val) if limit_val is not None else ""),
+                            "x-budget-reset-at": str(reset_at),
+                            "Retry-After": os.getenv("SCILLM_COOLDOWN_429_S", "120"),
+                        },
+                    )
+                allow_env = (os.getenv("SCILLM_ALLOW_PAYG", "0").strip().lower() in {"1", "true", "yes"})
+                hard_stop = os.getenv("CHUTES_PAYG_HARD_STOP_USD")
+                soft_cap = os.getenv("CHUTES_PAYG_MAX_DAILY_USD")
+                try:
+                    hard_stop_val = float(hard_stop) if hard_stop else None
+                except Exception:
+                    hard_stop_val = None
+                try:
+                    soft_cap_val = float(soft_cap) if soft_cap else None
+                except Exception:
+                    soft_cap_val = None
+                # per-request override
+                confirm_flag = False
+                try:
+                    confirm_flag = bool(self.data.get("confirm_payg", False))
+                except Exception:
+                    confirm_flag = False
+                # Hard stop wins
+                if isinstance(cost_today, (int, float)) and hard_stop_val is not None and float(cost_today) >= hard_stop_val:
+                    sc_record_payg_decision("hard_stop")
+                    raise ProxyException(
+                        message=f"PAYG hard cap reached (spend={cost_today} USD, cap={hard_stop_val}).",
+                        type="payg_hard_stop",
+                        param=None,
+                        code=402,
+                        headers={
+                            "x-payg-active": "1",
+                            "x-spend-usd-today": str(cost_today),
+                            "x-hard-cap-usd": str(hard_stop_val),
+                            "x-budget-reset-at": str(reset_at),
+                        },
+                    )
+                # Require confirmation unless globally allowed
+                if not (allow_env or confirm_flag):
+                    sc_record_payg_decision("blocked")
+                    raise ProxyException(
+                        message=(
+                            "PAYG is active; set SCILLM_ALLOW_PAYG=1 or pass confirm_payg=true to continue now."
+                        ),
+                        type="payg_confirmation_required",
+                        param=None,
+                        code=402,
+                        headers={
+                            "x-payg-active": "1",
+                            "x-spend-usd-today": (str(cost_today) if cost_today is not None else ""),
+                            "x-soft-cap-usd": (str(soft_cap_val) if soft_cap_val is not None else ""),
+                            "x-budget-reset-at": str(reset_at),
+                        },
+                    )
+                # Allowed; soft-cap exceeded is advisory only
+                if isinstance(cost_today, (int, float)) and soft_cap_val is not None and float(cost_today) >= soft_cap_val:
+                    sc_record_payg_decision("allowed_softcap_exceeded")
+        except Exception:
+            # Fail open: if preflight not configured or errors, proceed normally
+            pass
 
+        ### CALL HOOKS ### - modify/reject incoming data before calling the model
+        
         ## LOGGING OBJECT ## - initialize logging object for logging success/failure events for call
         ## IMPORTANT Note: - initialize this before running pre-call checks. Ensures we log rejected requests to langfuse.
         logging_obj, self.data = litellm.utils.function_setup(
@@ -448,6 +623,69 @@ class ProxyBaseLLMRequestProcessing:
             "fastest_response_batch_completion", None
         )
         additional_headers: dict = hidden_params.get("additional_headers", {}) or {}
+        # Pricing headers + metadata (best-effort): per-model pricing and estimated cost
+        try:
+            from chutes.middleware.pricing import get_model_pricing, estimate_cost_usd  # type: ignore
+            from scillm.telemetry.metrics import record_cost_usd as sc_record_cost_usd  # type: ignore
+
+            # Prefer explicit model id; else fall back to request model
+            priced_model = model_id or (self.data.get("model") if isinstance(self.data.get("model"), str) else "")
+            pp, cp = get_model_pricing(priced_model)
+            if pp is not None:
+                additional_headers.setdefault("x-price-prompt-usd-perk", str(pp))
+            if cp is not None:
+                additional_headers.setdefault("x-price-completion-usd-perk", str(cp))
+            # Estimate cost if token usage info is present on the response
+            prompt_tok = None
+            completion_tok = None
+            try:
+                usage = getattr(response, "usage", None) or {}
+                prompt_tok = usage.get("prompt_tokens") if isinstance(usage, dict) else None
+                completion_tok = usage.get("completion_tokens") if isinstance(usage, dict) else None
+            except Exception:
+                pass
+            est = estimate_cost_usd(priced_model, prompt_tok, completion_tok)
+            if est is not None:
+                additional_headers.setdefault("x-estimated-cost-usd", str(est))
+                # Prometheus: accumulate per-request cost (feature inferred from route)
+                try:
+                    # Derive vendor + served model id
+                    vendor = ""
+                    try:
+                        ab = (api_base or "").lower()
+                        if "chutes.ai" in ab:
+                            vendor = "chutes"
+                        elif "moonshot.ai" in ab:
+                            vendor = "moonshot"
+                        elif "ollama" in ab:
+                            vendor = "ollama"
+                        else:
+                            vendor = "other"
+                    except Exception:
+                        vendor = "other"
+                    served_model = model_id or str(self.data.get("model") or "")
+                    sc_record_cost_usd(_route_to_feature(route_type), float(est), vendor=vendor, model=served_model)
+                except Exception:
+                    pass
+            # Attach into response.additional_kwargs.scillm.pricing for body metadata
+            try:
+                ak = getattr(response, "additional_kwargs", {}) or {}
+                sc = ak.get("scillm") or {}
+                pricing_meta = sc.get("pricing") or {}
+                if pp is not None:
+                    pricing_meta.setdefault("prompt_per_1k", float(pp))
+                if cp is not None:
+                    pricing_meta.setdefault("completion_per_1k", float(cp))
+                if est is not None:
+                    pricing_meta.setdefault("estimated_cost_usd", float(est))
+                if pricing_meta:
+                    sc["pricing"] = pricing_meta
+                    ak["scillm"] = sc
+                    response.additional_kwargs = ak
+            except Exception:
+                pass
+        except Exception:
+            pass
 
         # Post Call Processing
         if llm_router is not None:
@@ -476,6 +714,34 @@ class ProxyBaseLLMRequestProcessing:
                 hidden_params=hidden_params,
                 **additional_headers,
             )
+            # Metrics + budget headers for streaming path
+            try:
+                snap = budget_snapshot()
+                if snap:
+                    # Set gauges
+                    reset_at = snap.get("reset_at")
+                    reset_epoch = None
+                    if isinstance(reset_at, str):
+                        s = reset_at[:-1] + "+00:00" if reset_at.endswith("Z") else reset_at
+                        try:
+                            from datetime import datetime, timezone
+
+                            reset_epoch = datetime.fromisoformat(s).timestamp()
+                        except Exception:
+                            reset_epoch = None
+                    set_budget(limit=snap.get("limit"), remaining=snap.get("remaining"), reset_epoch=reset_epoch)
+            except Exception:
+                pass
+            inc_call("ok")
+            # Record metrics for streaming path prior to return
+            try:
+                started = float(self.data.get("_sc_started_at", 0.0) or 0.0)
+                if started > 0:
+                    sc_record_latency(_route_to_feature(route_type), time.monotonic() - started)
+                sc_record_call(_route_to_feature(route_type), "ok")
+            except Exception:
+                pass
+
             if route_type == "allm_passthrough_route":
                 # Check if response is an async generator
                 if self._is_streaming_response(response):
@@ -519,6 +785,38 @@ class ProxyBaseLLMRequestProcessing:
             getattr(response, "_hidden_params", {}) or {}
         )  # get any updated response headers
         additional_headers = hidden_params.get("additional_headers", {}) or {}
+
+        # Success metrics and headers
+        try:
+            snap = budget_snapshot()
+            if snap:
+                reset_at = snap.get("reset_at")
+                if reset_at:
+                    additional_headers["x-budget-reset-at"] = reset_at
+                additional_headers["x-ratelimit-remaining-requests"] = str(snap.get("remaining", ""))
+                # Set gauges
+                reset_epoch = None
+                if isinstance(reset_at, str):
+                    s = reset_at[:-1] + "+00:00" if reset_at.endswith("Z") else reset_at
+                    try:
+                        from datetime import datetime
+
+                        reset_epoch = datetime.fromisoformat(s).timestamp()
+                    except Exception:
+                        reset_epoch = None
+                set_budget(limit=snap.get("limit"), remaining=snap.get("remaining"), reset_epoch=reset_epoch)
+                sc_set_budget(_route_to_feature(route_type), limit=snap.get("limit"), remaining=snap.get("remaining"), reset_epoch=reset_epoch)
+        except Exception:
+            pass
+        # Record success
+        inc_call("ok")
+        try:
+            started = float(self.data.get("_sc_started_at", 0.0) or 0.0)
+            if started > 0:
+                sc_record_latency(_route_to_feature(route_type), time.monotonic() - started)
+            sc_record_call(_route_to_feature(route_type), "ok")
+        except Exception:
+            pass
 
         fastapi_response.headers.update(
             ProxyBaseLLMRequestProcessing.get_custom_headers(
@@ -630,6 +928,15 @@ class ProxyBaseLLMRequestProcessing:
             return True
         return False
 
+    @staticmethod
+    def _get_pre_call_type(
+        route_type: Literal["acompletion", "aresponses"],
+    ) -> Literal["completion", "responses"]:
+        if route_type == "acompletion":
+            return "completion"
+        elif route_type == "aresponses":
+            return "responses"
+
     async def _handle_llm_api_exception(
         self,
         e: Exception,
@@ -673,6 +980,46 @@ class ProxyBaseLLMRequestProcessing:
         headers = getattr(e, "headers", {}) or {}
         headers.update(custom_headers)
 
+        # Normalize rate limit into budget_exhausted where applicable
+        if isinstance(e, RateLimitError) or getattr(e, "status_code", None) == 429:
+            try:
+                cooldown = int(os.getenv("SCILLM_COOLDOWN_429_S", "120") or "120")
+            except Exception:
+                cooldown = 120
+            norm = normalize_ratelimit_to_budget(exc=e, default_cooldown_s=cooldown)
+            headers.update(norm.get("headers", {}))
+            # Metrics for 429
+            kind = "budget_exhausted" if norm.get("type") == "budget_exhausted" else "throttling"
+            inc_429(kind)
+            inc_call("429_budget" if kind == "budget_exhausted" else "429_other")
+            try:
+                # Fallback feature tag to 'text' on error paths
+                sc_record_call("text", "429")
+                started = float(self.data.get("_sc_started_at", 0.0) or 0.0)
+                if started > 0:
+                    sc_record_latency("text", time.monotonic() - started)
+            except Exception:
+                pass
+            # Add a brief hint into the message for humans (non-breaking)
+            try:
+                snap = budget_snapshot() or {}
+                rem = snap.get("remaining")
+                rst = snap.get("reset_at")
+                if rem is not None or rst:
+                    hint = f" (remaining={rem}, reset_at={rst})"
+                    norm_msg = str(norm.get("message", "Rate limit")) + hint
+                else:
+                    norm_msg = str(norm.get("message", "Rate limit"))
+            except Exception:
+                norm_msg = str(norm.get("message", "Rate limit"))
+            raise ProxyException(
+                message=norm_msg,
+                type=str(norm.get("type", getattr(e, "type", "throttling_error"))),
+                param=getattr(e, "param", None),
+                code=int(norm.get("code", getattr(e, "status_code", 429)) or 429),
+                headers=headers,
+            )
+
         if isinstance(e, HTTPException):
             raise ProxyException(
                 message=getattr(e, "detail", str(e)),
@@ -682,6 +1029,13 @@ class ProxyBaseLLMRequestProcessing:
                 headers=headers,
             )
         error_msg = f"{str(e)}"
+        try:
+            sc_record_call("text", "error")
+            started = float(self.data.get("_sc_started_at", 0.0) or 0.0)
+            if started > 0:
+                sc_record_latency("text", time.monotonic() - started)
+        except Exception:
+            pass
         raise ProxyException(
             message=getattr(e, "message", error_msg),
             type=getattr(e, "type", "None"),
@@ -691,14 +1045,18 @@ class ProxyBaseLLMRequestProcessing:
             headers=headers,
         )
 
-    @staticmethod
-    def _get_pre_call_type(
-        route_type: Literal["acompletion", "aresponses"],
-    ) -> Literal["completion", "responses"]:
-        if route_type == "acompletion":
-            return "completion"
-        elif route_type == "aresponses":
-            return "responses"
+
+def _route_to_feature(route_type: str) -> str:
+    mapping = {
+        "acompletion": "text",
+        "atext_completion": "text",
+        "aembedding": "embeddings",
+        "aimage_edit": "images",
+        "agenerate_content": "text",
+        "agenerate_content_stream": "text",
+        "allm_passthrough_route": "gateway",
+    }
+    return mapping.get(route_type, "gateway")
 
     #########################################################
     # Proxy Level Streaming Data Generator

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import datetime as _dt
 import random
 import time
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -9,6 +10,8 @@ from scillm import Router, completion
 from litellm.exceptions import APIConnectionError, APIError, RateLimitError, Timeout
 
 from .auto_router import auto_router_from_env
+from chutes.middleware.budget_guard import budget_register_attempt, budget_snapshot
+from chutes.middleware.metrics import tenacious_sleep, tenacious_retry
 
 try:  # pragma: no cover - optional telemetry
     from scillm.telemetry import metrics as sc_metrics  # type: ignore
@@ -29,6 +32,7 @@ _DEFAULT_TIMEOUT = 20.0
 _DEFAULT_TRANSIENT_RETRIES = 2
 _RETRYABLE_HTTP_STATUSES = {502, 503, 504}
 _RATE_LIMIT_HTTP_STATUSES = {409, 429}
+_PAYG_HTTP_STATUS = 402
 _MAX_TRANSIENT_BACKOFF_S = 3.0
 _BASE_BACKOFF_S = 0.25
 _PROVIDER_NAME = "chutes"
@@ -80,6 +84,29 @@ def _extract_retry_after_seconds(err: Exception) -> Optional[float]:
             if token.isdigit():
                 return float(token)
     return None
+
+
+def _extract_reset_after_seconds(err: Exception) -> Optional[float]:
+    """If the exception carries an x-budget-reset-at header, return seconds until that time.
+    Accepts ISO8601 with optional 'Z'.
+    """
+    try:
+        resp = getattr(err, "response", None)
+        headers = getattr(resp, "headers", None) or {}
+        reset_at = headers.get("x-budget-reset-at") or headers.get("X-Budget-Reset-At")
+        if not reset_at:
+            return None
+        s = str(reset_at).strip()
+        if s.endswith("Z"):
+            s = s[:-1] + "+00:00"
+        tgt = _dt.datetime.fromisoformat(s)
+        if tgt.tzinfo is None:
+            tgt = tgt.replace(tzinfo=_dt.timezone.utc)
+        now = _dt.datetime.now(tz=_dt.timezone.utc)
+        delta = (tgt - now).total_seconds()
+        return max(0.0, float(delta))
+    except Exception:
+        return None
 
 
 def _classify_transient(err: Exception) -> Tuple[Optional[str], Optional[float]]:
@@ -136,6 +163,10 @@ def _sleep_with_backoff(attempt: int, hint: Optional[float]) -> float:
         delay = min((_BASE_BACKOFF_S * (2 ** attempt)) + random.uniform(0.0, 0.25), _MAX_TRANSIENT_BACKOFF_S)
     time.sleep(delay)
     return delay
+
+
+def _env_true(name: str, default: str = "0") -> bool:
+    return (os.getenv(name, default) or "").strip().lower() in {"1", "true", "yes", "y"}
 
 
 def _attach_metadata(resp: Any, *, model: str, attempts: int, tenacious: bool = False) -> None:
@@ -195,6 +226,9 @@ def _message_has_substantive_content(payload: Any) -> bool:
                 return True
         return False
     return False
+
+def _env_confirm_payg() -> bool:
+    return (os.getenv("SCILLM_CONFIRM_PAYG", "0") or "").strip().lower() in {"1", "true", "yes"}
 
 
 def _request_has_meaningful_prompt(messages: List[Dict[str, Any]]) -> bool:
@@ -276,6 +310,11 @@ def _with_transient_retries(
             if not should_retry:
                 raise
             _record_retry(reason)
+            try:
+                if reason:
+                    tenacious_retry(reason)
+            except Exception:
+                pass
             _sleep_with_backoff(attempt, hint)
             attempt += 1
 
@@ -315,6 +354,27 @@ def chutes_chat_json(
                 pass
 
         def _call() -> Any:
+            # Optional local budget enforcement
+            if os.getenv("SCILLM_BUDGET_ENFORCE_LOCAL", "0").lower() in {"1","true","yes","y"}:
+                try:
+                    snap = budget_snapshot() or {}
+                    if int(snap.get("remaining", 1)) <= 0:
+                        # Provide a RateLimitError consistent with proxy behavior
+                        err = RateLimitError(
+                            message="local budget exhausted",
+                            llm_provider="openai_like",
+                            model=model,
+                        )
+                        # Attach reset hint when known
+                        try:
+                            rst = snap.get("reset_at")
+                            if rst:
+                                setattr(err, "response", type("_R", (), {"headers": {"x-budget-reset-at": rst}})())
+                        except Exception:
+                            pass
+                        raise err
+                except Exception:
+                    pass
             return completion(
                 model=model,
                 api_base=base,
@@ -343,6 +403,7 @@ def chutes_chat_json(
     attempt = 0
     total_sleep_s = 0.0
     last_retry_after_s: Optional[float] = None
+    confirm_payg_used = False
     while True:
         attempt += 1
         try:
@@ -351,6 +412,11 @@ def chutes_chat_json(
                     total_sleep_s += sc_pacing.wait_if_needed()
                 except Exception:  # pragma: no cover
                     pass
+            # Register attempt for budget tracking
+            try:
+                snap = budget_register_attempt()
+            except Exception:
+                snap = None
             resp = completion(
                 model=model,
                 api_base=base,
@@ -363,6 +429,7 @@ def chutes_chat_json(
                 temperature=temperature,
                 timeout=timeout,
                 max_retries=0,
+                **({"confirm_payg": True} if confirm_payg_used else {}),
             )
             _ensure_nonempty_response(resp, request_messages=messages, model=model, attempts=attempt)
             _attach_metadata(resp, model=model, attempts=attempt, tenacious=True)
@@ -372,6 +439,7 @@ def chutes_chat_json(
                     "tenacious_attempts": attempt,
                     "tenacious_total_sleep_s": total_sleep_s,
                     "tenacious_last_retry_after_s": last_retry_after_s,
+                    "budget": budget_snapshot() or {},
                 })
                 setattr(resp, "scillm_meta", meta)
             except Exception:  # pragma: no cover
@@ -380,6 +448,45 @@ def chutes_chat_json(
             return resp
         except Exception as exc:
             reason, hint = _classify_transient(exc)
+            # Handle one-shot PAYG confirmation retry if enabled
+            is_payg, _ = _is_payg_confirmation(exc)
+            if is_payg and not confirm_payg_used and _env_confirm_payg():
+                confirm_payg_used = True
+                # Retry immediately without advancing attempt (treat as same try)
+                try:
+                    resp = completion(
+                        model=model,
+                        api_base=base,
+                        api_key=None,
+                        custom_llm_provider="openai_like",
+                        extra_headers=headers,
+                        messages=messages,
+                        response_format={"type": "json_object"},
+                        max_tokens=max_tokens,
+                        temperature=temperature,
+                        timeout=timeout,
+                        max_retries=0,
+                        confirm_payg=True,
+                    )
+                    _ensure_nonempty_response(resp, request_messages=messages, model=model, attempts=attempt)
+                    _attach_metadata(resp, model=model, attempts=attempt, tenacious=True)
+                    try:
+                        meta = dict(getattr(resp, "scillm_meta", {}) or {})
+                        meta.update({
+                            "tenacious_attempts": attempt,
+                            "tenacious_total_sleep_s": total_sleep_s,
+                            "tenacious_last_retry_after_s": last_retry_after_s,
+                            "budget": budget_snapshot() or {},
+                            "payg_confirmed": True,
+                        })
+                        setattr(resp, "scillm_meta", meta)
+                    except Exception:
+                        pass
+                    _record_success("direct", "text", attempt, start)
+                    return resp
+                except Exception:
+                    # Fall through to normal retry logic
+                    pass
             if not reason:
                 raise type(exc)(f"{exc} (not retried: auth/mapping/schema)") from exc
             _record_retry(reason)
@@ -388,6 +495,22 @@ def chutes_chat_json(
                     sc_pacing.note_429_capacity()
                 except Exception:  # pragma: no cover
                     pass
+            # Auto-wait until reset if enabled and header present
+            if reason == "429_capacity" and _env_true("SCILLM_TENACIOUS_UNTIL_RESET", "0"):
+                wait_reset = _extract_reset_after_seconds(exc)
+                if wait_reset is not None and wait_reset > 0:
+                    remaining_wall = max(0.0, max_wall_time_s - (time.time() - start))
+                    delay = min(wait_reset, remaining_wall)
+                    try:
+                        tenacious_sleep(delay)
+                    except Exception:
+                        pass
+                    time.sleep(delay)
+                    last_retry_after_s = delay
+                    total_sleep_s += delay
+                    if time.time() - start > max_wall_time_s:
+                        raise Timeout("tenacious wall time exceeded while waiting for reset") from exc
+                    continue
             last_retry_after_s = hint
             delay = _tenacious_sleep(attempt, hint, base=backoff_base, cap_s=backoff_cap_s)
             total_sleep_s += delay
@@ -459,6 +582,30 @@ def chutes_router_json(
                                 total_sleep_s += sc_pacing.wait_if_needed()
                             except Exception:  # pragma: no cover
                                 pass
+                        # Register attempt for budget tracking
+                        try:
+                            snap = budget_register_attempt()
+                        except Exception:
+                            snap = None
+                        # Optional local budget enforcement
+                        if os.getenv("SCILLM_BUDGET_ENFORCE_LOCAL", "0").lower() in {"1","true","yes","y"}:
+                            try:
+                                snap = budget_snapshot() or {}
+                                if int(snap.get("remaining", 1)) <= 0:
+                                    err = RateLimitError(
+                                        message="local budget exhausted",
+                                        llm_provider="openai_like",
+                                        model=env_primary or group,
+                                    )
+                                    try:
+                                        rst = snap.get("reset_at")
+                                        if rst:
+                                            setattr(err, "response", type("_R", (), {"headers": {"x-budget-reset-at": rst}})())
+                                    except Exception:
+                                        pass
+                                    raise err
+                            except Exception:
+                                pass
                         resp = router.completion(
                             model=group,
                             messages=messages,
@@ -474,6 +621,7 @@ def chutes_router_json(
                             "tenacious_attempts": attempt,
                             "tenacious_total_sleep_s": total_sleep_s,
                             "tenacious_last_retry_after_s": last_retry_after_s,
+                            "budget": budget_snapshot() or {},
                         })
                         setattr(resp, "scillm_meta", meta)
                         _record_success("router", "vlm" if kind == "vlm" else "text", attempt, start)
@@ -484,11 +632,32 @@ def chutes_router_json(
                         if not reason:
                             raise
                         _record_retry(reason)
+                        try:
+                            if reason:
+                                tenacious_retry(reason)
+                        except Exception:
+                            pass
                         if reason == "429_capacity" and sc_pacing is not None:
                             try:
                                 sc_pacing.note_429_capacity()
                             except Exception:  # pragma: no cover
                                 pass
+                        # Auto-wait until reset if enabled and header present
+                        if reason == "429_capacity" and _env_true("SCILLM_TENACIOUS_UNTIL_RESET", "0"):
+                            wait_reset = _extract_reset_after_seconds(exc)
+                            if wait_reset is not None and wait_reset > 0:
+                                remaining_wall = max(0.0, max_wall_time_s - (time.time() - start))
+                                delay = min(wait_reset, remaining_wall)
+                                try:
+                                    tenacious_sleep(delay)
+                                except Exception:
+                                    pass
+                                time.sleep(delay)
+                                last_retry_after_s = delay
+                                total_sleep_s += delay
+                                if time.time() - start > max_wall_time_s:
+                                    raise Timeout("tenacious wall time exceeded while waiting for reset") from exc
+                                continue
                         last_retry_after_s = hint
                         delay = _tenacious_sleep(attempt, hint, base=backoff_base, cap_s=backoff_cap_s)
                         total_sleep_s += delay
@@ -559,3 +728,12 @@ def chutes_healthcheck(
         return {"ok": True, "served_model": served}
     except Exception as exc:
         return {"ok": False, "served_model": None, "reason": str(exc)}
+def _is_payg_confirmation(err: Exception) -> Tuple[bool, Optional[float]]:
+    status = _extract_status_code(err)
+    if status == _PAYG_HTTP_STATUS:
+        # optional headers may include x-budget-reset-at but not a numeric retry-after
+        return True, _extract_retry_after_seconds(err)
+    txt = (str(err) or "").lower()
+    if "payg" in txt and "confirmation" in txt:
+        return True, _extract_retry_after_seconds(err)
+    return False, None
