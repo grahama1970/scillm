@@ -1,8 +1,8 @@
 <p align="center">
-  <!-- Use outlined balanced logo for pixel-consistent rendering across systems -->
-  <img src="local/artifacts/logo/SciLLM_balanced_outlined.svg" alt="SciLLM" width="140" />
+ <!-- Use exported assets that exist in local/artifacts/logo/ -->
+ <img src="local/artifacts/logo/SciLLM_balanced.svg" alt="SciLLM" width="140" />
   <br/>
-  <img src="local/artifacts/logo/SciLLM_icon.svg" alt="SciLLM Icon" width="44" />
+ <img src="local/artifacts/logo/SciLLM_mark.light.svg" alt="SciLLM Icon" width="44" />
   <br/>
   <em>Balanced wordmark (default) + icon (logo‑only). The favicon (.ico) should use the icon only, no text.</em>
  </p>
@@ -324,15 +324,15 @@ Future backends (e.g., Coq) will plug into the same surface, but are out of scop
 <details>
   <summary>Logo variants</summary>
   <p>
-    <img src="local/artifacts/logo/SciLLM_balanced_outlined.svg" alt="SciLLM Balanced (default, outlined)" height="36" />
+    <img src="local/artifacts/logo/SciLLM_balanced.svg" alt="SciLLM Balanced" height="36" />
     &nbsp;&nbsp;
-    <img src="SciLLM_friendly.svg" alt="SciLLM Friendly" height="36" />
+    <img src="local/artifacts/logo/SciLLM_balanced.light.svg" alt="SciLLM Balanced (light)" height="36" />
     &nbsp;&nbsp;
-    <img src="local/artifacts/logo/SciLLM_icon.svg" alt="SciLLM Icon" height="36" />
+    <img src="local/artifacts/logo/SciLLM_mark.light.svg" alt="SciLLM Icon (light)" height="36" />
     &nbsp;&nbsp;
-    <img src="local/artifacts/logo/SciLLM_balanced_dark.svg" alt="SciLLM Balanced Dark" height="36" />
+    <img src="local/artifacts/logo/SciLLM_balanced.dark.svg" alt="SciLLM Balanced (dark)" height="36" />
     &nbsp;&nbsp;
-    <img src="local/artifacts/logo/SciLLM_balanced_mono.svg" alt="SciLLM Balanced Mono" height="36" />
+    <img src="local/artifacts/logo/SciLLM_mark.dark.svg" alt="SciLLM Icon (dark)" height="36" />
   </p>
   <p>Use <code>make logo-export</code> to produce outlined SVGs and favicons in <code>local/artifacts/logo/</code>. The generated <code>favicon.ico</code> uses the icon only (no text).</p>
 </details>
@@ -413,6 +413,31 @@ This repository has been renamed to **scillm** and branded as **SciLLM — a sci
 - [Consistent output](https://docs.litellm.ai/docs/completion/output), text responses will always be available at `['choices'][0]['message']['content']`
 - Retry/fallback logic across multiple deployments (e.g. Azure/OpenAI) - [Router](https://docs.litellm.ai/docs/routing)
 - Set Budgets & Rate limits per project, api key, model [LiteLLM Proxy Server (LLM Gateway)](https://docs.litellm.ai/docs/simple_proxy)
+
+## Budget & Cost Visibility (Chutes/OpenAI‑compatible)
+
+- Consistent headers on success and errors:
+  - `x-ratelimit-limit`, `x-ratelimit-remaining-requests`, `x-budget-reset-at`.
+  - PAYG extras when enabled: `x-payg-active`, `x-spend-usd-today`.
+- Error normalization when daily calls are exhausted:
+  - HTTP 429 with `{ "type": "budget_exhausted", "retry_at": <iso8601>, "remaining": 0 }`.
+- Lightweight endpoint for dashboards/ops:
+  - `GET /v1/budget` → `{ limit, remaining, reset_at, price_per_call_usd }`.
+- Optional guards and behaviors (env):
+  - `CHUTES_PREFLIGHT=1` to probe usage at startup; fallback limit via `CHUTES_DAILY_LIMIT=5000`.
+  - `SCILLM_TENACIOUS=1` and `SCILLM_TENACIOUS_UNTIL_RESET=1` to auto‑wait until `reset_at`.
+  - `SCILLM_DO_NOT_CHARGE=1` to hard‑stop at 429 even if PAYG is available.
+
+Quick check (proxy at :4010):
+```bash
+curl -s http://127.0.0.1:4010/v1/budget | jq
+```
+
+Metrics + dashboards (Prometheus + Grafana):
+- Start Prometheus: `make prom-run-docker` (scrapes proxy `/metrics`).
+- Start proxy: `make proxy-run-uv` (uses `local/proxy_server_config.yaml`).
+- Import dashboards: `GRAFANA_URL=http://127.0.0.1:3000 GRAFANA_TOKEN=$GRAFANA_SCILLM_SERVICE_TOKEN make grafana-import`.
+  - Alternatively, enable anonymous view in local provisioning (already configured in `local/grafana/provisioning/`).
 
 [**Jump to LiteLLM Proxy (LLM Gateway) Docs**](https://github.com/BerriAI/litellm?tab=readme-ov-file#openai-proxy---docs) <br>
 [**Jump to Supported LLM Providers**](https://github.com/BerriAI/litellm?tab=readme-ov-file#supported-providers-docs)

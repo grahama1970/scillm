@@ -176,6 +176,21 @@ Retry metadata example (when `SCILLM_RETRY_META=1`):
 }
 ```
 
+## Budget, PAYG Guard, Pricing, and Metrics (Chutes)
+
+| Area | Feature | What It Does | How To Enable | Files/Notes |
+|---|---|---|---|---|
+| Budget | Headers on all paths | Adds `x-ratelimit-limit`, `x-ratelimit-remaining-requests`, `x-budget-reset-at` | Default when proxy handles request | litellm/proxy/common_request_processing.py; chutes/middleware/budget_guard.py |
+| Budget | 429 normalization | When exhausted: 429 with `{type:"budget_exhausted", retry_at, remaining:0}` | Default | Same |
+| PAYG | Strict stop | Hard‑stop overage even if PAYG available | `SCILLM_DO_NOT_CHARGE=1` | budget_guard.py |
+| PAYG | Confirmation gate | 402 `payg_confirmation_required` until `confirm_payg=true` seen | Default off; enable per run | common_request_processing.py |
+| Pricing | Static map | Injects `additional_kwargs.scillm.pricing` and headers; increments `sc_cost_usd_total` | `CHUTES_PRICING_FILE` or `CHUTES_PRICING_JSON` | chutes/middleware/pricing.py |
+| Tenacious | Sleep until reset | If exhausted, waits until `reset_at` then retries | `SCILLM_TENACIOUS=1 SCILLM_TENACIOUS_UNTIL_RESET=1` | scillm/extras/chutes_simple.py |
+| Observability | Prometheus | `/metrics` with `sc_calls_total`, `sc_request_seconds`, `sc_cost_usd_total`, plus vendor gauges | Proxy mounts by default | scillm/telemetry/metrics.py |
+| Dashboards | Grafana | Prebuilt Overview and Chutes boards | `make grafana-import` (use SAT) | dashboards/*.json; local/grafana/provisioning/* |
+
+Budget endpoint (for dashboards/ops): `GET /v1/budget → {limit, remaining, reset_at, price_per_call_usd}`.
+
 ## CodeWorld — Strategies & MCTS (Opt‑In)
 
 | Area | Feature | What It Does | How To Use | Files/Notes |

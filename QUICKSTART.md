@@ -1,8 +1,8 @@
 <p align="center">
-  <!-- Use outlined balanced logo for pixel-consistent rendering across systems -->
-  <img src="local/artifacts/logo/SciLLM_balanced_outlined.svg" alt="SciLLM" width="100" />
+  <!-- Use existing exported assets -->
+  <img src="local/artifacts/logo/SciLLM_balanced.svg" alt="SciLLM" width="100" />
   <br/>
-  <img src="SciLLM_icon.svg" alt="SciLLM Icon" width="32" />
+  <img src="local/artifacts/logo/SciLLM_mark.light.svg" alt="SciLLM Icon" width="32" />
 </p>
 
 # SciLLM Multi‑Surface Quickstart
@@ -46,6 +46,31 @@ out = chutes_router_json(
     tenacious=False,
 )
 print(out.choices[0].message.get("content"))
+```
+
+### Budget & Metrics quick path
+
+- Budget status endpoint (via proxy):
+```bash
+curl -s http://127.0.0.1:4010/v1/budget | jq
+```
+- Start Prometheus and the proxy locally:
+```bash
+make prom-run-docker
+LITELLM_MASTER_KEY=sk-dev-proxy-123 METRICS_ENV=dev make proxy-run-uv
+```
+- Import Grafana dashboards (use a Service Account token):
+```bash
+GRAFANA_URL=http://127.0.0.1:3000 \
+GRAFANA_TOKEN=$GRAFANA_SCILLM_SERVICE_TOKEN \
+make grafana-import
+```
+- Generate one request to light up metrics:
+```bash
+curl -s -H 'Authorization: Bearer sk-dev-proxy-123' \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"gpt-chutes","messages":[{"role":"user","content":"ping"}]}' \
+  http://127.0.0.1:4010/v1/chat/completions | jq
 ```
 
 - Sanity probes
