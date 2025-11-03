@@ -66,6 +66,14 @@
 **Why It Fits Scientists & Engineers**
 - Measurable (bring your metric), reproducible (seeds + manifests), governed (clear budget signals + optional hard stop), and observable (standard /metrics + working Grafana board).
 
+**Which Agent Should I Use?**
+- `codex-agent` — single‑repo "write code → run checks → iterate to green." Best for adding a feature, fixing tests, or hardening a build. Keeps diffs small and respects your repo style. See Quickstart: Auto Code → Review → Green.
+- `codeworld` — orchestrates multi‑step, multi‑repo scenarios (e.g., strategy search/MCTS, long pipelines, auto‑release). Use when you need a scenario harness and artifacts across tools.
+
+Minimal pick‑and‑go
+- If your goal is "make this repo pass its gate": start with `codex-agent`.
+- If your goal is "run a multi‑step experiment and compare strategies": use `codeworld`.
+
 **Choose Your Path**
 - Budget + dashboards (recommended for batches) → Budget Gateway Lite
 - Minimal friction (first run) → Direct to provider
@@ -147,6 +155,7 @@ Doctor (one-shot): `make codex-agent-doctor`
 |-------|------|
 | Feature matrix & patterns | [FEATURES.md](FEATURES.md) |
 | Multi‑Surface Quickstart | [QUICKSTART.md](QUICKSTART.md) |
+| Auto Code → Review → Green (codex‑agent) | [QUICKSTART.md](QUICKSTART.md#scenario-auto-code-→-review-→-green-codex-agent) |
 | Lean4 / Certainly specifics | `scenarios/lean4_*`, `scenarios/certainly_*` |
 | Parallel fan‑out example | `feature_recipes/parallel_acompletions.py` |
 | MCTS & autogen | `scenarios/mcts_codeworld_demo.py` |

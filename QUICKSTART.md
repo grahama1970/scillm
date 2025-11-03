@@ -943,6 +943,61 @@ uv run scripts/viewers/make_synthetic_graph.py prototypes/lemma-graph-viewer/pub
 Security note: Disable codex sidecar echo (remove `CODEX_SIDECAR_ECHO=1`) before supplying real credentials.
 
 ---
+
+## Scenario: Auto Code → Review → Green (codex‑agent)
+
+Use this when the goal is “make the code run” in a single repository: generate code, run your gate (tests/build), optionally request a review, and iterate until green.
+
+Why codex‑agent (vs. CodeWorld)
+- codex‑agent keeps the loop repo‑local with small diffs and a single success criterion.
+- CodeWorld is for multi‑step scenario orchestration across tools/repos; use it when you need MCTS/strategy search or auto‑release pipelines.
+
+Prerequisites
+- A “green gate” shell command that proves success:
+  - Examples: `pytest -q`, `npm test`, or `make build && ./bin/app --help`.
+- A clean working tree on a feature branch.
+- `CODEX_AGENT_API_BASE` (no `/v1`) and a valid model id from `$CODEX_AGENT_API_BASE/v1/models`.
+
+Option A — Human‑guided loop (robust, no extra tooling)
+```bash
+# 0) Define your gate
+GATE="pytest -q"    # replace with your real gate
+
+# 1) Run the gate; capture failure
+$GATE > /tmp/gate.log 2>&1 || true
+
+# 2) Ask codex‑agent for a minimal unified diff that fixes the failure
+MODEL_ID=$(curl -sS "$CODEX_AGENT_API_BASE/v1/models" | jq -r '.data[0].id')
+PROMPT=$(cat <<'EOF'
+You are an engineer. Read the failing gate log and propose a minimal unified diff
+that fixes the failure. Keep diffs surgical and in‑style. No commentary, only a unified diff.
+EOF
+)
+
+curl -sS "$CODEX_AGENT_API_BASE/v1/chat/completions" \
+  -H 'Content-Type: application/json' \
+  -d "{\"model\":\"$MODEL_ID\",\"messages\":[{\"role\":\"user\",\"content\":\"$PROMPT\n\n==== gate.log ====\n$(sed 's/\\/\\\\/g' /tmp/gate.log)\"}]}" \
+  | jq -r '.choices[0].message.content' > /tmp/patch.diff
+
+# 3) Review & apply the patch; re‑run the gate
+git apply --index /tmp/patch.diff && git commit -m "agent: minimal fix" || true
+$GATE && echo "GREEN" || echo "Still failing; repeat"
+```
+
+Notes
+- Works everywhere; you stay in control of diffs and commits.
+- Replace `pytest -q` with your real gate. Iterate until green.
+
+Option B — Automated loop (experimental)
+- If you already run the local mini‑agent/sidecar and have wired it to apply patches and execute a shell gate, you can automate the loop.
+- Stop conditions: exit code 0 from the gate, or max iterations/wall time.
+- Guardrails: small patch radius, ≤5 iterations, ≤45‑minute wall time.
+- See provider doc: `docs/my-website/docs/providers/codex_agent.md`.
+
+When to switch to CodeWorld
+- You need multi‑step orchestration (e.g., generate N variants, evaluate, select best, publish artifact). See `scenarios/mcts_codeworld_demo.py`.
+
+---
 End of Multi‑Surface Quickstart.
 
 
