@@ -15,7 +15,10 @@
         "query": "prometheus",
         "label": "Prometheus",
         "hide": 0,
-        "current": { "text": "Prometheus2", "value": "SCILLM_PROM" }
+        "current": {
+          "text": "SCILLM_PROM",
+          "value": "SCILLM_PROM"
+        }
       },
       {
         "name": "env",
@@ -25,7 +28,6 @@
         "includeAll": true,
         "refresh": 1
       },
-      
       {
         "name": "window",
         "type": "custom",
@@ -38,37 +40,44 @@
     ]
   },
   "panels": [
-  {
-    "type": "stat",
-    "title": "Requests OK (QPS)",
-    "datasource": "${DS_PROMETHEUS}",
+    {
+      "type": "stat",
+      "title": "Requests OK (QPS)",
+      "datasource": "${DS_PROMETHEUS}",
       "targets": [
         {
           "expr": "sum by (env) (rate(sc_calls_total{result=\"ok\", env=~\"$env\"}[$window]))"
         }
       ]
-  },
-  {
-    "type": "timeseries",
-    "title": "Cost by Provider/Model (USD, 24h)",
-    "datasource": "${DS_PROMETHEUS}",
-    "gridPos": {"h": 8, "w": 12, "x": 12, "y": 0},
-    "targets": [
-      {
-        "expr": "sum by (vendor,model) (increase(sc_cost_usd_total{env=~\"$env\"}[24h]))",
-        "legendFormat": "{{vendor}} · {{model}}",
-        "refId": "A"
-      }
-    ]
-  },
-  {
-    "type": "stat",
-    "title": "Daily Cost (USD, 24h)",
-    "datasource": "${DS_PROMETHEUS}",
-    "targets": [
-      { "expr": "sum(increase(sc_cost_usd_total{env=~\"$env\"}[24h]))" }
-    ]
-  },
+    },
+    {
+      "type": "timeseries",
+      "title": "Cost by Provider/Model (USD, 24h)",
+      "datasource": "${DS_PROMETHEUS}",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 0
+      },
+      "targets": [
+        {
+          "expr": "sum by (vendor,model) (increase(sc_cost_usd_total{env=~\"$env\"}[24h]))",
+          "legendFormat": "{{vendor}} \u00b7 {{model}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "Daily Cost (USD, 24h)",
+      "datasource": "${DS_PROMETHEUS}",
+      "targets": [
+        {
+          "expr": "sum(increase(sc_cost_usd_total{env=~\"$env\"}[24h]))"
+        }
+      ]
+    },
     {
       "type": "stat",
       "title": "Error Rate (%)",
@@ -94,31 +103,23 @@
       "title": "In-Flight Requests",
       "datasource": "${DS_PROMETHEUS}",
       "targets": [
-        { "expr": "sum(sc_calls_in_flight{env=~\"$env\"})" }
+        {
+          "expr": "sum(sc_calls_in_flight{env=~\"$env\"}) or vector(0)"
+        }
       ]
     },
-    
     {
       "type": "row",
       "title": "Router & Streaming"
     },
     {
       "type": "timeseries",
-      "title": "Router Failovers (rate)",
+      "title": "Router Failovers by Reason (rate)",
       "datasource": "${DS_PROMETHEUS}",
       "targets": [
         {
-          "expr": "sum(rate(sc_router_failover_total{env=~\"$env\"}[$window]))"
-        }
-      ]
-    },
-    {
-      "type": "timeseries",
-      "title": "Stream Chunks (rate)",
-      "datasource": "${DS_PROMETHEUS}",
-      "targets": [
-        {
-          "expr": "sum(rate(sc_stream_chunks_total{env=~\"$env\"}[$window]))"
+          "expr": "sum by (reason) (rate(sc_router_failover_total{env=~\"$env\"}[$window]))",
+          "legendFormat": "{{reason}}"
         }
       ]
     },
@@ -172,16 +173,14 @@
       "datasource": "${DS_PROMETHEUS}",
       "targets": [
         {
-          "expr": "sum by (env) (rate(sc_calls_total{result=\"429\", env=~\"$env\"}[$window]))"
+          "expr": "sum by (env) (rate(sc_calls_total{result=\"429\", env=~\"$env\"}[$window]))",
+          "legendFormat": "core 429"
         },
         {
-          "expr": "sum by (kind) (rate(chutes_429_total{env=~\"$env\"}[$window]))"
+          "expr": "sum by (kind) (rate(chutes_429_total{env=~\"$env\"}[$window]))",
+          "legendFormat": "chutes {{kind}}"
         }
       ]
-    },
-    {
-      "type": "row",
-      "title": "Tenacious"
     },
     {
       "type": "timeseries",
@@ -190,16 +189,6 @@
       "targets": [
         {
           "expr": "sum by (reason) (rate(sc_retries_total{env=~\"$env\"}[$window]))"
-        }
-      ]
-    },
-    {
-      "type": "timeseries",
-      "title": "Sleep Seconds (rate)",
-      "datasource": "${DS_PROMETHEUS}",
-      "targets": [
-        {
-          "expr": "rate(sc_tenacious_sleep_seconds_total{env=~\"$env\"}[$window])"
         }
       ]
     }

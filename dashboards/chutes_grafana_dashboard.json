@@ -6,7 +6,9 @@
       "title": "Remaining Calls",
       "datasource": "${DS_PROMETHEUS}",
       "targets": [
-        {"expr": "chutes_budget_remaining{env=~\"$env\"}"}
+        {
+          "expr": "chutes_budget_remaining{env=~\"$env\"}"
+        }
       ]
     },
     {
@@ -14,7 +16,9 @@
       "title": "Daily Limit",
       "datasource": "${DS_PROMETHEUS}",
       "targets": [
-        {"expr": "chutes_budget_limit{env=~\"$env\"}"}
+        {
+          "expr": "chutes_budget_limit{env=~\"$env\"}"
+        }
       ]
     },
     {
@@ -22,7 +26,9 @@
       "title": "Time To Reset (min)",
       "datasource": "${DS_PROMETHEUS}",
       "targets": [
-        {"expr": "(chutes_reset_timestamp_seconds{env=~\"$env\"} - time()) / 60"}
+        {
+          "expr": "(chutes_reset_timestamp_seconds{env=~\"$env\"} - time()) / 60"
+        }
       ]
     },
     {
@@ -30,7 +36,9 @@
       "title": "429s by Kind (rate)",
       "datasource": "${DS_PROMETHEUS}",
       "targets": [
-        {"expr": "sum by (kind) (rate(chutes_429_total{env=~\"$env\"}[5m]))"}
+        {
+          "expr": "sum by (kind) (rate(chutes_429_total{env=~\"$env\"}[$window]))"
+        }
       ]
     },
     {
@@ -38,7 +46,9 @@
       "title": "Calls OK (rate)",
       "datasource": "${DS_PROMETHEUS}",
       "targets": [
-        {"expr": "sum(rate(chutes_calls_total{result=\"ok\",env=~\"$env\"}[5m]))"}
+        {
+          "expr": "sum(rate(chutes_calls_total{result=\"ok\",env=~\"$env\"}[$window]))"
+        }
       ]
     },
     {
@@ -46,7 +56,9 @@
       "title": "Tenacious Sleep Seconds (rate)",
       "datasource": "${DS_PROMETHEUS}",
       "targets": [
-        {"expr": "rate(sc_tenacious_sleep_seconds_total{env=~\"$env\"}[5m])"}
+        {
+          "expr": "rate(sc_tenacious_sleep_seconds_total{env=~\"$env\"}[$window])"
+        }
       ]
     }
   ],
@@ -62,7 +74,11 @@
         "type": "datasource",
         "query": "prometheus",
         "label": "Prometheus",
-        "hide": 0
+        "hide": 0,
+        "current": {
+          "text": "SCILLM_PROM",
+          "value": "SCILLM_PROM"
+        }
       },
       {
         "name": "env",
@@ -71,9 +87,18 @@
         "query": "label_values(chutes_calls_total, env)",
         "includeAll": true,
         "refresh": 1
+      },
+      {
+        "name": "window",
+        "type": "custom",
+        "query": "5m,15m,1h",
+        "current": {
+          "text": "5m",
+          "value": "5m"
+        }
       }
     ]
   },
-  "schemaVersion": 38,
-  "version": 1
+  "schemaVersion": 39,
+  "version": 2
 }
