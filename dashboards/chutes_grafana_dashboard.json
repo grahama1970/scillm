@@ -59,7 +59,7 @@
       "datasource": "${DS_PROMETHEUS}",
       "targets": [
         {
-          "expr": "sum(rate(chutes_calls_total{result=\"ok\",env=~\"$env\"}[$window]))"
+          "expr": "sum(rate(chutes_calls_total{result=\"ok\",env=~\"$env\"}[$window])) or vector(0)"
         }
       ],
       "fieldConfig": {

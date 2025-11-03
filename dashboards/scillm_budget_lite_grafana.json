@@ -133,7 +133,13 @@
           "expr": "sum(sc_budget_remaining{env=~\"$env\"})",
           "legendFormat": "remaining"
         }
-      ]
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      }
     },
     {
       "type": "timeseries",

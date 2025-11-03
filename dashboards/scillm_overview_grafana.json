@@ -48,7 +48,13 @@
         {
           "expr": "sum by (env) (rate(sc_calls_total{result=\"ok\", env=~\"$env\"}[$window]))"
         }
-      ]
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops"
+        },
+        "overrides": []
+      }
     },
     {
       "type": "timeseries",
@@ -69,7 +75,8 @@
       ],
       "fieldConfig": {
         "defaults": {
-          "unit": "currencyUSD"
+          "unit": "currencyUSD",
+          "decimals": 2
         },
         "overrides": []
       }
@@ -85,7 +92,8 @@
       ],
       "fieldConfig": {
         "defaults": {
-          "unit": "currencyUSD"
+          "unit": "currencyUSD",
+          "decimals": 2
         },
         "overrides": []
       }
