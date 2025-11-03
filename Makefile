@@ -85,6 +85,20 @@ demo-pricing:
 smoke-demo-pricing:
 	@python3 scripts/smoke_demo_pricing.py
 
+# One JSON chat via proxy and assert budget headers present
+smoke-chat-headers:
+	@python3 scripts/smoke_chat_headers.py
+
+# GET /v1/budget and validate minimal contract
+smoke-budget:
+	@python3 scripts/smoke_budget_endpoint.py
+
+# Run all local smokes that do not require external provider secrets.
+smokes:
+	@$(MAKE) --no-print-directory smoke-chat-headers
+	@$(MAKE) --no-print-directory smoke-budget
+	@$(MAKE) --no-print-directory smoke-demo-pricing
+
 prom-run-docker:
 	@printf '%s\n' \
 	  'global:' \
