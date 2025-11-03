@@ -176,6 +176,13 @@ Doctor (one-shot): `make codex-agent-doctor`
 | Retry guide | `docs/guide/RATE_LIMIT_RETRIES.md` |
 | Batch helpers | `docs/guide/batch_helpers.md` |
 
+## Verification (2 commands)
+- Start proxy with demo pricing so cost metrics move:
+  - `make proxy-run-uv-demo-pricing`
+- Run local smokes (headers, /v1/budget, demo pricing):
+  - `make smokes`
+  - Expect: ok:true for each JSON report; `sc_cost_usd_total` delta > 0 in demo pricing.
+
 ## Security & Isolation (Central Reference)
 | Area | Guidance |
 |------|----------|
