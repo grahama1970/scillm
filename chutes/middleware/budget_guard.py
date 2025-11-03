@@ -255,7 +255,14 @@ def normalize_ratelimit_to_budget(
         }
 
 
-__all__ = ["preflight_usage", "normalize_ratelimit_to_budget"]
+__all__ = [
+    "preflight_usage",
+    "normalize_ratelimit_to_budget",
+    "budget_register_attempt",
+    "budget_snapshot",
+    "payg_snapshot",
+    "budget_metadata",
+]
 
 
 def budget_register_attempt() -> Optional[Dict[str, Any]]:
@@ -304,4 +311,39 @@ def payg_snapshot(ttl_s: int = 60) -> Optional[Dict[str, Any]]:
         "remaining": remaining,
         "cost_usd_today": (pf.get("cost_usd_today") if isinstance(pf.get("cost_usd_today"), (int, float)) else None),
         "reset_at": reset_at,
+    }
+
+
+def budget_metadata() -> Dict[str, Any]:
+    """Return a standardized budget metadata block for response bodies.
+
+    Fields:
+      - plan: str (from CHUTES_PLAN or "unknown")
+      - daily_limit: int
+      - used_today: int
+      - remaining: int
+      - reset_at: ISO8601 string
+      - credits_balance: float|null (from CHUTES_CREDITS_BALANCE if provided)
+    """
+    # Prefer PAYG snapshot (includes used + optional spend), fallback to local snapshot
+    snap = payg_snapshot(ttl_s=30) or budget_snapshot() or {}
+    limit = int(snap.get("limit") or _get_daily_limit())
+    remaining = int(snap.get("remaining") or max(0, limit - int(snap.get("used", 0))))
+    used_today = max(0, limit - remaining)
+    reset_at = snap.get("reset_at") or _next_reset_at_iso_utc()
+    plan = os.getenv("CHUTES_PLAN", "unknown").strip() or "unknown"
+    credits_balance: Optional[float] = None
+    try:
+        cb = os.getenv("CHUTES_CREDITS_BALANCE", "").strip()
+        if cb:
+            credits_balance = float(cb)
+    except Exception:
+        credits_balance = None
+    return {
+        "plan": plan,
+        "daily_limit": int(limit),
+        "used_today": int(used_today),
+        "remaining": int(remaining),
+        "reset_at": str(reset_at),
+        "credits_balance": credits_balance,
     }

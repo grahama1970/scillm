@@ -68,17 +68,83 @@ proxy-run-uv:
 	uv run litellm --config local/proxy_server_config.yaml --host 0.0.0.0 --port $${PORT:-4010} --log_level warning
 
 prom-run-docker:
-	@cat >/tmp/prom.yml <<'YAML'
-global:
-  scrape_interval: 15s
-scrape_configs:
-- job_name: litellm
-  static_configs:
-  - targets: ['host.docker.internal:$${PORT:-4010}']
-YAML
+	@printf '%s\n' \
+	  'global:' \
+	  '  scrape_interval: 15s' \
+	  'scrape_configs:' \
+	  '- job_name: litellm' \
+	  '  static_configs:' \
+	  "  - targets: ['host.docker.internal:$${PORT:-4010}']" > /tmp/prom.yml
 	@docker rm -f scillm-prom >/dev/null 2>&1 || true
 	docker run -d --name scillm-prom --add-host=host.docker.internal:host-gateway -p 9090:9090 -v /tmp/prom.yml:/etc/prometheus/prometheus.yml prom/prometheus:latest
 	@echo "Prometheus listening on :9090"
+
+prom-run-docker-lite:
+	@printf '%s\n' \
+	  'global:' \
+	  '  scrape_interval: 15s' \
+	  'scrape_configs:' \
+	  '- job_name: budget-lite' \
+	  '  static_configs:' \
+	  "  - targets: ['host.docker.internal:$${PORT:-4011}']" > /tmp/prom_bl.yml
+	@docker rm -f scillm-prom-bl >/dev/null 2>&1 || true
+	docker run -d --name scillm-prom-bl --add-host=host.docker.internal:host-gateway -p 9091:9090 -v /tmp/prom_bl.yml:/etc/prometheus/prometheus.yml prom/prometheus:latest
+	@echo "Prometheus (budget-lite) listening on :9091"
+
+grafana-import-lite:
+	@if [ -z "$$GRAFANA_URL" ] || [ -z "$$GRAFANA_TOKEN" ]; then \
+	  echo "Usage: GRAFANA_URL=... GRAFANA_TOKEN=... make grafana-import-lite"; exit 2; fi
+	python3 scripts/grafana_import_dashboards.py --dash dashboards/scillm_budget_lite_grafana.json
+
+proxy-run-docker-single:
+	@echo "Building image (if needed) and running stateless proxy container on :4010"
+	@if [ -z "$$CHUTES_API_BASE" ] || [ -z "$$CHUTES_API_KEY" ] || [ -z "$$CHUTES_TEXT_MODEL" ]; then \
+	  echo "Set CHUTES_API_BASE, CHUTES_API_KEY, CHUTES_TEXT_MODEL in your shell or .env before running."; \
+	  exit 2; \
+	fi
+	@docker build -t scillm/app:local -f deploy/docker/Dockerfile.scillm . >/dev/null
+	@docker rm -f scillm-proxy >/dev/null 2>&1 || true
+	@docker run -d --name scillm-proxy -p 4010:4010 \
+	  -e LITELLM_MASTER_KEY=$${LITELLM_MASTER_KEY:-12345} \
+	  -e METRICS_ENV=$${METRICS_ENV:-dev} \
+	  -e SCILLM_BUDGET_METADATA=$${SCILLM_BUDGET_METADATA:-1} \
+	  -e CHUTES_API_BASE="$$CHUTES_API_BASE" \
+	  -e CHUTES_API_KEY="$$CHUTES_API_KEY" \
+	  -e CHUTES_TEXT_MODEL="$$CHUTES_TEXT_MODEL" \
+	  -v "$$(pwd)/local/proxy_server_config.yaml:/app/config.yaml:ro" \
+	  scillm/app:local \
+	  sh -lc "litellm --config /app/config.yaml --host 0.0.0.0 --port 4010" >/dev/null
+	@echo "Proxy listening on :4010 (master key=$${LITELLM_MASTER_KEY:-12345})"
+
+# Budget Gateway Lite (Chutes forwarder, stateless)
+budget-lite-build:
+	@docker build -t scillm/budget-lite:local -f local/budget_gateway_lite/Dockerfile .
+
+budget-lite-run:
+	@if [ -z "$$CHUTES_API_BASE" ] || [ -z "$$CHUTES_API_KEY" ] || [ -z "$$CHUTES_TEXT_MODEL" ]; then \
+	  echo "Set CHUTES_API_BASE, CHUTES_API_KEY, CHUTES_TEXT_MODEL"; exit 2; fi
+	@docker rm -f scillm-budget-lite >/dev/null 2>&1 || true
+	docker run -d --name scillm-budget-lite -p 4011:4011 \
+	  -e CHUTES_API_BASE -e CHUTES_API_KEY -e CHUTES_TEXT_MODEL \
+	  -e BUDGET_PLAN=$${BUDGET_PLAN:-pro} \
+	  -e BUDGET_DAILY_LIMIT=$${BUDGET_DAILY_LIMIT:-5000} \
+	  -e BUDGET_RESET_UTC_HOUR=$${BUDGET_RESET_UTC_HOUR:-0} \
+	  -e METRICS_ENV=$${METRICS_ENV:-dev} \
+	  scillm/budget-lite:local
+	@echo "Budget Gateway Lite listening on :4011"
+
+budget-lite-smoke:
+	@printf '%s' '{"model":"'"$${CHUTES_TEXT_MODEL}"'","messages":[{"role":"user","content":"Return only {\"ok\":true} as JSON."}],"response_format":{"type":"json_object"},"temperature":0,"max_tokens":32}' > /tmp/bl_payload.json
+	@curl -s -D /tmp/bl_h -H 'Content-Type: application/json' --data @/tmp/bl_payload.json http://127.0.0.1:4011/v1/chat/completions > /tmp/bl_resp.json || true
+	@echo "-- headers --"; rg -n "^x-(ratelimit|budget)" -i /tmp/bl_h || true
+	@echo "-- budget meta --"; jq '.additional_kwargs.scillm.budget' /tmp/bl_resp.json || true
+
+proxy-docker-smoke:
+	@echo "Running smoke against proxy :4010 (model gpt-chutes)"
+	@printf '%s' '{"model":"gpt-chutes","messages":[{"role":"user","content":"Return only {\"ok\":true} as JSON."}],"response_format":{"type":"json_object"},"temperature":0,"max_tokens":32}' > /tmp/payload.json
+	@curl -s -D /tmp/h -H "Authorization: Bearer $${LITELLM_MASTER_KEY:-12345}" -H 'Content-Type: application/json' --data @/tmp/payload.json http://127.0.0.1:4010/v1/chat/completions > /tmp/r.json || true
+	@echo "-- headers --"; rg -n "^x-(ratelimit|budget|estimated)" -i /tmp/h || true
+	@echo "-- budget meta --"; jq '.additional_kwargs.scillm.budget' /tmp/r.json || true
 
 compose-up:
 	@echo "Starting SCILLM stack via compose (proxy+db+prom+grafana+ollama)"

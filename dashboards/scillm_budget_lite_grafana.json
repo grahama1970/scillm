@@ -1,0 +1,78 @@
+{
+  "id": null,
+  "uid": "sclm-budget-lite",
+  "title": "SciLLM Budget Lite (Chutes)",
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": true,
+  "style": "dark",
+  "tags": ["scillm", "budget", "chutes"],
+  "templating": {
+    "list": [
+      {
+        "name": "DS_PROMETHEUS",
+        "type": "datasource",
+        "label": "Datasource",
+        "query": "prometheus",
+        "current": {"text": "Prometheus", "value": "Prometheus"}
+      }
+    ]
+  },
+  "panels": [
+    {
+      "type": "stat",
+      "title": "Requests OK (5m)",
+      "id": 1,
+      "gridPos": {"x": 0, "y": 0, "w": 6, "h": 4},
+      "datasource": {"type": "prometheus", "uid": "$DS_PROMETHEUS"},
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"], "fields": ""}},
+      "targets": [
+        {"expr": "sum(increase(sc_calls_total{vendor=\"chutes\",result=\"ok\"}[5m]))", "legendFormat": "ok"}
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "429s (5m)",
+      "id": 2,
+      "gridPos": {"x": 6, "y": 0, "w": 6, "h": 4},
+      "datasource": {"type": "prometheus", "uid": "$DS_PROMETHEUS"},
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"], "fields": ""}},
+      "targets": [
+        {"expr": "sum(increase(sc_calls_total{vendor=\"chutes\",result=\"429\"}[5m]))", "legendFormat": "429"}
+      ]
+    },
+    {
+      "type": "gauge",
+      "title": "Budget Remaining",
+      "id": 3,
+      "gridPos": {"x": 12, "y": 0, "w": 12, "h": 4},
+      "datasource": {"type": "prometheus", "uid": "$DS_PROMETHEUS"},
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"], "fields": ""}},
+      "targets": [
+        {"expr": "sc_budget_remaining{vendor=\"chutes\"}", "legendFormat": "remaining"}
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Remaining (24h)",
+      "id": 4,
+      "gridPos": {"x": 0, "y": 4, "w": 12, "h": 8},
+      "datasource": {"type": "prometheus", "uid": "$DS_PROMETHEUS"},
+      "targets": [
+        {"expr": "sc_budget_remaining{vendor=\"chutes\"}", "legendFormat": "remaining"}
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "QPS (ok, 429)",
+      "id": 5,
+      "gridPos": {"x": 12, "y": 4, "w": 12, "h": 8},
+      "datasource": {"type": "prometheus", "uid": "$DS_PROMETHEUS"},
+      "targets": [
+        {"expr": "sum by (result) (rate(sc_calls_total{vendor=\"chutes\"}[5m]))", "legendFormat": "{{result}}"}
+      ]
+    }
+  ]
+}
+

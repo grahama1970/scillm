@@ -35,7 +35,7 @@ from litellm.litellm_core_utils.dd_tracing import tracer
 from litellm.litellm_core_utils.litellm_logging import Logging as LiteLLMLoggingObj
 from litellm.litellm_core_utils.safe_json_dumps import safe_dumps
 from litellm.proxy._types import ProxyException, UserAPIKeyAuth
-from chutes.middleware.budget_guard import preflight_usage, normalize_ratelimit_to_budget, budget_snapshot, payg_snapshot
+from chutes.middleware.budget_guard import preflight_usage, normalize_ratelimit_to_budget, budget_snapshot, payg_snapshot, budget_register_attempt, budget_metadata
 from chutes.middleware.metrics import inc_call, inc_429, set_budget
 from scillm.telemetry.metrics import record_call as sc_record_call, record_latency as sc_record_latency, set_budget as sc_set_budget, set_spend_today as sc_set_spend_today, set_payg_active as sc_set_payg_active, record_payg_decision as sc_record_payg_decision
 from litellm.exceptions import RateLimitError
@@ -315,6 +315,12 @@ class ProxyBaseLLMRequestProcessing:
             version=version,
             proxy_config=proxy_config,
         )
+
+        # Register a local budget attempt early (for consistent remaining/used math)
+        try:
+            budget_register_attempt()
+        except Exception:
+            pass
 
         self.data["model"] = (
             general_settings.get("completion_model", None)  # server default
@@ -815,6 +821,17 @@ class ProxyBaseLLMRequestProcessing:
             if started > 0:
                 sc_record_latency(_route_to_feature(route_type), time.monotonic() - started)
             sc_record_call(_route_to_feature(route_type), "ok")
+        except Exception:
+            pass
+
+        # Inject standardized budget metadata into response body (non-streaming)
+        try:
+            if os.getenv("SCILLM_BUDGET_METADATA", "1").strip().lower() not in {"0", "false", "no"}:
+                ak = getattr(response, "additional_kwargs", {}) or {}
+                sc = ak.get("scillm") or {}
+                sc["budget"] = budget_metadata()
+                ak["scillm"] = sc
+                response.additional_kwargs = ak
         except Exception:
             pass
 

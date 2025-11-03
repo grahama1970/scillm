@@ -1,7 +1,10 @@
 <p align="center">
  <!-- Use exported assets that exist in local/artifacts/logo/ -->
  <!-- Use PNG for GitHub rendering reliability -->
- <img src="local/artifacts/logo/SciLLM_balanced.light@2x.png" alt="SciLLM" width="140" />
+ <picture>
+   <source media="(prefers-color-scheme: dark)" srcset="local/artifacts/logo/SciLLM_balanced.animated.dark.svg" />
+   <img src="local/artifacts/logo/SciLLM_balanced.animated.light.svg" alt="SciLLM" width="140" />
+ </picture>
   <br/>
  <img src="local/artifacts/logo/scillm_mark_64.png" alt="SciLLM Icon" width="44" />
   <br/>
@@ -34,7 +37,61 @@
     </a>
 </h4>
 
-<p align="center"><i>This fork remains API‑compatible with LiteLLM while adding optional modules for formal methods (Lean4, exposed as "Certainly"), code orchestration (CodeWorld), and live agent flows. See QUICKSTART.md and scenarios/ for runnable demos. Use SCILLM_ENABLE_* or LITELLM_ENABLE_* flags to enable modules.</i></p>
+<p align="center"><i>API‑compatible with LiteLLM, with pragmatic additions scientists and engineers asked for: strict JSON and reproducibility, clear budgets/costs, real observability, and two simple surfaces (direct and a tiny budget gateway). Plus CodeWorld and Certainly for real research workflows.</i></p>
+
+**What Is SciLLM**
+- A practical fork of LiteLLM for scientific/engineering work. Keep OpenAI‑compatible ergonomics, add the reproducibility, budgets/costs, and observability researchers need for experiments, batches, and papers.
+
+**Why This Fork (vs. LiteLLM)**
+- Reproducible by default: strict JSON helpers, seeds, per‑run manifests.
+- Budget/cost you can trust: normalized headers + budget JSON on every call; optional pay‑as‑you‑go guard.
+- Ops‑ready dashboards: Prometheus + Grafana that work even when providers don’t expose usage.
+- Research workflows built‑in: CodeWorld for strategy search; Certainly (Lean4) for proofs/diagnostics.
+
+**Core Features (Why They Matter)**
+- CodeWorld — strategy orchestration + MCTS
+  - Safely run multiple algorithm/LLM strategies, measure with your metric, and select winners; add MCTS to explore large spaces systematically.
+- Certainly — Lean4 proof bridge
+  - Turn requirements/specs into Lean4 obligations; get proofs and human‑readable diagnostics you can version, rerun, and discuss.
+- Chutes/OpenAI‑compatible calls — two paved paths
+  - Direct: minimal friction, pure OpenAI‑compatible.
+  - Budget Gateway Lite (stateless): normalized budget headers + budget JSON + /metrics without any database.
+- Integrated Dashboard — Prometheus + Grafana
+  - Ready panels for requests, 429s, latency, budget remaining, and cost (when configured); imports in one command.
+- Deterministic JSON + reproducibility
+  - Strict JSON helpers, seed controls, per‑run manifests/artifacts so your figures and tables are repeatable.
+- Optional full proxy (central policy)
+  - When you need multi‑provider routing, uniform retries, budgets, PAYG guard, and a single OpenAI‑compatible surface.
+
+**Why It Fits Scientists & Engineers**
+- Measurable (bring your metric), reproducible (seeds + manifests), governed (clear budget signals + optional hard stop), and observable (standard /metrics + working Grafana board).
+
+**Choose Your Path**
+- Budget + dashboards (recommended for batches) → Budget Gateway Lite
+- Minimal friction (first run) → Direct to provider
+
+**60‑Second Quickstart**
+- Budget Gateway Lite (recommended for batches)
+  - `make budget-lite-build && METRICS_ENV=dev make budget-lite-run`
+  - POST your OpenAI‑compatible payload to `http://127.0.0.1:4011/v1/chat/completions`.
+  - Responses include normalized headers and `additional_kwargs.scillm.budget`.
+  - Prometheus at `/metrics`; import `dashboards/scillm_budget_lite_grafana.json`.
+- Direct to provider (fastest)
+  - Copy the provider snippet in `QUICKSTART.md` and run.
+
+<details><summary><b>What Each Piece Is (One‑liners)</b></summary>
+
+- CodeWorld: strategy orchestrator with optional MCTS; run N variants, score, and pick winners.
+- Certainly (Lean4): formal methods bridge; convert requirements to proofs/diagnostics.
+- Chutes calls: OpenAI‑compatible JSON/streaming; use direct or via the budget gateway.
+- Budget Gateway Lite: tiny FastAPI sidecar; adds budget headers/JSON and /metrics; no DB.
+- Grafana dashboard: imports in one command; watch requests/429s/latency/budget/cost.
+- Full proxy (optional): centralized routing/retry/policy when you outgrow the gateway.
+
+</details>
+
+**Animated logo note**
+- The animated SVG referenced by this branch did not resolve reliably in the GitHub README viewer. PNG ensures consistent rendering. If you share the working SVG path, I’ll restore it with a PNG fallback here (and keep the animation on the docs site).
 
 <p><b>Why SciLLM?</b> SciLLM adds specialized infrastructure for theorem proving (Lean4 / “Certainly”), code orchestration (CodeWorld + MCTS), and agent/tool experimentation (mini‑agent, codex‑agent) — while retaining LiteLLM API compatibility.</p>
 
