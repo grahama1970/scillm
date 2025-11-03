@@ -25,13 +25,7 @@
         "includeAll": true,
         "refresh": 1
       },
-      {
-        "name": "feature",
-        "type": "custom",
-        "query": "text,router,images,embeddings,mcp,tools,files,extractor,gateway",
-        "multi": true,
-        "includeAll": true
-      },
+      
       {
         "name": "window",
         "type": "custom",
@@ -61,10 +55,18 @@
     "gridPos": {"h": 8, "w": 12, "x": 12, "y": 0},
     "targets": [
       {
-        "expr": "sum by (vendor,model) (increase(sc_cost_usd_total[24h]))",
+        "expr": "sum by (vendor,model) (increase(sc_cost_usd_total{env=~\"$env\"}[24h]))",
         "legendFormat": "{{vendor}} · {{model}}",
         "refId": "A"
       }
+    ]
+  },
+  {
+    "type": "stat",
+    "title": "Daily Cost (USD, 24h)",
+    "datasource": "${DS_PROMETHEUS}",
+    "targets": [
+      { "expr": "sum(increase(sc_cost_usd_total{env=~\"$env\"}[24h]))" }
     ]
   },
     {
@@ -73,7 +75,7 @@
       "datasource": "${DS_PROMETHEUS}",
       "targets": [
         {
-          "expr": "100 * (sum(rate(sc_calls_total{result=~\"error|5xx|timeout|cancel\", env=~\"$env\"}[$window])) / sum(rate(sc_calls_total{env=~\"$env\"}[$window])))"
+          "expr": "100 * (sum(rate(sc_calls_total{result=~\"error|5xx|timeout|cancel\", env=~\"$env\"}[$window])) / clamp_min(sum(rate(sc_calls_total{env=~\"$env\"}[$window])), 1e-9))"
         }
       ]
     },
@@ -88,35 +90,14 @@
       ]
     },
     {
-      "type": "timeseries",
-      "title": "Requests by Feature (QPS)",
+      "type": "stat",
+      "title": "In-Flight Requests",
       "datasource": "${DS_PROMETHEUS}",
       "targets": [
-        {
-          "expr": "sum by (feature) (rate(sc_calls_total{env=~\"$env\", feature=~\"$feature\"}[$window]))"
-        }
+        { "expr": "sum(sc_calls_in_flight{env=~\"$env\"})" }
       ]
     },
-    {
-      "type": "timeseries",
-      "title": "Errors by Feature (QPS)",
-      "datasource": "${DS_PROMETHEUS}",
-      "targets": [
-        {
-          "expr": "sum by (feature, result) (rate(sc_calls_total{result=~\"error|5xx|timeout\", env=~\"$env\", feature=~\"$feature\"}[$window]))"
-        }
-      ]
-    },
-    {
-      "type": "timeseries",
-      "title": "P95 Latency by Feature (ms)",
-      "datasource": "${DS_PROMETHEUS}",
-      "targets": [
-        {
-          "expr": "label_replace(histogram_quantile(0.95, sum by (feature, le) (rate(sc_request_seconds_bucket{env=~\"$env\", feature=~\"$feature\"}[$window])) )*1000, \"__name__\", \"p95_latency_ms\", \"feature\", \"$feature\")"
-        }
-      ]
-    },
+    
     {
       "type": "row",
       "title": "Router & Streaming"
