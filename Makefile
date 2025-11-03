@@ -167,3 +167,31 @@ smoke-budget-cost:
 	PROXY_KEY=$${LITELLM_MASTER_KEY:-sk-dev-proxy-123} \
 	SMOKE_MODEL=$${SMOKE_MODEL:-text-auto} \
 	uv run -- python scripts/smoke_budget_cost.py
+grafana-audit:
+	@echo "Running Grafana audit (smoke + panel queries)"
+	@mkdir -p artifacts
+	@echo "Refreshing Grafana provisioning (container restart)..."
+	@docker restart scillm-grafana >/dev/null 2>&1 || true
+	@sleep 3
+	@echo "Triggering budget-lite smoke to generate metrics..."
+	@$(MAKE) -s budget-lite-smoke || true
+	@echo "Waiting one scrape interval..."; sleep 15
+	@ts=$$(date +%Y%m%dT%H%M%S); \
+	  out=artifacts/grafana_audit_$${ts}.json; \
+	  echo "Writing report to $$out"; \
+	  uv run -- python scripts/grafana_audit.py > $$out || true; \
+	  echo "Summary:"; jq -r '{ok, env, window, base} | @json' $$out; \
+	  echo "Per-dashboard panel statuses:"; jq -r '.reports[] | "\(.title): " + ((.panels // []) | map(select(.ok==false)) | if length==0 then "OK" else (map(.title+" ["+(.status|tostring)+"]") | join(", ")) end)' $$out
+	@echo "Done. Inspect artifacts/ for the detailed JSON report."
+
+grafana-audit-quick:
+	@mkdir -p artifacts
+	@ts=$$(date +%Y%m%dT%H%M%S); out=artifacts/grafana_audit_$${ts}.json; \
+	  uv run -- python scripts/grafana_audit.py > $$out || true; \
+	  echo "Summary:"; jq -r '{ok, env, window, base} | @json' $$out
+
+grafana-screens:
+	@echo "Capturing full-page screenshots for core dashboards"
+	@mkdir -p artifacts
+	@uv run -- python scripts/grafana_screenshot.py
+	@echo "Saved screenshots under artifacts/."
