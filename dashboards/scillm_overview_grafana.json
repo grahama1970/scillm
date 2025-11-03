@@ -86,7 +86,34 @@
         {
           "expr": "100 * (sum(rate(sc_calls_total{result=~\"error|5xx|timeout|cancel\", env=~\"$env\"}[$window])) / clamp_min(sum(rate(sc_calls_total{env=~\"$env\"}[$window])), 1e-9))"
         }
-      ]
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 1
+              },
+              {
+                "color": "orange",
+                "value": 5
+              },
+              {
+                "color": "red",
+                "value": 10
+              }
+            ]
+          }
+        },
+        "overrides": []
+      }
     },
     {
       "type": "stat",
@@ -96,7 +123,34 @@
         {
           "expr": "histogram_quantile(0.95, sum by (le) (rate(sc_request_seconds_bucket{env=~\"$env\"}[$window]))) * 1000"
         }
-      ]
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 1000
+              },
+              {
+                "color": "orange",
+                "value": 2000
+              },
+              {
+                "color": "red",
+                "value": 5000
+              }
+            ]
+          }
+        },
+        "overrides": []
+      }
     },
     {
       "type": "stat",
@@ -106,7 +160,30 @@
         {
           "expr": "sum(sc_calls_in_flight{env=~\"$env\"}) or vector(0)"
         }
-      ]
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 50
+              },
+              {
+                "color": "red",
+                "value": 200
+              }
+            ]
+          }
+        },
+        "overrides": []
+      }
     },
     {
       "type": "row",
@@ -129,7 +206,7 @@
       "datasource": "${DS_PROMETHEUS}",
       "targets": [
         {
-          "expr": "histogram_quantile(0.95, sum by (le) (rate(sc_stream_first_byte_seconds_bucket{env=~\"$env\"}[$window])) ) * 1000"
+          "expr": "(histogram_quantile(0.95, sum by (le) (rate(sc_stream_first_byte_seconds_bucket{env=~\"$env\"}[$window])) ) * 1000) or vector(0)"
         }
       ]
     },

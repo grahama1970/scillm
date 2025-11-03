@@ -37,7 +37,7 @@
       "datasource": "${DS_PROMETHEUS}",
       "targets": [
         {
-          "expr": "sum by (kind) (rate(chutes_429_total{env=~\"$env\"}[$window]))"
+          "expr": "(sum by (kind) (rate(chutes_429_total{env=~\"$env\"}[$window]))) or vector(0)"
         }
       ]
     },
