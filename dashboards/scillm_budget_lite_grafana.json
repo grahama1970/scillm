@@ -4,7 +4,7 @@
   "title": "SciLLM Budget Lite (Chutes)",
   "timezone": "browser",
   "schemaVersion": 39,
-  "version": 2,
+  "version": 3,
   "editable": true,
   "style": "dark",
   "tags": [
@@ -72,7 +72,7 @@
       },
       "targets": [
         {
-          "expr": "sum(increase(sc_calls_total{result=\"ok\", env=~\"$env\"}[$window]))",
+          "expr": "sum(increase(sc_calls_total{result=\"ok\", env=~\"$env\"}[$window])) or vector(0)",
           "legendFormat": "ok"
         }
       ]
@@ -101,7 +101,7 @@
       },
       "targets": [
         {
-          "expr": "sum(increase(sc_calls_total{result=\"429\", env=~\"$env\"}[$window]))",
+          "expr": "sum(increase(sc_calls_total{result=\"429\", env=~\"$env\"}[$window])) or vector(0)",
           "legendFormat": "429"
         }
       ]
@@ -130,7 +130,7 @@
       },
       "targets": [
         {
-          "expr": "sum(sc_budget_remaining{env=~\"$env\"})",
+          "expr": "sum(sc_budget_remaining{env=~\"$env\"}) or vector(0)",
           "legendFormat": "remaining"
         }
       ],
@@ -175,7 +175,7 @@
       },
       "targets": [
         {
-          "expr": "sum(sc_budget_remaining{env=~\"$env\"})",
+          "expr": "sum(sc_budget_remaining{env=~\"$env\"}) or vector(0)",
           "legendFormat": "remaining"
         }
       ]
@@ -196,7 +196,7 @@
       },
       "targets": [
         {
-          "expr": "sum by (result) (rate(sc_calls_total{env=~\"$env\"}[$window]))",
+          "expr": "sum by (result) (rate(sc_calls_total{env=~\"$env\"}[$window])) or vector(0)",
           "legendFormat": "{{result}}"
         }
       ],

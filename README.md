@@ -82,10 +82,23 @@ Minimal pick‑and‑go
 - Budget Gateway Lite (recommended for batches)
   - `make budget-lite-build && METRICS_ENV=dev make budget-lite-run`
   - POST your OpenAI‑compatible payload to `http://127.0.0.1:4011/v1/chat/completions`.
-  - Responses include normalized headers and `additional_kwargs.scillm.budget`.
+  - Responses include normalized budget headers and `additional_kwargs.scillm.budget` when the gateway handles the call.
+    - Headers: `x-ratelimit-limit`, `x-ratelimit-remaining-requests`, `x-budget-reset-at`.
+    - 429s normalized to `{type:"budget_exhausted"}` and include `Retry-After` when provided by upstream (best‑effort).
   - Prometheus at `/metrics`; import `dashboards/scillm_budget_lite_grafana.json`.
+  - Budget status: `GET /v1/budget` returns `{limit, remaining, reset_at, price_per_call_usd}` (price may be 0.0 unless configured).
 - Direct to provider (fastest)
   - Copy the provider snippet in `QUICKSTART.md` and run.
+
+### Budget headers & endpoint (what to expect)
+- On 200 and 4xx responses the proxy injects:
+  - `x-ratelimit-limit`, `x-ratelimit-remaining-requests`, and `x-budget-reset-at`.
+  - When rate‑limited/exhausted, 429 is normalized to `{ "type": "budget_exhausted" }` and includes `Retry-After` when available.
+- Minimal budget status endpoint:
+  - `GET /v1/budget → { "limit", "remaining", "reset_at", "price_per_call_usd" }`.
+- Quick probe (local defaults):
+  - `curl -sS http://127.0.0.1:4010/v1/budget | jq`
+  - A successful JSON chat with `curl -i` will show the headers above.
 
 <details><summary><b>What Each Piece Is (One‑liners)</b></summary>
 
@@ -155,7 +168,7 @@ Doctor (one-shot): `make codex-agent-doctor`
 |-------|------|
 | Feature matrix & patterns | [FEATURES.md](FEATURES.md) |
 | Multi‑Surface Quickstart | [QUICKSTART.md](QUICKSTART.md) |
-| Auto Code → Review → Green (codex‑agent) | [QUICKSTART.md](QUICKSTART.md#scenario-auto-code-→-review-→-green-codex-agent) |
+| Auto Code → Review → Green (codex‑agent) | [QUICKSTART.md](QUICKSTART.md#scenario-auto-code-review-green-codex-agent) |
 | Lean4 / Certainly specifics | `scenarios/lean4_*`, `scenarios/certainly_*` |
 | Parallel fan‑out example | `feature_recipes/parallel_acompletions.py` |
 | MCTS & autogen | `scenarios/mcts_codeworld_demo.py` |

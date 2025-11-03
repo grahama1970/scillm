@@ -180,16 +180,35 @@ Retry metadata example (when `SCILLM_RETRY_META=1`):
 
 | Area | Feature | What It Does | How To Enable | Files/Notes |
 |---|---|---|---|---|
-| Budget | Headers on all paths | Adds `x-ratelimit-limit`, `x-ratelimit-remaining-requests`, `x-budget-reset-at` | Default when proxy handles request | litellm/proxy/common_request_processing.py; chutes/middleware/budget_guard.py |
-| Budget | 429 normalization | When exhausted: 429 with `{type:"budget_exhausted", retry_at, remaining:0}` | Default | Same |
-| PAYG | Strict stop | Hard‑stop overage even if PAYG available | `SCILLM_DO_NOT_CHARGE=1` | budget_guard.py |
-| PAYG | Confirmation gate | 402 `payg_confirmation_required` until `confirm_payg=true` seen | Default off; enable per run | common_request_processing.py |
-| Pricing | Static map | Injects `additional_kwargs.scillm.pricing` and headers; increments `sc_cost_usd_total` | `CHUTES_PRICING_FILE` or `CHUTES_PRICING_JSON` | chutes/middleware/pricing.py |
+| Budget | Headers (success and 4xx) | Adds `x-ratelimit-limit`, `x-ratelimit-remaining-requests`, `x-budget-reset-at` when the gateway/proxy handles the call | Default when proxy/gateway is in path | litellm/proxy/common_request_processing.py; chutes/middleware/budget_guard.py |
+| Budget | 429 normalization | Maps throttling/quotas to 429 `{type:"budget_exhausted"}`; includes `Retry-After` when present | Default | chutes/middleware/budget_guard.py |
+| PAYG | Strict stop | Not exposed in this branch | — | — |
+| PAYG | Confirmation gate | Not exposed in this branch | — | — |
+| Pricing | Static map | Estimates cost from configured pricing; increments `sc_cost_usd_total` | `CHUTES_PRICING_JSON` or `CHUTES_PRICING_FILE` | chutes/middleware/pricing.py; scillm/telemetry/metrics.py |
 | Tenacious | Sleep until reset | If exhausted, waits until `reset_at` then retries | `SCILLM_TENACIOUS=1 SCILLM_TENACIOUS_UNTIL_RESET=1` | scillm/extras/chutes_simple.py |
 | Observability | Prometheus | `/metrics` with `sc_calls_total`, `sc_request_seconds`, `sc_cost_usd_total`, plus vendor gauges | Proxy mounts by default | scillm/telemetry/metrics.py |
 | Dashboards | Grafana | Prebuilt Overview and Chutes boards | `make grafana-import` (use SAT) | dashboards/*.json; local/grafana/provisioning/* |
 
 Budget endpoint (for dashboards/ops): `GET /v1/budget → {limit, remaining, reset_at, price_per_call_usd}`.
+Notes:
+- `price_per_call_usd` comes from `CHUTES_PRICE_PER_CALL_USD` when set; otherwise it may be `0.0`.
+- `sc_cost_usd_total` increments only when pricing is configured or discoverable; otherwise remains 0.
+
+## Next Steps for Scientists & Engineers (High‑Impact, Short List)
+
+1) Deterministic smokes (CI and local)
+   - Single 200 JSON chat with `response_format={"type":"json_object"}` and `temperature=0`.
+   - Assert presence of budget headers on 200.
+   - Assert `increase(sc_cost_usd_total[5m]) > 0` when pricing is configured.
+2) Budget status
+   - Add a minimal `/v1/budget` README section and example; document fallback when `price_per_call_usd` is unset.
+3) Grafana audit in CI
+   - Run `scripts/grafana_audit.py` against a test Grafana; fail if any panel query returns non‑200 or 0 frames.
+4) Quickstart paved paths
+   - Keep Bearer‑only examples for both JSON and streaming.
+   - Add `curl -si` header checks and expected keys.
+5) Tenacious‑until‑reset
+   - Exercise `SCILLM_TENACIOUS=1 SCILLM_TENACIOUS_UNTIL_RESET=1` in a controlled smoke with a forced budget‑exhausted 429 (mock).
 
 ## CodeWorld — Strategies & MCTS (Opt‑In)
 

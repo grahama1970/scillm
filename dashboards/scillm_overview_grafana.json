@@ -1,6 +1,6 @@
 {
   "title": "SciLLM Overview",
-  "schemaVersion": 38,
+  "schemaVersion": 39,
   "version": 1,
   "templating": {
     "list": [
@@ -46,7 +46,7 @@
       "datasource": "${DS_PROMETHEUS}",
       "targets": [
         {
-          "expr": "sum by (env) (rate(sc_calls_total{result=\"ok\", env=~\"$env\"}[$window]))"
+          "expr": "sum by (env) (rate(sc_calls_total{result=\"ok\", env=~\"$env\"}[$window])) or vector(0)"
         }
       ],
       "fieldConfig": {
@@ -69,7 +69,7 @@
       },
       "targets": [
         {
-          "expr": "sum by (vendor,model) (increase(sc_cost_usd_total{env=~\"$env\"}[24h]))",
+          "expr": "sum by (vendor,model) (increase(sc_cost_usd_total{env=~\"$env\"}[24h])) or vector(0)",
           "legendFormat": "{{vendor}} \u00b7 {{model}}",
           "refId": "A"
         }
@@ -88,7 +88,7 @@
       "datasource": "${DS_PROMETHEUS}",
       "targets": [
         {
-          "expr": "sum(increase(sc_cost_usd_total{env=~\"$env\"}[24h]))"
+          "expr": "sum(increase(sc_cost_usd_total{env=~\"$env\"}[24h])) or vector(0)"
         }
       ],
       "fieldConfig": {
@@ -142,7 +142,7 @@
       "datasource": "${DS_PROMETHEUS}",
       "targets": [
         {
-          "expr": "histogram_quantile(0.95, sum by (le) (rate(sc_request_seconds_bucket{env=~\"$env\"}[$window]))) * 1000"
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(sc_request_seconds_bucket{env=~\"$env\"}[$window]))) * 1000 or vector(0)"
         }
       ],
       "fieldConfig": {
@@ -247,7 +247,7 @@
       "datasource": "${DS_PROMETHEUS}",
       "targets": [
         {
-          "expr": "sum(sc_budget_remaining{env=~\"$env\"})"
+          "expr": "sum(sc_budget_remaining{env=~\"$env\"}) or vector(0)"
         }
       ]
     },
@@ -257,7 +257,7 @@
       "datasource": "${DS_PROMETHEUS}",
       "targets": [
         {
-          "expr": "sum(sc_budget_limit{env=~\"$env\"})"
+          "expr": "sum(sc_budget_limit{env=~\"$env\"}) or vector(0)"
         }
       ]
     },
@@ -267,7 +267,7 @@
       "datasource": "${DS_PROMETHEUS}",
       "targets": [
         {
-          "expr": "(max(sc_reset_timestamp_seconds{env=~\"$env\"}) - time()) / 60"
+          "expr": "(max(sc_reset_timestamp_seconds{env=~\"$env\"}) - time()) / 60 or vector(0)"
         }
       ],
       "fieldConfig": {
@@ -287,7 +287,7 @@
           "legendFormat": "core 429"
         },
         {
-          "expr": "sum by (kind) (rate(chutes_429_total{env=~\"$env\"}[$window]))",
+          "expr": "sum by (kind) (rate(chutes_429_total{env=~\"$env\"}[$window])) or vector(0)",
           "legendFormat": "chutes {{kind}}"
         }
       ],

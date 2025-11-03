@@ -7,9 +7,9 @@
 
 # SciLLM Multi‑Surface Quickstart
 
-## SciLLM Paved Path (Chutes) — Copy/Paste Recipe (Bearer‑only for this tenant)
+## SciLLM Paved Path (Chutes) — Copy/Paste Recipe (Unified Bearer Auth)
 
-Use this single, verified path for Chutes (OpenAI‑compatible) JSON chat. It hides provider quirks and uses Bearer‑only auth on the openai_like transport.
+Use this single, verified path for Chutes (OpenAI‑compatible) JSON chat. It hides provider quirks and uses Authorization: Bearer for both JSON and streaming.
 
 - Env
   - `CHUTES_API_BASE=https://llm.chutes.ai/v1`
@@ -65,12 +65,15 @@ GRAFANA_URL=http://127.0.0.1:3000 \
 GRAFANA_TOKEN=$GRAFANA_SCILLM_SERVICE_TOKEN \
 make grafana-import
 ```
-- Generate one request to light up metrics:
+- Generate one request to light up metrics and print headers:
 ```bash
-curl -s -H 'Authorization: Bearer sk-dev-proxy-123' \
+curl -si -H 'Authorization: Bearer sk-dev-proxy-123' \
   -H 'Content-Type: application/json' \
   -d '{"model":"gpt-chutes","messages":[{"role":"user","content":"ping"}]}' \
-  http://127.0.0.1:4010/v1/chat/completions | jq
+  http://127.0.0.1:4010/v1/chat/completions | tee /dev/stderr | jq
+# Expect headers (when gateway handles the call):
+#   x-ratelimit-limit, x-ratelimit-remaining-requests, x-budget-reset-at
+# And /metrics to show sc_calls_total and sc_request_seconds; sc_cost_usd_total increments if pricing is configured.
 ```
 
 - Sanity probes
@@ -80,7 +83,7 @@ curl -s -H 'Authorization: Bearer sk-dev-proxy-123' \
     `"$CHUTES_API_BASE/chat/completions"` → 200
 
 - Notes
-  - For this tenant, use Bearer‑only for chat; do not add `x-api-key`.
+  - Use Authorization: Bearer for both non‑stream JSON and streaming. Some gateways accept `x-api-key` for non‑stream JSON; this path standardizes on Bearer.
   - JSON mode content may be string or dict; normalize both if you post‑process.
   - If you construct Router yourself, call `await router.aclose()` when done.
   - Pin exactly one `CHUTES_TEXT_MODEL`/`CHUTES_VLM_MODEL` (alternates are disabled in locked bearer mode).
@@ -180,20 +183,19 @@ OpenAI‑compatible (Chutes) — Paved Path
 
 Happy Path (shared base)
 - Discover a model id via `GET $CHUTES_API_BASE/v1/models`.
-- Non‑stream JSON → use `x-api-key`; Streaming → use `Authorization: Bearer`.
+- Use `Authorization: Bearer` for both JSON and streaming.
 - Single JSON call (Python):
   ```python
-  from scillm import completion, os
-  r = completion(
-    model=os.environ["CHUTES_MODEL_ID"],
-    api_base=os.environ["CHUTES_API_BASE"],
-    api_key=None,
-    custom_llm_provider="openai_like",
-    extra_headers={"x-api-key": os.environ["CHUTES_API_KEY"]},
-    messages=[{"role":"user","content":"Return only {\"ok\":true} as JSON."}],
-    response_format={"type":"json_object"},
-    temperature=0, max_tokens=16)
-  print(r.choices[0].message.get("content",""))
+from scillm import completion, os
+r = completion(
+  model=os.environ["CHUTES_MODEL_ID"],
+  api_base=os.environ["CHUTES_API_BASE"],
+  api_key=os.environ["CHUTES_API_KEY"],  # becomes Authorization: Bearer
+  custom_llm_provider="openai_like",
+  messages=[{"role":"user","content":"Return only {\"ok\":true} as JSON."}],
+  response_format={"type":"json_object"},
+  temperature=0, max_tokens=16)
+print(r.choices[0].message.get("content",""))
   ```
   
   Strict JSON helper (preferred name, optional):
@@ -253,7 +255,7 @@ Happy Path (shared base)
     "api_base": os.environ["CHUTES_API_BASE"],
     "api_key": None,
     "custom_llm_provider": "openai_like",
-    "extra_headers": {"x-api-key": os.environ["CHUTES_API_KEY"]}}}])
+    "extra_headers": {"Authorization": f"Bearer {os.environ['CHUTES_API_KEY']}"}}}])
   # then: await router.parallel_acompletions([...], concurrency=K)
   ```
 
@@ -944,7 +946,8 @@ Security note: Disable codex sidecar echo (remove `CODEX_SIDECAR_ECHO=1`) before
 
 ---
 
-## Scenario: Auto Code → Review → Green (codex‑agent)
+<a id="scenario-auto-code-review-green-codex-agent"></a>
+## Scenario: Auto Code -> Review -> Green (codex-agent)
 
 Use this when the goal is “make the code run” in a single repository: generate code, run your gate (tests/build), optionally request a review, and iterate until green.
 
