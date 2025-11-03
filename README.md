@@ -96,6 +96,7 @@ Minimal pick‑and‑go
   - When rate‑limited/exhausted, 429 is normalized to `{ "type": "budget_exhausted" }` and includes `Retry-After` when available.
 - Minimal budget status endpoint:
   - `GET /v1/budget → { "limit", "remaining", "reset_at", "price_per_call_usd" }`.
+- Availability: this endpoint and the normalized headers are present when the proxy/gateway is in the path. If `GET /v1/budget` returns 404, your client is bypassing the proxy; fall back to reading the budget headers from a normal chat response.
 - Quick probe (local defaults):
   - `curl -sS http://127.0.0.1:4010/v1/budget | jq`
   - A successful JSON chat with `curl -i` will show the headers above.

@@ -67,6 +67,20 @@ proxy-run-uv:
 	CHUTES_PRICING_FILE=$${CHUTES_PRICING_FILE:-local/pricing/chutes.prices.json} \
 	uv run litellm --config local/proxy_server_config.yaml --host 0.0.0.0 --port $${PORT:-4010} --log_level warning
 
+# Convenience: run the proxy with a demo pricing file to make sc_cost_usd_total move during demos
+proxy-run-uv-demo-pricing:
+	@if ! command -v uv >/dev/null 2>&1; then echo "uv not installed"; exit 2; fi
+	@if [ ! -f local/proxy_server_config.yaml ]; then echo "missing local/proxy_server_config.yaml"; exit 2; fi
+	@if [ ! -f examples/pricing/example.json ]; then echo "missing examples/pricing/example.json"; exit 2; fi
+	LITELLM_MASTER_KEY=$${LITELLM_MASTER_KEY:-sk-dev-proxy-123} METRICS_ENV=$${METRICS_ENV:-dev} \
+	CHUTES_PRICING_FILE=examples/pricing/example.json \
+	uv run litellm --config local/proxy_server_config.yaml --host 0.0.0.0 --port $${PORT:-4010} --log_level warning
+
+# Print how to enable demo pricing in your current shell (non-persistent)
+demo-pricing:
+	@echo "To enable demo pricing for this shell, run:"
+	@echo "\n  export CHUTES_PRICING_FILE=examples/pricing/example.json\n"
+
 prom-run-docker:
 	@printf '%s\n' \
 	  'global:' \
