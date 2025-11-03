@@ -81,6 +81,10 @@ demo-pricing:
 	@echo "To enable demo pricing for this shell, run:"
 	@echo "\n  export CHUTES_PRICING_FILE=examples/pricing/example.json\n"
 
+# Run a one-shot smoke that asserts sc_cost_usd_total increases after one chat call
+smoke-demo-pricing:
+	@python3 scripts/smoke_demo_pricing.py
+
 prom-run-docker:
 	@printf '%s\n' \
 	  'global:' \
