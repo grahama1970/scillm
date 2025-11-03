@@ -195,10 +195,16 @@
       "datasource": "${DS_PROMETHEUS}",
       "targets": [
         {
-          "expr": "sum by (reason) (rate(sc_router_failover_total{env=~\"$env\"}[$window]))",
+          "expr": "sum by (reason) (rate(sc_router_failover_total{env=~\"$env\"}[$window])) or vector(0)",
           "legendFormat": "{{reason}}"
         }
-      ]
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops"
+        },
+        "overrides": []
+      }
     },
     {
       "type": "timeseries",
@@ -257,7 +263,13 @@
           "expr": "sum by (kind) (rate(chutes_429_total{env=~\"$env\"}[$window]))",
           "legendFormat": "chutes {{kind}}"
         }
-      ]
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops"
+        },
+        "overrides": []
+      }
     },
     {
       "type": "timeseries",
@@ -267,7 +279,13 @@
         {
           "expr": "sum by (reason) (rate(sc_retries_total{env=~\"$env\"}[$window]))"
         }
-      ]
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops"
+        },
+        "overrides": []
+      }
     }
   ]
 }

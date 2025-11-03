@@ -175,7 +175,13 @@
           "expr": "sum by (result) (rate(sc_calls_total{env=~\"$env\"}[$window]))",
           "legendFormat": "{{result}}"
         }
-      ]
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops"
+        },
+        "overrides": []
+      }
     }
   ]
 }

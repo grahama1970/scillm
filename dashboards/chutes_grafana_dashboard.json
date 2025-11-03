@@ -39,7 +39,13 @@
         {
           "expr": "(sum by (kind) (rate(chutes_429_total{env=~\"$env\"}[$window]))) or vector(0)"
         }
-      ]
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops"
+        },
+        "overrides": []
+      }
     },
     {
       "type": "timeseries",
@@ -49,7 +55,13 @@
         {
           "expr": "sum(rate(chutes_calls_total{result=\"ok\",env=~\"$env\"}[$window]))"
         }
-      ]
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops"
+        },
+        "overrides": []
+      }
     },
     {
       "type": "timeseries",
