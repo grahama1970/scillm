@@ -5,11 +5,17 @@
   "templating": {
     "list": [
       {
+        "name": "filters",
+        "type": "adhoc",
+        "datasource": "${DS_PROMETHEUS}"
+      },
+      {
         "name": "DS_PROMETHEUS",
         "type": "datasource",
         "query": "prometheus",
         "label": "Prometheus",
-        "hide": 0
+        "hide": 0,
+        "current": { "text": "Prometheus2", "value": "SCILLM_PROM" }
       },
       {
         "name": "env",

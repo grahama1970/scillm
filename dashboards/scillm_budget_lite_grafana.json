@@ -11,9 +11,14 @@
   "templating": {
     "list": [
       {
+        "name": "filters",
+        "type": "adhoc",
+        "datasource": {"type": "prometheus", "uid": "$DS_PROMETHEUS"}
+      },
+      {
         "name": "DS_PROMETHEUS",
         "type": "datasource",
-        "label": "Datasource",
+        "label": "Prometheus",
         "query": "prometheus",
         "current": {"text": "Prometheus", "value": "Prometheus"}
       }
@@ -75,4 +80,3 @@
     }
   ]
 }
-

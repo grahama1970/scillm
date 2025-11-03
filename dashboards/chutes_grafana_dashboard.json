@@ -53,6 +53,11 @@
   "templating": {
     "list": [
       {
+        "name": "filters",
+        "type": "adhoc",
+        "datasource": "${DS_PROMETHEUS}"
+      },
+      {
         "name": "DS_PROMETHEUS",
         "type": "datasource",
         "query": "prometheus",
