@@ -66,7 +66,13 @@
           "legendFormat": "{{vendor}} \u00b7 {{model}}",
           "refId": "A"
         }
-      ]
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD"
+        },
+        "overrides": []
+      }
     },
     {
       "type": "stat",
@@ -76,7 +82,13 @@
         {
           "expr": "sum(increase(sc_cost_usd_total{env=~\"$env\"}[24h]))"
         }
-      ]
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD"
+        },
+        "overrides": []
+      }
     },
     {
       "type": "stat",
@@ -248,7 +260,13 @@
         {
           "expr": "(max(sc_reset_timestamp_seconds{env=~\"$env\"}) - time()) / 60"
         }
-      ]
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "m"
+        },
+        "overrides": []
+      }
     },
     {
       "type": "timeseries",
@@ -256,7 +274,7 @@
       "datasource": "${DS_PROMETHEUS}",
       "targets": [
         {
-          "expr": "sum by (env) (rate(sc_calls_total{result=\"429\", env=~\"$env\"}[$window]))",
+          "expr": "sum by (env) (rate(sc_calls_total{result=\"429\", env=~\"$env\"}[$window])) or vector(0)",
           "legendFormat": "core 429"
         },
         {
@@ -277,7 +295,7 @@
       "datasource": "${DS_PROMETHEUS}",
       "targets": [
         {
-          "expr": "sum by (reason) (rate(sc_retries_total{env=~\"$env\"}[$window]))"
+          "expr": "sum by (reason) (rate(sc_retries_total{env=~\"$env\"}[$window])) or vector(0)"
         }
       ],
       "fieldConfig": {

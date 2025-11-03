@@ -29,7 +29,13 @@
         {
           "expr": "(chutes_reset_timestamp_seconds{env=~\"$env\"} - time()) / 60"
         }
-      ]
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "m"
+        },
+        "overrides": []
+      }
     },
     {
       "type": "timeseries",
