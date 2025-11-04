@@ -1,74 +1,90 @@
-# Re-export litellm surface for convenience when installed as 'scillm'.
-from litellm import *  # noqa: F401,F403
-import litellm as _litellm
-from urllib.parse import urlparse as _urlparse
-import time as _time
-from litellm.exceptions import AuthenticationError as _AuthErr
-try:
-    from litellm.llms.openai_like.common_utils import OpenAILikeError as _OAILikeErr
-except Exception:  # pragma: no cover
-    class _OAILikeErr(Exception):
-        pass
+"""
+scillm: Light-weight shim over the local litellm codebase
+with minimal import-time side effects.
 
-# Optional: initialize LiteLLM cache automatically when requested via env.
-# Keeps caller code minimal: set SCILLM_CACHE=1 and REDIS_* if available.
+Goals
+- Do not import litellm (and its optional integrations) at import time.
+- Lazy-load litellm on first call and honor background-control env flags.
+- Provide small helpers (JSON mode, preflight, shutdown/context) without
+  forcing optional deps like Jinja2.
+"""
+
+from __future__ import annotations
+
+import asyncio as _asyncio
 import os as _os
-from litellm.llms.custom_httpx.http_handler import AsyncHTTPHandler as _AsyncHTTPHandler
-# Suppress noisy debug banners and disable loop-sensitive background logging.
-try:
-    _litellm.suppress_debug_info = True
-except Exception:
-    pass
-try:
-    from litellm.litellm_core_utils import logging_worker as _lw  # type: ignore
+import time as _time
+from contextlib import contextmanager as _contextmanager, asynccontextmanager as _asynccontextmanager
+from typing import Any as _Any, Dict as _Dict, Tuple as _Tuple
+from urllib.parse import urlparse as _urlparse
 
-    class _NoopLoggingWorker(_lw.LoggingWorker):
-        def __init__(self):
-            super().__init__()
-            self._queue = None
+# --- Internal lazy import helpers -------------------------------------------------
 
-        def _ensure_queue(self) -> None:
-            return
+_LTL = None  # cached litellm module
+_WRAPPED = False
+_BG_DISABLED = False
+_PENDING_BG_DISABLE = str(_os.getenv("LITELLM_LOGGING", "")).strip() == "0" or (
+    str(_os.getenv("SPARTA_LITELLM_DISABLE_BG", "")).lower() in {"1", "true", "yes", "on"}
+)
+_FORCE_HTTPX = str(_os.getenv("SCILLM_DISABLE_AIOHTTP", "")).lower() in {"1", "true", "yes", "on"}
+_AUTO_CACHE = str(_os.getenv("SCILLM_CACHE", "")).lower() in {"1", "true", "yes", "on"}
 
-        def start(self) -> None:
-            return
 
-        def enqueue(self, coroutine):  # type: ignore[override]
-            return
+def _ensure_litellm() -> "module":
+    global _LTL, _WRAPPED
+    if _LTL is None:
+        import importlib as _importlib
 
-        def ensure_initialized_and_enqueue(self, async_coroutine):  # type: ignore[override]
-            return
+        _LTL = _importlib.import_module("litellm")
+        try:
+            _LTL.suppress_debug_info = True
+        except Exception:
+            pass
 
-        async def stop(self):  # type: ignore[override]
-            return
+        # Apply forced httpx transport if requested
+        if _FORCE_HTTPX:
+            try:
+                _os.environ.setdefault("DISABLE_AIOHTTP_TRANSPORT", "True")
+                from litellm.llms.custom_httpx.http_handler import AsyncHTTPHandler as _AsyncHTTPHandler  # type: ignore
 
-        async def flush(self):  # type: ignore[override]
-            return
+                _LTL.disable_aiohttp_transport = True
+                _LTL.module_level_aclient = _AsyncHTTPHandler(
+                    timeout=_LTL.request_timeout, client_alias="module level aclient"
+                )
+            except Exception:
+                pass
 
-        async def clear_queue(self):  # type: ignore[override]
-            return
+        if _AUTO_CACHE:
+            try:
+                from litellm.extras import initialize_litellm_cache  # type: ignore
 
-    _lw.GLOBAL_LOGGING_WORKER = _NoopLoggingWorker()
-except Exception:
-    pass
-try:  # best-effort; never fail import
-    if (_os.getenv("SCILLM_CACHE") or "").strip().lower() in {"1", "true", "yes", "on"}:
-        from litellm.extras import initialize_litellm_cache  # type: ignore
-        initialize_litellm_cache()
-except Exception:
-    pass
+                initialize_litellm_cache()
+            except Exception:
+                pass
 
-# Optional: force httpx transport (no aiohttp) to avoid rare hangs/unclosed-session warnings
-# Set SCILLM_DISABLE_AIOHTTP=1 before importing scillm to apply globally.
-try:  # best-effort; never fail import
-    if (_os.getenv("SCILLM_DISABLE_AIOHTTP") or "").strip().lower() in {"1", "true", "yes", "on"}:
-        # Force httpx everywhere; belt-and-suspenders env for any subpaths
-        _os.environ.setdefault("DISABLE_AIOHTTP_TRANSPORT", "True")
-        _litellm.disable_aiohttp_transport = True
-        # Rebuild the module-level async client with the new transport policy
-        _litellm.module_level_aclient = _AsyncHTTPHandler(timeout=_litellm.request_timeout, client_alias="module level aclient")
-except Exception:
-    pass
+        if _PENDING_BG_DISABLE:
+            try:
+                disable_background_services()
+            except Exception:
+                pass
+
+        # Defer patching completion until first call
+        _WRAPPED = False
+    return _LTL
+
+
+def _patch_wrappers_if_needed():
+    global _WRAPPED
+    if _WRAPPED:
+        return
+    ltl = _ensure_litellm()
+    # Save originals for retry logic
+    globals()["_orig_completion"] = ltl.completion
+    globals()["_orig_acompletion"] = ltl.acompletion
+    # Patch litellm so Router and others see wrappers
+    ltl.completion = completion  # type: ignore
+    ltl.acompletion = acompletion  # type: ignore
+    _WRAPPED = True
 
 # ---------------------------------------------------------------------------
 # Transitional auth canonicalization for Chutes /v1 (until upstream normalizes)
@@ -142,15 +158,13 @@ def _sc_canon_headers_for_chutes(api_base: str | None, api_key: str | None, head
         return api_key, h
     return api_key, h
 
-_orig_completion = _litellm.completion
-_orig_acompletion = _litellm.acompletion
-
-
-class EmptyContentError(APIError):
+class EmptyContentError(Exception):
     def __init__(self, model: str, provider: str):
-        super().__init__(502, "Empty response content", provider, model)
+        super().__init__("Empty response content")
         self.reason = "empty_content"
         self.retry_after = None
+        self.model = model
+        self.provider = provider
 
 
 def _sc_allow_empty_responses() -> bool:
@@ -246,212 +260,350 @@ def _sc_postprocess_require_nonempty(resp):
 
 
 def completion(*args, **kwargs):  # type: ignore[no-redef]
-    api_base = kwargs.get("api_base")
-    api_key = kwargs.get("api_key")
-    headers = kwargs.get("extra_headers")
-    api_key, headers = _sc_canon_headers_for_chutes(api_base, api_key, headers)
-    if headers is not None:
-        kwargs["extra_headers"] = headers
-    retry_on_empty = kwargs.pop("retry_on_empty", True)
-    empty_retries = int(kwargs.pop("empty_retries", 1) or 0)
-    empty_backoff_ms = int(kwargs.pop("empty_backoff_ms", 100))
-    bump_tokens = bool(kwargs.pop("bump_max_tokens_on_empty", False))
-    bump_amount = int(kwargs.pop("max_tokens_bump", 160))
-    model = args[0] if args else kwargs.get("model")
-    messages = kwargs.get("messages") or []
-    attempts = 0
-    base_max_tokens = kwargs.get("max_tokens")
-    last_exc = None
-    while True:
-        attempts += 1
-        try:
-            resp = _orig_completion(*args, **kwargs)
-        except (_AuthErr, _OAILikeErr) as e:
-            msg = str(getattr(e, "message", e))
-            if "401" in msg or "Unauthorized" in msg or "invalid auth" in msg.lower():
-                token = (headers or {}).get("Authorization") or (headers or {}).get("x-api-key") or api_key or ""
-                token = str(token)
-                if token.lower().startswith("bearer "):
-                    token = token.split(" ",1)[-1]
-                alt_headers = dict(headers or {})
-                alt_headers.pop("Authorization", None); alt_headers.pop("authorization", None)
-                alt_headers["x-api-key"] = token
-                kwargs_alt = dict(kwargs)
-                kwargs_alt["extra_headers"] = alt_headers
-                kwargs_alt["_sc_no_canon"] = True
-                resp = _orig_completion(*args, **kwargs_alt)
-                if _sc_is_chutes_base(api_base):
-                    _SC_WINNERS[str(api_base)] = ("x-api-key", _time.time() + 300.0)
-            else:
-                raise
-        if not (retry_on_empty and not _sc_allow_empty_responses() and _sc_messages_have_prompt(messages)):
-            return _sc_postprocess_require_nonempty(resp)
-        if not _sc_response_is_empty(resp):
-            result = _sc_postprocess_require_nonempty(resp)
+    _patch_wrappers_if_needed()
+    try:
+        from litellm.exceptions import AuthenticationError as _AuthErr  # type: ignore
+    except Exception:  # pragma: no cover - fallback when mocking
+        class _AuthErr(Exception):
+            pass
+    try:
+        from litellm.llms.openai_like.common_utils import OpenAILikeError as _OAILikeErr  # type: ignore
+    except Exception:  # pragma: no cover - fallback when extra not present
+        class _OAILikeErr(Exception):
+            pass
+    try:
+        api_base = kwargs.get("api_base")
+        api_key = kwargs.get("api_key")
+        headers = kwargs.get("extra_headers")
+        api_key, headers = _sc_canon_headers_for_chutes(api_base, api_key, headers)
+        if headers is not None:
+            kwargs["extra_headers"] = headers
+        retry_on_empty = kwargs.pop("retry_on_empty", True)
+        empty_retries = int(kwargs.pop("empty_retries", 1) or 0)
+        empty_backoff_ms = int(kwargs.pop("empty_backoff_ms", 100))
+        bump_tokens = bool(kwargs.pop("bump_max_tokens_on_empty", False))
+        bump_amount = int(kwargs.pop("max_tokens_bump", 160))
+        model = args[0] if args else kwargs.get("model")
+        messages = kwargs.get("messages") or []
+        attempts = 0
+        base_max_tokens = kwargs.get("max_tokens")
+        last_exc = None
+        while True:
+            attempts += 1
             try:
-                meta = dict(getattr(result, "scillm_meta", {}) or {})
-                meta.setdefault("attempts", attempts)
-                setattr(result, "scillm_meta", meta)
-            except Exception:
-                pass
-            return result
-        if attempts > empty_retries + 1:
-            last_exc = EmptyContentError(model=model or "unknown", provider="chutes")
-            try:
-                setattr(last_exc, "scillm_meta", {"reason": "empty_content", "attempts": attempts})
-            except Exception:
-                pass
-            break
-        if bump_tokens and kwargs.get("max_tokens") is not None:
-            try:
-                kwargs["max_tokens"] = int(kwargs.get("max_tokens") or base_max_tokens or 0) + bump_amount
-            except Exception:
-                pass
-        if empty_backoff_ms > 0:
-            _time.sleep(empty_backoff_ms / 1000.0)
-    if last_exc:
-        raise last_exc
-    return _sc_postprocess_require_nonempty(resp)
+                resp = globals()["_orig_completion"](*args, **kwargs)
+            except (_AuthErr, _OAILikeErr) as e:
+                msg = str(getattr(e, "message", e))
+                if "401" in msg or "Unauthorized" in msg or "invalid auth" in msg.lower():
+                    token = (headers or {}).get("Authorization") or (headers or {}).get("x-api-key") or api_key or ""
+                    token = str(token)
+                    if token.lower().startswith("bearer "):
+                        token = token.split(" ",1)[-1]
+                    alt_headers = dict(headers or {})
+                    alt_headers.pop("Authorization", None); alt_headers.pop("authorization", None)
+                    alt_headers["x-api-key"] = token
+                    kwargs_alt = dict(kwargs)
+                    kwargs_alt["extra_headers"] = alt_headers
+                    kwargs_alt["_sc_no_canon"] = True
+                    resp = globals()["_orig_completion"](*args, **kwargs_alt)
+                    if _sc_is_chutes_base(api_base):
+                        _SC_WINNERS[str(api_base)] = ("x-api-key", _time.time() + 300.0)
+                else:
+                    raise
+            if not (retry_on_empty and not _sc_allow_empty_responses() and _sc_messages_have_prompt(messages)):
+                return _sc_postprocess_require_nonempty(resp)
+            if not _sc_response_is_empty(resp):
+                result = _sc_postprocess_require_nonempty(resp)
+                try:
+                    meta = dict(getattr(result, "scillm_meta", {}) or {})
+                    meta.setdefault("attempts", attempts)
+                    setattr(result, "scillm_meta", meta)
+                except Exception:
+                    pass
+                return result
+            if attempts > empty_retries + 1:
+                last_exc = EmptyContentError(model=model or "unknown", provider="chutes")
+                try:
+                    setattr(last_exc, "scillm_meta", {"reason": "empty_content", "attempts": attempts})
+                except Exception:
+                    pass
+                break
+            if bump_tokens and kwargs.get("max_tokens") is not None:
+                try:
+                    kwargs["max_tokens"] = int(kwargs.get("max_tokens") or base_max_tokens or 0) + bump_amount
+                except Exception:
+                    pass
+            if empty_backoff_ms > 0:
+                _time.sleep(empty_backoff_ms / 1000.0)
+        if last_exc:
+            raise last_exc
+        return _sc_postprocess_require_nonempty(resp)
+    except Exception as e:
+        raise _normalize_quota_exception(e)
 
 async def acompletion(*args, **kwargs):  # type: ignore[no-redef]
-    api_base = kwargs.get("api_base")
-    api_key = kwargs.get("api_key")
-    headers = kwargs.get("extra_headers")
-    api_key, headers = _sc_canon_headers_for_chutes(api_base, api_key, headers)
-    if headers is not None:
-        kwargs["extra_headers"] = headers
-    retry_on_empty = kwargs.pop("retry_on_empty", True)
-    empty_retries = int(kwargs.pop("empty_retries", 1) or 0)
-    empty_backoff_ms = int(kwargs.pop("empty_backoff_ms", 100))
-    bump_tokens = bool(kwargs.pop("bump_max_tokens_on_empty", False))
-    bump_amount = int(kwargs.pop("max_tokens_bump", 160))
-    model = args[0] if args else kwargs.get("model")
-    messages = kwargs.get("messages") or []
-    attempts = 0
-    base_max_tokens = kwargs.get("max_tokens")
-    last_exc = None
-    while True:
-        attempts += 1
-        try:
-            resp = await _orig_acompletion(*args, **kwargs)
-        except (_AuthErr, _OAILikeErr) as e:
-            msg = str(getattr(e, "message", e))
-            if "401" in msg or "Unauthorized" in msg or "invalid auth" in msg.lower():
-                token = (headers or {}).get("Authorization") or (headers or {}).get("x-api-key") or api_key or ""
-                token = str(token)
-                if token.lower().startswith("bearer "):
-                    token = token.split(" ",1)[-1]
-                alt_headers = dict(headers or {})
-                alt_headers.pop("Authorization", None); alt_headers.pop("authorization", None)
-                alt_headers["x-api-key"] = token
-                kwargs_alt = dict(kwargs)
-                kwargs_alt["extra_headers"] = alt_headers
-                kwargs_alt["_sc_no_canon"] = True
-                resp = await _orig_acompletion(*args, **kwargs_alt)
-                if _sc_is_chutes_base(api_base):
-                    _SC_WINNERS[str(api_base)] = ("x-api-key", _time.time() + 300.0)
-            else:
-                raise
-        if not (retry_on_empty and not _sc_allow_empty_responses() and _sc_messages_have_prompt(messages)):
-            return _sc_postprocess_require_nonempty(resp)
-        if not _sc_response_is_empty(resp):
-            result = _sc_postprocess_require_nonempty(resp)
+    _patch_wrappers_if_needed()
+    try:
+        from litellm.exceptions import AuthenticationError as _AuthErr  # type: ignore
+    except Exception:  # pragma: no cover
+        class _AuthErr(Exception):
+            pass
+    try:
+        from litellm.llms.openai_like.common_utils import OpenAILikeError as _OAILikeErr  # type: ignore
+    except Exception:  # pragma: no cover
+        class _OAILikeErr(Exception):
+            pass
+    try:
+        api_base = kwargs.get("api_base")
+        api_key = kwargs.get("api_key")
+        headers = kwargs.get("extra_headers")
+        api_key, headers = _sc_canon_headers_for_chutes(api_base, api_key, headers)
+        if headers is not None:
+            kwargs["extra_headers"] = headers
+        retry_on_empty = kwargs.pop("retry_on_empty", True)
+        empty_retries = int(kwargs.pop("empty_retries", 1) or 0)
+        empty_backoff_ms = int(kwargs.pop("empty_backoff_ms", 100))
+        bump_tokens = bool(kwargs.pop("bump_max_tokens_on_empty", False))
+        bump_amount = int(kwargs.pop("max_tokens_bump", 160))
+        model = args[0] if args else kwargs.get("model")
+        messages = kwargs.get("messages") or []
+        attempts = 0
+        base_max_tokens = kwargs.get("max_tokens")
+        last_exc = None
+        while True:
+            attempts += 1
             try:
-                meta = dict(getattr(result, "scillm_meta", {}) or {})
-                meta.setdefault("attempts", attempts)
-                setattr(result, "scillm_meta", meta)
-            except Exception:
-                pass
-            return result
-        if attempts > empty_retries + 1:
-            last_exc = EmptyContentError(model=model or "unknown", provider="chutes")
-            try:
-                setattr(last_exc, "scillm_meta", {"reason": "empty_content", "attempts": attempts})
-            except Exception:
-                pass
-            break
-        if bump_tokens and kwargs.get("max_tokens") is not None:
-            try:
-                kwargs["max_tokens"] = int(kwargs.get("max_tokens") or base_max_tokens or 0) + bump_amount
-            except Exception:
-                pass
-        if empty_backoff_ms > 0:
-            await asyncio.sleep(empty_backoff_ms / 1000.0)
-    if last_exc:
-        raise last_exc
-
-# Ensure Router and any code calling litellm.completion/acompletion see the wrapper
-try:
-    _litellm.completion = completion  # type: ignore[assignment]
-    _litellm.acompletion = acompletion  # type: ignore[assignment]
-except Exception:
-    pass
-
-# Best‑effort cleanup of any lingering aiohttp/httpx clients at interpreter exit
-try:
-    import atexit, asyncio
-
-    def _run_coro_sync(coro):
-        try:
-            loop = asyncio.get_event_loop()
-        except RuntimeError:
-            loop = None
-
-        if loop and loop.is_running():
-            try:
-                fut = asyncio.run_coroutine_threadsafe(coro, loop)
-                return fut.result(timeout=5)
-            except Exception:
+                resp = await globals()["_orig_acompletion"](*args, **kwargs)
+            except (_AuthErr, _OAILikeErr) as e:
+                msg = str(getattr(e, "message", e))
+                if "401" in msg or "Unauthorized" in msg or "invalid auth" in msg.lower():
+                    token = (headers or {}).get("Authorization") or (headers or {}).get("x-api-key") or api_key or ""
+                    token = str(token)
+                    if token.lower().startswith("bearer "):
+                        token = token.split(" ",1)[-1]
+                    alt_headers = dict(headers or {})
+                    alt_headers.pop("Authorization", None); alt_headers.pop("authorization", None)
+                    alt_headers["x-api-key"] = token
+                    kwargs_alt = dict(kwargs)
+                    kwargs_alt["extra_headers"] = alt_headers
+                    kwargs_alt["_sc_no_canon"] = True
+                    resp = await globals()["_orig_acompletion"](*args, **kwargs_alt)
+                    if _sc_is_chutes_base(api_base):
+                        _SC_WINNERS[str(api_base)] = ("x-api-key", _time.time() + 300.0)
+                else:
+                    raise
+            if not (retry_on_empty and not _sc_allow_empty_responses() and _sc_messages_have_prompt(messages)):
+                return _sc_postprocess_require_nonempty(resp)
+            if not _sc_response_is_empty(resp):
+                result = _sc_postprocess_require_nonempty(resp)
                 try:
-                    fut.cancel()
+                    meta = dict(getattr(result, "scillm_meta", {}) or {})
+                    meta.setdefault("attempts", attempts)
+                    setattr(result, "scillm_meta", meta)
+                except Exception:
+                    pass
+                return result
+            if attempts > empty_retries + 1:
+                last_exc = EmptyContentError(model=model or "unknown", provider="chutes")
+                try:
+                    setattr(last_exc, "scillm_meta", {"reason": "empty_content", "attempts": attempts})
+                except Exception:
+                    pass
+                break
+            if bump_tokens and kwargs.get("max_tokens") is not None:
+                try:
+                    kwargs["max_tokens"] = int(kwargs.get("max_tokens") or base_max_tokens or 0) + bump_amount
+                except Exception:
+                    pass
+            if empty_backoff_ms > 0:
+                await _asyncio.sleep(empty_backoff_ms / 1000.0)
+        if last_exc:
+            raise last_exc
+    except Exception as e:
+        raise _normalize_quota_exception(e)
+
+# ---------------- Background controls & shutdown ----------------------------------
+
+def disable_background_services() -> None:
+    """Disable litellm background logging worker (idempotent)."""
+    global _BG_DISABLED
+    ltl = _ensure_litellm()
+    try:
+        from litellm.litellm_core_utils import logging_worker as _lw  # type: ignore
+
+        class _NoopLoggingWorker(_lw.LoggingWorker):  # type: ignore
+            def _ensure_queue(self):
+                return
+
+            def start(self):  # noqa: D401
+                return
+
+            def enqueue(self, coroutine):  # type: ignore[override]
+                return
+
+            def ensure_initialized_and_enqueue(self, async_coroutine):  # type: ignore[override]
+                return
+
+            async def stop(self):  # type: ignore[override]
+                return
+
+            async def flush(self):  # type: ignore[override]
+                return
+
+            async def clear_queue(self):  # type: ignore[override]
+                return
+
+        _lw.GLOBAL_LOGGING_WORKER = _NoopLoggingWorker()  # type: ignore
+        _BG_DISABLED = True
+    except Exception:
+        pass
+
+
+def _run_coro_sync(coro):
+    try:
+        loop = _asyncio.get_event_loop()
+    except RuntimeError:
+        loop = None
+    if loop and loop.is_running():
+        fut = _asyncio.run_coroutine_threadsafe(coro, loop)
+        try:
+            return fut.result(timeout=5)
+        except Exception:
+            pass
+    if loop and not loop.is_closed():
+        return loop.run_until_complete(coro)
+    new_loop = _asyncio.new_event_loop()
+    try:
+        return new_loop.run_until_complete(coro)
+    finally:
+        new_loop.close()
+
+
+def shutdown_clients() -> None:
+    """Close global httpx/aiohttp clients and logging queues."""
+    try:
+        ltl = _ensure_litellm()
+    except Exception:
+        return
+    # Close aiohttp base handler
+    try:
+        from litellm.main import base_llm_aiohttp_handler  # type: ignore
+
+        async def _close_aiohttp():
+            with _asyncio.CancelledError:  # type: ignore
+                pass
+            try:
+                await base_llm_aiohttp_handler.close()  # type: ignore
+            except Exception:
+                pass
+
+        _run_coro_sync(_close_aiohttp())
+    except Exception:
+        pass
+    # Close module-level httpx
+    try:
+        acl = getattr(ltl, "module_level_aclient", None)
+        if acl is not None and hasattr(acl, "close"):
+            async def _close_httpx():
+                try:
+                    await acl.close()
                 except Exception:
                     pass
 
-        if loop and not loop.is_closed():
-            try:
-                return loop.run_until_complete(coro)
-            except Exception:
-                pass
+            _run_coro_sync(_close_httpx())
+    except Exception:
+        pass
+    # Attempt to stop logging worker if present
+    try:
+        from litellm.litellm_core_utils import logging_worker as _lw  # type: ignore
 
-        new_loop = asyncio.new_event_loop()
-        try:
-            return new_loop.run_until_complete(coro)
-        finally:
-            new_loop.close()
+        worker = getattr(_lw, "GLOBAL_LOGGING_WORKER", None)
+        if worker is not None and hasattr(worker, "stop"):
+            _run_coro_sync(worker.stop())  # type: ignore
+    except Exception:
+        pass
 
-    def _scillm_cleanup():
-        try:
-            from litellm.main import base_llm_aiohttp_handler  # type: ignore
 
-            async def _close_aiohttp():
-                try:
-                    await base_llm_aiohttp_handler.close()  # type: ignore
-                except Exception:
-                    pass
+shutdown = shutdown_clients
 
-            _run_coro_sync(_close_aiohttp())
-        except Exception:
-            pass
 
-        try:
-            acl = getattr(_litellm, "module_level_aclient", None)
-            if acl is not None and hasattr(acl, "close"):
-                async def _close_httpx():
-                    try:
-                        await acl.close()
-                    except Exception:
-                        pass
+@_contextmanager
+def scoped():
+    """Sync context: use scillm, then shutdown cleanly."""
+    try:
+        yield
+    finally:
+        shutdown()
 
-                _run_coro_sync(_close_httpx())
-        except Exception:
-            pass
 
-    atexit.register(_scillm_cleanup)
+@_asynccontextmanager
+async def ascoped():
+    """Async context: use scillm, then shutdown cleanly."""
+    try:
+        yield
+    finally:
+        await _asyncio.to_thread(shutdown)
 
-    def shutdown_clients():
-        """Public entry point to close global HTTP clients immediately."""
-        _scillm_cleanup()
 
-    shutdown = shutdown_clients
-except Exception:
+# -------------------- JSON mode + preflight helpers -------------------------------
+
+def _bearer_headers(api_key: str | None, extra_headers: _Dict | None = None) -> _Dict:
+    h = dict(extra_headers or {})
+    if api_key:
+        h["Authorization"] = f"Bearer {api_key}"
+    return h
+
+
+def completion_json(model: str, messages: list[dict], *, max_tokens: int | None = None, api_base: str | None = None, api_key: str | None = None, **kwargs):
+    """Sync JSON-mode helper mirroring OpenAI-compatible response."""
+    kwargs = dict(kwargs)
+    kwargs["response_format"] = {"type": "json_object"}
+    kwargs["extra_headers"] = _bearer_headers(api_key, kwargs.get("extra_headers"))
+    return completion(model=model, messages=messages, max_tokens=max_tokens, api_base=api_base, api_key=api_key, **kwargs)
+
+
+async def acompletion_json(model: str, messages: list[dict], *, max_tokens: int | None = None, api_base: str | None = None, api_key: str | None = None, **kwargs):
+    kwargs = dict(kwargs)
+    kwargs["response_format"] = {"type": "json_object"}
+    kwargs["extra_headers"] = _bearer_headers(api_key, kwargs.get("extra_headers"))
+    return await acompletion(model=model, messages=messages, max_tokens=max_tokens, api_base=api_base, api_key=api_key, **kwargs)
+
+
+def models_probe(api_base: str, api_key: str | None = None) -> _Dict:
+    import httpx as _httpx
+
+    t0 = _time.time()
+    try:
+        resp = _httpx.get(f"{api_base.rstrip('/')}/v1/models", headers=_bearer_headers(api_key), timeout=10)
+        return {"ok": resp.status_code == 200, "status": resp.status_code, "elapsed_ms": int((_time.time()-t0)*1000), "body_head": resp.text[:256]}
+    except Exception as e:
+        return {"ok": False, "status": None, "elapsed_ms": int((_time.time()-t0)*1000), "error": str(e)[:256]}
+
+
+def chat_probe_json(api_base: str, api_key: str | None, model: str) -> _Dict:
+    import httpx as _httpx
+    t0 = _time.time()
+    try:
+        payload = {
+            "model": model,
+            "messages": [{"role": "user", "content": "Return {\"ok\":true}"}],
+            "response_format": {"type": "json_object"},
+            "max_tokens": 16,
+        }
+        resp = _httpx.post(f"{api_base.rstrip('/')}/v1/chat/completions", headers=_bearer_headers(api_key), json=payload, timeout=20)
+        return {"ok": resp.status_code == 200, "status": resp.status_code, "elapsed_ms": int((_time.time()-t0)*1000), "body_head": resp.text[:256]}
+    except Exception as e:
+        return {"ok": False, "status": None, "elapsed_ms": int((_time.time()-t0)*1000), "error": str(e)[:256]}
+
+
+# -------------------- Quota/Cap signaling ----------------------------------------
+
+class QuotaExceededError(Exception):
     pass
+
+
+def _normalize_quota_exception(exc: Exception) -> Exception:
+    txt = str(getattr(exc, "message", exc)).lower()
+    if any(k in txt for k in ("quota", "cap", "limit exceeded", "out of credits", "insufficient_quota")):
+        return QuotaExceededError(str(exc))
+    return exc

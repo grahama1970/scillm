@@ -20,12 +20,10 @@ dependencies = [
   "tokenizers",
   "click",
   "json-repair>=0.51.0; python_version >= '3.10'",
-  "jinja2>=3.1.2",
   "aiohttp>=3.10",
   "pydantic>=2.5.0",
   "jsonschema>=4.22.0",
   "pondpond>=1.4.1",
-  "pytest-html>=4.1.1",
   "rapidfuzz>=3.9.7",
   "chutes>=0.0.26",
   "apscheduler>=3.11.0",
@@ -35,6 +33,7 @@ dependencies = [
   "websockets>=13.1",
   "uvicorn>=0.33.0",
   "uvloop>=0.21.0",
+  "pint>=0.23",
 ]
 
 [project.urls]
@@ -44,6 +43,7 @@ Upstream = "https://github.com/BerriAI/litellm"
 Documentation = "https://docs.litellm.ai"
 
 [project.optional-dependencies]
+dotprompt = ["jinja2>=3.1"]
 proxy = [
   "gunicorn>=23.0.0",
   "uvicorn>=0.29.0",
@@ -105,6 +105,8 @@ dev = [
   "black>=23.12.0",
   "mypy>=1.0",
   "pytest>=7.4.3",
+  "pytest-html>=4.1.1",
+  "jinja2>=3.1,<4",
   "pytest-mock>=3.12.0",
   "pytest-asyncio>=0.21.1",
   "requests-mock>=1.12.1",

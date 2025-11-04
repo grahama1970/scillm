@@ -171,6 +171,16 @@ Doctor (one-shot): `make codex-agent-doctor`
 | Multi‑Surface Quickstart | [QUICKSTART.md](QUICKSTART.md) |
 | Auto Code → Review → Green (codex‑agent) | [QUICKSTART.md](QUICKSTART.md#scenario-auto-code-review-green-codex-agent) |
 | Lean4 / Certainly specifics | `scenarios/lean4_*`, `scenarios/certainly_*` |
+
+#### Units Collaboration (Lean4 / Certainly)
+
+The bridge defaults to a collaborative units flow — it never assumes units.
+
+- Policy: `ask_always` (default). The server returns 422 with a single, clear prompt and a JSON example.
+- Confirm: re‑post with `engineering_confirmed: true` to proceed.
+- Preview: `POST /bridge/units/normalize` shows the same prompt/preview without running Lean4.
+
+See `docs/UNITS_COLLABORATION.md` for the minimal set of fields and accepted units.
 | Parallel fan‑out example | `feature_recipes/parallel_acompletions.py` |
 | MCTS & autogen | `scenarios/mcts_codeworld_demo.py` |
 | Retry guide | `docs/guide/RATE_LIMIT_RETRIES.md` |

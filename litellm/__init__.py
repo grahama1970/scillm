@@ -73,11 +73,18 @@ from litellm.constants import (
     DEFAULT_SOFT_BUDGET,
     DEFAULT_ALLOWED_FAILS,
 )
-from litellm.integrations.dotprompt import (
-    global_prompt_manager,
-    global_prompt_directory,
-    set_global_prompt_directory,
-)
+try:
+    from litellm.integrations.dotprompt import (
+        global_prompt_manager,
+        global_prompt_directory,
+        set_global_prompt_directory,
+    )
+except Exception:  # Optional extra not installed
+    global_prompt_manager = None  # type: ignore
+    global_prompt_directory = None  # type: ignore
+
+    def set_global_prompt_directory(*args, **kwargs):  # type: ignore
+        raise ImportError("dotprompt extra not installed; install with scillm[dotprompt]")
 from litellm.types.guardrails import GuardrailItem
 from litellm.types.secret_managers.main import (
     KeyManagementSystem,
