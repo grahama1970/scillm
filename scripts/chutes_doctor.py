@@ -11,7 +11,7 @@ from scillm.extras.chutes_simple import chutes_chat_json
 def main() -> None:
     base = os.environ.get("CHUTES_API_BASE", "").strip()
     key = os.environ.get("CHUTES_API_KEY", "").strip()
-    model = os.environ.get("CHUTES_TEXT_MODEL", "").strip()
+    model = (os.environ.get("CHUTES_MODEL_ID") or os.environ.get("CHUTES_TEXT_MODEL") or "").strip()
     if not base or not key or not model:
         print(json.dumps({
             "ok": False,
@@ -33,4 +33,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

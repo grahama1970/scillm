@@ -509,13 +509,15 @@ def chutes_chat_json(
                     last_retry_after_s = delay
                     total_sleep_s += delay
                     if time.time() - start > max_wall_time_s:
-                        raise Timeout("tenacious wall time exceeded while waiting for reset") from exc
+                        from litellm.exceptions import Timeout as _Timeout
+                        raise _Timeout(message="tenacious wall time exceeded while waiting for reset", model=model, llm_provider="openai_like") from exc
                     continue
             last_retry_after_s = hint
             delay = _tenacious_sleep(attempt, hint, base=backoff_base, cap_s=backoff_cap_s)
             total_sleep_s += delay
             if time.time() - start > max_wall_time_s:
-                raise Timeout(f"tenacious wall time exceeded after {attempt} attempts") from exc
+                from litellm.exceptions import Timeout as _Timeout
+                raise _Timeout(message=f"tenacious wall time exceeded after {attempt} attempts", model=model, llm_provider="openai_like") from exc
 
 
 def _tenacious_sleep(attempt: int, retry_after_hint: Optional[float], *, base: float, cap_s: int) -> float:
@@ -656,13 +658,15 @@ def chutes_router_json(
                                 last_retry_after_s = delay
                                 total_sleep_s += delay
                                 if time.time() - start > max_wall_time_s:
-                                    raise Timeout("tenacious wall time exceeded while waiting for reset") from exc
+                                    from litellm.exceptions import Timeout as _Timeout
+                                    raise _Timeout(message="tenacious wall time exceeded while waiting for reset", model=model, llm_provider="openai_like") from exc
                                 continue
                         last_retry_after_s = hint
                         delay = _tenacious_sleep(attempt, hint, base=backoff_base, cap_s=backoff_cap_s)
                         total_sleep_s += delay
                         if time.time() - start > max_wall_time_s:
-                            raise Timeout(f"tenacious wall time exceeded after {attempt} attempts") from exc
+                            from litellm.exceptions import Timeout as _Timeout
+                            raise _Timeout(message=f"tenacious wall time exceeded after {attempt} attempts", model=model, llm_provider="openai_like") from exc
                 return result
             else:
                 if sc_pacing is not None:

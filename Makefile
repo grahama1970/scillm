@@ -45,10 +45,30 @@ agents-smoke:
 # One-shot live doctor for Chutes (skips if env missing)
 chutes-doctor:
 	@if [ -z "$$CHUTES_API_BASE" ] || [ -z "$$CHUTES_API_KEY" ] || [ -z "$$CHUTES_TEXT_MODEL" ]; then \
-	  echo "skip: set CHUTES_API_BASE, CHUTES_API_KEY, CHUTES_TEXT_MODEL"; \
+	  echo "skip: set CHUTES_API_BASE, CHUTES_API_KEY, CHUTES_MODEL_ID (or CHUTES_TEXT_MODEL)"; \
 	  exit 0; \
 	fi; \
 	python scripts/chutes_doctor.py
+
+# Front door: models + JSON + VLM sanity (uses Bearer + /v1). Fails if any missing.
+.PHONY: chutes-front-door
+chutes-front-door:
+	@if [ -z "$$CHUTES_API_BASE" ] || [ -z "$$CHUTES_API_KEY" ]; then \
+	  echo "error: set CHUTES_API_BASE and CHUTES_API_KEY"; exit 2; \
+	fi; \
+	PYTHONPATH=$$(pwd)/src SCILLM_AUTOSCALE=1 python scripts/tools/scillm_quick_doctor.py
+
+.PHONY: chutes-doctor-vlm
+chutes-doctor-vlm:
+	@if [ -z "$$CHUTES_API_BASE" ] || [ -z "$$CHUTES_API_KEY" ] || [ -z "$$CHUTES_VLM_MODEL" ]; then \
+	  echo "error: set CHUTES_API_BASE, CHUTES_API_KEY, CHUTES_VLM_MODEL"; exit 2; \
+	fi; \
+	PYTHONPATH=$$(pwd)/src python scripts/tools/scillm_multimodal_sanity.py --model "$$CHUTES_VLM_MODEL" --run-curl
+
+# Local CI-style smoke (JSON report + exit code)
+.PHONY: ci-core
+ci-core:
+	PYTHONPATH=$$(pwd)/src python scripts/ci/scillm_core_check.py
 
 # Guard: ensure logs do not contain raw Authorization/x-api-key values
 check-no-secrets-logs:

@@ -1,0 +1,384 @@
+from __future__ import annotations
+
+import asyncio as _asyncio
+from typing import List, Dict, AsyncIterator, Any, Optional
+
+from . import acompletion as _acompletion  # reuse wrapper
+import os as _os
+
+
+async def parallel_acompletions(
+    requests: List[Dict],
+    *,
+    api_base: str | None = None,
+    api_key: str | None = None,
+    custom_llm_provider: str = "openai_like",
+    router: Any | None = None,
+    model_list: Optional[List[Dict]] = None,
+    concurrency: int = 6,
+    tenacious: bool = True,
+    wall_time_s: float = 60.0,
+    timeout: float = 30.0,
+    backoff_base: float = 0.5,
+    backoff_cap_s: float = 8.0,
+    default_max_tokens: int | None = None,
+    default_temperature: float | None = None,
+    response_format: dict | None = None,
+) -> list:
+    """Batch async chat completions with bounded concurrency and optional tenacity.
+
+    Each request item may contain: {model, messages, api_base?, api_key?, max_tokens?, temperature?, response_format?}.
+    Returns a list ordered like `requests`. On failure, an item is a dict: {"error": str, "status": int|None}.
+    """
+    sem = _asyncio.Semaphore(max(1, int(concurrency)))
+    results: list = [None] * len(requests)
+
+    # Optional Router support
+    _router = router
+    if _router is None and model_list:
+        try:
+            from . import Router as _Router  # lazy import to avoid cycles
+            _router = _Router(model_list=model_list)
+        except Exception:
+            _router = None
+
+    async def _one(idx: int, req: dict):
+        model = req.get("model")
+        messages = req.get("messages") or []
+        _api_base = req.get("api_base") or api_base
+        _api_key = req.get("api_key") or api_key
+        _rf = req.get("response_format") or response_format
+        _mt = req.get("max_tokens", default_max_tokens)
+        _temp = req.get("temperature", default_temperature)
+        start = _asyncio.get_event_loop().time()
+        attempt = 0
+        last_err: dict | None = None
+        async with sem:
+            while True:
+                attempt += 1
+                try:
+                    if _router is not None:
+                        resp = await _router.acompletion(
+                            model=model,
+                            messages=messages,
+                            response_format=_rf,
+                            max_tokens=_mt,
+                            temperature=_temp,
+                            timeout=timeout,
+                        )
+                    else:
+                        resp = await _acompletion(
+                            model=model,
+                            api_base=_api_base,
+                            api_key=_api_key,
+                            custom_llm_provider=custom_llm_provider,
+                            messages=messages,
+                            response_format=_rf,
+                            max_tokens=_mt,
+                            temperature=_temp,
+                            timeout=timeout,
+                            retry_on_empty=False,
+                            empty_retries=0,
+                        )
+                    results[idx] = resp
+                    return
+                except Exception as exc:  # normalize transient/backoff
+                    status = getattr(exc, "status", None) or getattr(exc, "status_code", None) or getattr(exc, "http_status", None)
+                    last_err = {"error": str(exc), "status": status}
+                    if not tenacious:
+                        results[idx] = last_err
+                        return
+                    elapsed = _asyncio.get_event_loop().time() - start
+                    if elapsed >= wall_time_s:
+                        results[idx] = last_err or {"error": "wall_time_exceeded", "status": status}
+                        return
+                    msg = str(exc).lower()
+                    transient = (
+                        status in {429, 500, 502, 503, 504} or
+                        any(k in msg for k in ("timeout", "rate limit", "retry", "capacity", "temporarily", "backoff"))
+                    )
+                    if not transient:
+                        results[idx] = last_err
+                        return
+                    delay = min(backoff_cap_s, backoff_base * (2 ** max(0, attempt - 1)))
+                    try:
+                        await _asyncio.sleep(delay)
+                    except Exception:
+                        pass
+
+    await _asyncio.gather(*[_one(i, r or {}) for i, r in enumerate(requests)])
+    return results
+
+
+async def parallel_acompletions_env(
+    requests: List[Dict],
+    *,
+    router: Any | None = None,
+    model_list: Optional[List[Dict]] = None,
+    concurrency: int = 6,
+    tenacious: bool = True,
+    wall_time_s: float = 60.0,
+    timeout: float = 30.0,
+    backoff_base: float = 0.5,
+    backoff_cap_s: float = 8.0,
+) -> list:
+    """Convenience wrapper that pulls CHUTES env and fills missing fields.
+
+    - Fills model from CHUTES_MODEL_ID or CHUTES_TEXT_MODEL when not provided
+    - Fills api_base and api_key from CHUTES_API_BASE / CHUTES_API_KEY
+    - Uses openai_like provider
+    """
+    base = (_os.environ.get("CHUTES_API_BASE") or "").strip()
+    key = (_os.environ.get("CHUTES_API_KEY") or "").strip()
+    model_default = _os.environ.get("CHUTES_MODEL_ID") or _os.environ.get("CHUTES_TEXT_MODEL")
+    reqs: List[Dict] = []
+    for r in requests:
+        rr = dict(r or {})
+        rr.setdefault("model", model_default)
+        rr.setdefault("api_base", base)
+        rr.setdefault("api_key", key)
+        rr.setdefault("custom_llm_provider", "openai_like")
+        reqs.append(rr)
+    return await parallel_acompletions(
+        reqs,
+        api_base=base,
+        api_key=key,
+        custom_llm_provider="openai_like",
+        router=router,
+        model_list=model_list,
+        concurrency=concurrency,
+        tenacious=tenacious,
+        wall_time_s=wall_time_s,
+        timeout=timeout,
+        backoff_base=backoff_base,
+        backoff_cap_s=backoff_cap_s,
+    )
+
+
+async def parallel_acompletions_iter(
+    requests: List[Dict],
+    *,
+    api_base: str | None = None,
+    api_key: str | None = None,
+    custom_llm_provider: str = "openai_like",
+    router: Any | None = None,
+    model_list: Optional[List[Dict]] = None,
+    concurrency: int = 6,
+    tenacious: bool = True,
+    wall_time_s: float = 60.0,
+    timeout: float = 30.0,
+    backoff_base: float = 0.5,
+    backoff_cap_s: float = 8.0,
+) -> AsyncIterator[Dict[str, Any]]:
+    """Yield results as they complete (as_completed style).
+
+    Each yielded item is {index, request, ok, response|error, status?, attempts, elapsed_s}.
+    """
+    sem = _asyncio.Semaphore(max(1, int(concurrency)))
+    loop = _asyncio.get_event_loop()
+    q: _asyncio.Queue = _asyncio.Queue()
+
+    _router = router
+    if _router is None and model_list:
+        try:
+            from . import Router as _Router
+            _router = _Router(model_list=model_list)
+        except Exception:
+            _router = None
+
+    async def _worker(idx: int, req: dict):
+        model = req.get("model")
+        messages = req.get("messages") or []
+        _api_base = req.get("api_base") or api_base
+        _api_key = req.get("api_key") or api_key
+        _rf = req.get("response_format")
+        _mt = req.get("max_tokens")
+        _temp = req.get("temperature")
+        start = loop.time()
+        attempt = 0
+        last_err: dict | None = None
+        async with sem:
+            while True:
+                attempt += 1
+                try:
+                    if _router is not None:
+                        resp = await _router.acompletion(
+                            model=model,
+                            messages=messages,
+                            response_format=_rf,
+                            max_tokens=_mt,
+                            temperature=_temp,
+                            timeout=timeout,
+                        )
+                    else:
+                        resp = await _acompletion(
+                            model=model,
+                            api_base=_api_base,
+                            api_key=_api_key,
+                            custom_llm_provider=custom_llm_provider,
+                            messages=messages,
+                            response_format=_rf,
+                            max_tokens=_mt,
+                            temperature=_temp,
+                            timeout=timeout,
+                            retry_on_empty=False,
+                            empty_retries=0,
+                        )
+                    await q.put({
+                        "index": idx,
+                        "request": req,
+                        "ok": True,
+                        "response": resp,
+                        "attempts": attempt,
+                        "elapsed_s": round(loop.time() - start, 3),
+                    })
+                    return
+                except Exception as exc:
+                    status = getattr(exc, "status", None) or getattr(exc, "status_code", None) or getattr(exc, "http_status", None)
+                    last_err = {"error": str(exc), "status": status}
+                    if not tenacious:
+                        await q.put({
+                            "index": idx,
+                            "request": req,
+                            "ok": False,
+                            "error": last_err["error"],
+                            "status": last_err["status"],
+                            "attempts": attempt,
+                            "elapsed_s": round(loop.time() - start, 3),
+                        })
+                        return
+                    if (loop.time() - start) >= wall_time_s:
+                        await q.put({
+                            "index": idx,
+                            "request": req,
+                            "ok": False,
+                            "error": last_err["error"] if last_err else "wall_time_exceeded",
+                            "status": last_err and last_err.get("status"),
+                            "attempts": attempt,
+                            "elapsed_s": round(loop.time() - start, 3),
+                        })
+                        return
+                    # transient backoff
+                    msg = str(exc).lower()
+                    status_code = last_err and last_err.get("status")
+                    transient = (
+                        status_code in {429, 500, 502, 503, 504} or
+                        any(k in msg for k in ("timeout", "rate limit", "retry", "capacity", "temporarily", "backoff"))
+                    )
+                    if not transient:
+                        await q.put({
+                            "index": idx,
+                            "request": req,
+                            "ok": False,
+                            "error": last_err["error"],
+                            "status": last_err.get("status"),
+                            "attempts": attempt,
+                            "elapsed_s": round(loop.time() - start, 3),
+                        })
+                        return
+                    delay = min(backoff_cap_s, backoff_base * (2 ** max(0, attempt - 1)))
+                    await _asyncio.sleep(delay)
+
+    tasks = [loop.create_task(_worker(i, r or {})) for i, r in enumerate(requests)]
+
+    pending = set(tasks)
+    while pending:
+        done, pending = await _asyncio.wait(pending, return_when=_asyncio.FIRST_COMPLETED)
+        # Drain all currently available queue items
+        while not q.empty():
+            yield await q.get()
+    # Drain any last queued items
+    while not q.empty():
+        yield await q.get()
+
+
+def _extract_content_from_response(resp: Any) -> str:
+    try:
+        if isinstance(resp, dict):
+            msg = (resp.get("choices", [{}])[0].get("message", {}) or {})
+            content = msg.get("content") or ""
+            if not content and isinstance(msg.get("reasoning_content"), str):
+                return msg["reasoning_content"]
+            return content or ""
+        # litellm object
+        msg = resp.choices[0].message
+        content = msg.get("content") if hasattr(msg, "get") else getattr(msg, "content", "")
+        if not content and hasattr(msg, "get") and isinstance(msg.get("reasoning_content"), str):
+            return msg.get("reasoning_content")
+        return content or ""
+    except Exception:
+        return ""
+
+
+async def parallel_acompletions_simple(
+    requests: List[Dict],
+    *,
+    api_base: str | None = None,
+    api_key: str | None = None,
+    custom_llm_provider: str = "openai_like",
+    concurrency: int = 6,
+    tenacious: bool = True,
+    wall_time_s: float = 60.0,
+    timeout: float = 30.0,
+    backoff_base: float = 0.5,
+    backoff_cap_s: float = 8.0,
+) -> List[Dict[str, Any]]:
+    """Minimal wrapper: returns an ordered list of {ok, content, error?, status?}.
+
+    This is the quiet, non-noisy default many users want.
+    """
+    res = await parallel_acompletions(
+        requests,
+        api_base=api_base,
+        api_key=api_key,
+        custom_llm_provider=custom_llm_provider,
+        concurrency=concurrency,
+        tenacious=tenacious,
+        wall_time_s=wall_time_s,
+        timeout=timeout,
+        backoff_base=backoff_base,
+        backoff_cap_s=backoff_cap_s,
+    )
+    out: List[Dict[str, Any]] = []
+    for r in res:
+        if isinstance(r, dict) and r.get("error"):
+            out.append({"ok": False, "content": "", "error": r.get("error"), "status": r.get("status")})
+        else:
+            content = _extract_content_from_response(r)
+            out.append({"ok": bool(content), "content": content})
+    return out
+
+
+async def parallel_acompletions_simple_env(
+    requests: List[Dict],
+    *,
+    concurrency: int = 6,
+    tenacious: bool = True,
+    wall_time_s: float = 60.0,
+    timeout: float = 30.0,
+    backoff_base: float = 0.5,
+    backoff_cap_s: float = 8.0,
+) -> List[Dict[str, Any]]:
+    base = (_os.environ.get("CHUTES_API_BASE") or "").strip()
+    key = (_os.environ.get("CHUTES_API_KEY") or "").strip()
+    model_default = _os.environ.get("CHUTES_MODEL_ID") or _os.environ.get("CHUTES_TEXT_MODEL")
+    reqs: List[Dict] = []
+    for r in requests:
+        rr = dict(r or {})
+        rr.setdefault("model", model_default)
+        rr.setdefault("api_base", base)
+        rr.setdefault("api_key", key)
+        rr.setdefault("custom_llm_provider", "openai_like")
+        reqs.append(rr)
+    return await parallel_acompletions_simple(
+        reqs,
+        api_base=base,
+        api_key=key,
+        custom_llm_provider="openai_like",
+        concurrency=concurrency,
+        tenacious=tenacious,
+        wall_time_s=wall_time_s,
+        timeout=timeout,
+        backoff_base=backoff_base,
+        backoff_cap_s=backoff_cap_s,
+    )

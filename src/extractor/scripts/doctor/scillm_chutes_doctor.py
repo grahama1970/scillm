@@ -33,20 +33,31 @@ def _env(name: str) -> str:
 def smoke_models() -> None:
     base = _env("CHUTES_API_BASE")
     key = _env("CHUTES_API_KEY")
-    r = httpx.get(base.rstrip("/") + "/models", headers={"x-api-key": key}, timeout=10)
+    r = httpx.get(
+        base.rstrip("/") + "/models",
+        headers={"Authorization": f"Bearer {key}"},
+        timeout=10,
+    )
     print(f"MODELS_HTTP {r.status_code}")
     if r.status_code != 200:
         sys.exit(21)
     try:
         data = r.json()
-        first = (data.get("data") or [{}])[0].get("id", "")
+        ids = [d.get("id", "") for d in (data.get("data") or [])]
+        first = ids[0] if ids else ""
         print(f"MODELS_FIRST_ID {first}")
+        if ids:
+            print("MODELS_IDS " + ",".join(ids[:12]))
     except Exception:
         pass
 
 
 def smoke_json() -> None:
-    model = os.getenv("CHUTES_TEXT_MODEL") or os.getenv("LITELLM_DEFAULT_MODEL")
+    model = (
+        os.getenv("CHUTES_MODEL_ID")
+        or os.getenv("CHUTES_TEXT_MODEL")
+        or os.getenv("LITELLM_DEFAULT_MODEL")
+    )
     if not model:
         print("JSON_SMOKE_SKIPPED no_text_model")
         return
@@ -64,26 +75,31 @@ def smoke_json() -> None:
 
 
 def smoke_vlm() -> None:
-    model = os.getenv("LITELLM_LARGE_VLLM_MODEL") or os.getenv("LITELLM_VLM_MODEL")
+    model = os.getenv("CHUTES_VLM_MODEL") or os.getenv("LITELLM_LARGE_VLLM_MODEL") or os.getenv("LITELLM_VLM_MODEL")
     if not model:
         print("VLM_SMOKE_SKIPPED no_vlm_model")
         return
-    # 1x1 transparent PNG
-    png = base64.b64encode(b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x06\x00\x00\x00\x1f\x15\xc4\x89\x00\x00\x00\x0cIDATx\x9cc```\x00\x00\x00\x06\x00\x03\n\xfdy\x8f\x00\x00\x00\x00IEND\xaeB`\x82").decode(
-        "ascii"
-    )
-    messages = [
-        {"role": "system", "content": "Describe the image in 1 short sentence."},
-        {
-            "role": "user",
-            "content": [
-                {"type": "text", "text": "Image follows"},
-                {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{png}"}},
-            ],
-        },
+    # Use a permissive public image URL (avoid hosts that block server-side fetch).
+    img_url = "https://picsum.photos/seed/scillm/256/256"
+    variants = [
+        [{"type": "text", "text": "Image follows"}, {"type": "image_url", "image_url": {"url": img_url}}],
+        [{"type": "text", "text": "Image follows"}, {"type": "image_url", "image_url": img_url}],
+        [{"type": "text", "text": "Image follows"}, {"type": "input_image", "image_url": img_url}],
+        [{"type": "text", "text": "Image follows"}, {"type": "input_image", "image_url": {"url": img_url}}],
     ]
-    resp = chutes_chat(model=model, messages=messages, temperature=0.2, timeout=20)
-    content = (resp.get("choices") or [{}])[0].get("message", {}).get("content", "")
+    content = ""
+    for parts in variants:
+        messages = [
+            {"role": "system", "content": "Describe the image in 1 short sentence."},
+            {"role": "user", "content": parts},
+        ]
+        try:
+            resp = chutes_chat(model=model, messages=messages, temperature=0.2, timeout=20)
+            content = (resp.get("choices") or [{}])[0].get("message", {}).get("content", "")
+            if content:
+                break
+        except Exception:
+            continue
     print(f"VLM_SMOKE_OK {int(bool(content))}")
     if not content:
         sys.exit(41)
@@ -94,7 +110,7 @@ def main() -> None:
         smoke_models()
         smoke_json()
         smoke_vlm()
-        print("DOCTOR_OK 0")
+        print('{"ok": true}')
         sys.exit(0)
     except SystemExit as se:
         # already printed an error code
@@ -106,4 +122,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

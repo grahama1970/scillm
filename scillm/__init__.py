@@ -86,6 +86,11 @@ def _patch_wrappers_if_needed():
     ltl.acompletion = acompletion  # type: ignore
     _WRAPPED = True
 
+# Lightweight Router passthrough so extras can import Router from scillm
+def Router(*args, **kwargs):  # type: ignore
+    ltl = _ensure_litellm()
+    return ltl.Router(*args, **kwargs)
+
 # ---------------------------------------------------------------------------
 # Transitional auth canonicalization for Chutes /v1 (until upstream normalizes)
 # ---------------------------------------------------------------------------
@@ -210,6 +215,14 @@ def _sc_response_is_empty(resp) -> bool:
         choice = resp.choices[0]
         msg = choice.message
         payload = getattr(msg, "content", None)
+        # Fallback for providers that deliver text in reasoning_content when content is null
+        if (payload is None or payload == "") and hasattr(msg, "get"):
+            try:
+                rc = msg.get("reasoning_content")
+                if isinstance(rc, str) and rc.strip():
+                    payload = rc
+            except Exception:
+                pass
         if payload is None and hasattr(msg, "get"):
             try:
                 payload = msg.get("content")
@@ -257,6 +270,8 @@ def _sc_postprocess_require_nonempty(resp):
     except Exception:
         pass
     return resp
+
+from .http_openai_like import direct_openai_chat as _direct_openai_chat  # factored out
 
 
 def completion(*args, **kwargs):  # type: ignore[no-redef]
@@ -391,7 +406,42 @@ async def acompletion(*args, **kwargs):  # type: ignore[no-redef]
                     if _sc_is_chutes_base(api_base):
                         _SC_WINNERS[str(api_base)] = ("x-api-key", _time.time() + 300.0)
                 else:
-                    raise
+                    # For Chutes bases, attempt a direct HTTP call (curl-equivalent)
+                    if _sc_is_chutes_base(api_base):
+                        try:
+                            payload = {
+                                "model": model,
+                                "messages": messages,
+                                "max_tokens": kwargs.get("max_tokens"),
+                                "temperature": kwargs.get("temperature"),
+                            }
+                            if kwargs.get("response_format"):
+                                payload["response_format"] = kwargs.get("response_format")
+                            resp = _direct_openai_chat(api_base, api_key, payload=payload, timeout=float(kwargs.get("timeout") or 20.0))
+                        except Exception:
+                            pass
+                    if resp is None:
+                        raise
+            except Exception as e_all:
+                # Network/5xx fallback path for Chutes
+                status = getattr(e_all, "status", None) or getattr(e_all, "status_code", None) or getattr(e_all, "http_status", None)
+                msg_low = str(e_all).lower()
+                transient_5xx = (status in {500,502,503,504}) or ("service unavailable" in msg_low) or ("temporarily" in msg_low)
+                if _sc_is_chutes_base(api_base) and transient_5xx:
+                    try:
+                        payload = {
+                            "model": model,
+                            "messages": messages,
+                            "max_tokens": kwargs.get("max_tokens"),
+                            "temperature": kwargs.get("temperature"),
+                        }
+                        if kwargs.get("response_format"):
+                            payload["response_format"] = kwargs.get("response_format")
+                        resp = _direct_openai_chat(api_base, api_key, payload=payload, timeout=float(kwargs.get("timeout") or 20.0))
+                    except Exception:
+                        raise e_all
+                else:
+                    raise e_all
             if not (retry_on_empty and not _sc_allow_empty_responses() and _sc_messages_have_prompt(messages)):
                 return _sc_postprocess_require_nonempty(resp)
             if not _sc_response_is_empty(resp):
@@ -418,6 +468,21 @@ async def acompletion(*args, **kwargs):  # type: ignore[no-redef]
             if empty_backoff_ms > 0:
                 await _asyncio.sleep(empty_backoff_ms / 1000.0)
         if last_exc:
+            # Final direct-call fallback for Chutes if still empty
+            if _sc_is_chutes_base(api_base):
+                try:
+                    payload = {
+                        "model": model,
+                        "messages": messages,
+                        "max_tokens": kwargs.get("max_tokens"),
+                        "temperature": kwargs.get("temperature"),
+                    }
+                    if kwargs.get("response_format"):
+                        payload["response_format"] = kwargs.get("response_format")
+                    resp2 = _direct_openai_chat(api_base, api_key, payload=payload, timeout=float(kwargs.get("timeout") or 20.0))
+                    return _sc_postprocess_require_nonempty(resp2)
+                except Exception:
+                    pass
             raise last_exc
     except Exception as e:
         raise _normalize_quota_exception(e)
@@ -567,6 +632,15 @@ async def acompletion_json(model: str, messages: list[dict], *, max_tokens: int 
     kwargs["response_format"] = {"type": "json_object"}
     kwargs["extra_headers"] = _bearer_headers(api_key, kwargs.get("extra_headers"))
     return await acompletion(model=model, messages=messages, max_tokens=max_tokens, api_base=api_base, api_key=api_key, **kwargs)
+
+
+from .batch import (
+    parallel_acompletions,
+    parallel_acompletions_env,
+    parallel_acompletions_iter,
+    parallel_acompletions_simple,
+    parallel_acompletions_simple_env,
+)
 
 
 def models_probe(api_base: str, api_key: str | None = None) -> _Dict:

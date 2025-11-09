@@ -1,0 +1,35 @@
+name: scillm-core
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  core:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install -U pip
+          pip install -e .[dev]
+
+      - name: Run scillm core check
+        env:
+          CHUTES_API_BASE: ${{ secrets.CHUTES_API_BASE }}
+          CHUTES_API_KEY: ${{ secrets.CHUTES_API_KEY }}
+          CHUTES_MODEL_ID: ${{ secrets.CHUTES_MODEL_ID }}
+          CHUTES_TEXT_MODEL: ${{ secrets.CHUTES_TEXT_MODEL }}
+          CHUTES_VLM_MODEL: ${{ secrets.CHUTES_VLM_MODEL }}
+        run: |
+          export PYTHONPATH="$GITHUB_WORKSPACE/src"
+          python scripts/ci/scillm_core_check.py
+
