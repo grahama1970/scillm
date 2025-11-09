@@ -247,3 +247,11 @@ grafana-screens:
 	@mkdir -p artifacts
 	@uv run -- python scripts/grafana_screenshot.py
 	@echo "Saved screenshots under artifacts/."
+# --- SciLLM sanity (Chutes) ---------------------------------------------------
+.PHONY: scillm-sanity chutes-sanity
+scillm-sanity:
+	@echo "[sanity] SciLLM 5-call batch (text + VLM)"
+	@PYTHONPATH=$(PWD) \
+		python scripts/sanity/chutes_batch_sanity.py
+
+chutes-sanity: scillm-sanity

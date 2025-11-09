@@ -5,6 +5,7 @@ from typing import List, Dict, AsyncIterator, Any, Optional
 
 from . import acompletion as _acompletion  # reuse wrapper
 import os as _os
+from .preprocess import expand_requests_io as _expand_requests_io
 
 
 async def parallel_acompletions(
@@ -17,10 +18,10 @@ async def parallel_acompletions(
     model_list: Optional[List[Dict]] = None,
     concurrency: int = 6,
     tenacious: bool = True,
-    wall_time_s: float = 60.0,
-    timeout: float = 30.0,
+    wall_time_s: float = 900.0,
+    timeout: float = 20.0,
     backoff_base: float = 0.5,
-    backoff_cap_s: float = 8.0,
+    backoff_cap_s: float = 30.0,
     default_max_tokens: int | None = None,
     default_temperature: float | None = None,
     response_format: dict | None = None,
@@ -33,6 +34,12 @@ async def parallel_acompletions(
     sem = _asyncio.Semaphore(max(1, int(concurrency)))
     results: list = [None] * len(requests)
 
+    # Fill CHUTES env defaults if not provided
+    if not api_base:
+        api_base = (_os.environ.get("CHUTES_API_BASE") or "").strip() or None
+    if not api_key:
+        api_key = (_os.environ.get("CHUTES_API_KEY") or "").strip() or None
+
     # Optional Router support
     _router = router
     if _router is None and model_list:
@@ -41,6 +48,44 @@ async def parallel_acompletions(
             _router = _Router(model_list=model_list)
         except Exception:
             _router = None
+
+    # Default models from env if missing on a request
+    text_default = _os.environ.get("CHUTES_MODEL_ID") or _os.environ.get("CHUTES_TEXT_MODEL")
+    vlm_default = _os.environ.get("CHUTES_VLM_MODEL")
+
+    def _needs_vlm(req: dict) -> bool:
+        try:
+            msgs = req.get("messages") or []
+            for m in msgs:
+                content = m.get("content") if isinstance(m, dict) else None
+                # OpenAI multimodal content is a list of parts
+                if isinstance(content, list):
+                    for part in content:
+                        if isinstance(part, dict) and part.get("type") == "image_url":
+                            return True
+                # Some callers may embed a single image_url dict
+                if isinstance(content, dict) and "image_url" in content:
+                    return True
+        except Exception:
+            return False
+        return False
+
+    # Built-in detection for explicit IO fields: url, file_path, urls[], paths[]
+    # This restores historical convenience while avoiding hidden I/O on plain strings.
+    try:
+        requests = _expand_requests_io(requests)
+    except Exception:
+        pass
+
+    for r in requests:
+        if not isinstance(r, dict):
+            continue
+        if r.get("model"):
+            continue
+        if _needs_vlm(r) and vlm_default:
+            r["model"] = vlm_default
+        elif text_default:
+            r["model"] = text_default
 
     async def _one(idx: int, req: dict):
         model = req.get("model")
@@ -107,7 +152,31 @@ async def parallel_acompletions(
                         pass
 
     await _asyncio.gather(*[_one(i, r or {}) for i, r in enumerate(requests)])
-    return results
+
+    # Normalize to Router-like parallel result objects
+    out: List[Dict[str, Any]] = []
+    for i, r in enumerate(results):
+        req = requests[i] if i < len(requests) else {}
+        if isinstance(r, dict) and r.get("error"):
+            out.append({
+                "index": i,
+                "request": req,
+                "response": None,
+                "error": r.get("error"),
+                "status": r.get("status"),
+                "content": None,
+            })
+        else:
+            content = _extract_content_from_response(r)
+            out.append({
+                "index": i,
+                "request": req,
+                "response": r,
+                "error": None,
+                "status": None,
+                "content": content,
+            })
+    return out
 
 
 async def parallel_acompletions_env(
@@ -117,10 +186,10 @@ async def parallel_acompletions_env(
     model_list: Optional[List[Dict]] = None,
     concurrency: int = 6,
     tenacious: bool = True,
-    wall_time_s: float = 60.0,
-    timeout: float = 30.0,
+    wall_time_s: float = 900.0,
+    timeout: float = 20.0,
     backoff_base: float = 0.5,
-    backoff_cap_s: float = 8.0,
+    backoff_cap_s: float = 30.0,
 ) -> list:
     """Convenience wrapper that pulls CHUTES env and fills missing fields.
 
@@ -165,10 +234,10 @@ async def parallel_acompletions_iter(
     model_list: Optional[List[Dict]] = None,
     concurrency: int = 6,
     tenacious: bool = True,
-    wall_time_s: float = 60.0,
-    timeout: float = 30.0,
+    wall_time_s: float = 900.0,
+    timeout: float = 20.0,
     backoff_base: float = 0.5,
-    backoff_cap_s: float = 8.0,
+    backoff_cap_s: float = 30.0,
 ) -> AsyncIterator[Dict[str, Any]]:
     """Yield results as they complete (as_completed style).
 

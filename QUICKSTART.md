@@ -13,6 +13,22 @@ Before you start, verify the Chutes front door:
 make chutes-front-door
 ```
 
+## Sanity Checks (Text + VLM, Batch)
+
+Use the built‑in 5‑call sanity script (text + VLM) to verify your tenant/models end‑to‑end. It prints a single JSON summary and exits 0/1. The calls cover strict‑JSON echo, France/Paris, HTTPS VLM, local file‑path VLM, and an inline HTML classification fixture (token `luminous-harvest`) so html/file-path extraction regressions show up immediately.
+
+```bash
+# Required env: CHUTES_API_BASE, CHUTES_API_KEY
+# Preferred: CHUTES_TEXT_MODEL (or CHUTES_MODEL_ID)
+# For VLM prompts: CHUTES_VLM_MODEL
+
+PYTHONPATH=$(pwd) \
+python scripts/sanity/chutes_batch_sanity.py
+
+# or via Makefile
+make scillm-sanity
+```
+
 ## Project Defaults (.env)
 
 These are the repo‑wide defaults we ship in `.env` for convenience. They are examples; always verify your tenant actually serves them via `GET $CHUTES_API_BASE/models` (or run `make chutes-front-door`).
