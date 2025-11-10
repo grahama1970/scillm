@@ -9,7 +9,8 @@ description = "SciLLM — a scientific/engineering‑focused fork of LiteLLM (Op
 readme = "README.md"
 authors = [{name = "Graham Anderson", email = "graham@grahama.co"}]
 license = {text = "MIT"}
-requires-python = ">=3.8.1,<4.0, !=3.9.7"
+# requires-python = ">=3.8.1,<4.0, !=3.9.7"
+requires-python = ">=3.10"
 dependencies = [
   "fastuuid>=0.12.0",
   "httpx>=0.23.0",
@@ -34,6 +35,7 @@ dependencies = [
   "uvicorn>=0.33.0",
   "uvloop>=0.21.0",
   "pint>=0.23",
+  "json-repair>=0.53.0",
 ]
 
 [project.urls]

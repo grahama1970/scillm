@@ -18,21 +18,28 @@ def _parse_summary(stdout: str):
 
 @pytest.mark.asyncio
 async def test_successful_run(monkeypatch, capsys):
-    async def fake_acompletions(requests, **kwargs):
-        res = []
+    async def fake_iter(requests, **kwargs):
         for idx, req in enumerate(requests):
             if idx == 0:
-                content = {"ok": True}
+                payload = {"ok": True}
             elif idx == 1:
-                content = {"country": "France", "capital": "Paris"}
+                payload = {"country": "France", "capital": "Paris"}
             elif idx in (2, 3):
-                content = {"description": "panda"}
+                payload = {"description": "panda"}
             else:
-                content = {"category": "luminous-harvest"}
-            res.append({"request": req, "content": content})
-        return res
+                payload = {"category": "luminous-harvest"}
+            resp = {
+                "choices": [
+                    {
+                        "message": {
+                            "content": json.dumps(payload)
+                        }
+                    }
+                ]
+            }
+            yield {"index": idx, "request": req, "ok": True, "response": resp}
 
-    monkeypatch.setattr(mod, "parallel_acompletions", fake_acompletions)
+    monkeypatch.setattr(mod, "parallel_acompletions_iter", fake_iter)
     os.environ.setdefault("CHUTES_API_BASE", "http://localhost")
     os.environ.setdefault("CHUTES_API_KEY", "x")
     os.environ.setdefault("CHUTES_TEXT_MODEL", "text")
@@ -48,10 +55,16 @@ async def test_successful_run(monkeypatch, capsys):
 
 @pytest.mark.asyncio
 async def test_parallel_acompletions_failure_bubbles(monkeypatch, capsys):
-    async def fake_acompletions(requests, **kwargs):
-        raise RuntimeError("HTTP 503 Service Unavailable")
+    async def fake_iter(requests, **kwargs):
+        for idx, req in enumerate(requests):
+            yield {
+                "index": idx,
+                "request": req,
+                "ok": False,
+                "error": "HTTP 503 Service Unavailable",
+            }
 
-    monkeypatch.setattr(mod, "parallel_acompletions", fake_acompletions)
+    monkeypatch.setattr(mod, "parallel_acompletions_iter", fake_iter)
     os.environ.setdefault("CHUTES_API_BASE", "http://localhost")
     os.environ.setdefault("CHUTES_API_KEY", "x")
     os.environ.setdefault("CHUTES_TEXT_MODEL", "text")
@@ -67,10 +80,8 @@ async def test_parallel_acompletions_failure_bubbles(monkeypatch, capsys):
 
 @pytest.mark.asyncio
 async def test_dry_run_preview(monkeypatch, capsys):
-    async def fake_acompletions(requests, **kwargs):
-        return []
-
-    monkeypatch.setattr(mod, "parallel_acompletions", fake_acompletions)
+    # Dry run returns before hitting parallel_acompletions_iter,
+    # so no monkeypatch needed.
     os.environ.setdefault("CHUTES_API_BASE", "http://localhost")
     os.environ.setdefault("CHUTES_API_KEY", "x")
     os.environ.setdefault("CHUTES_TEXT_MODEL", "text")
