@@ -255,6 +255,39 @@ async def parallel_acompletions_iter(
         except Exception:
             _router = None
 
+    text_default = _os.environ.get("CHUTES_MODEL_ID") or _os.environ.get("CHUTES_TEXT_MODEL")
+    vlm_default = _os.environ.get("CHUTES_VLM_MODEL")
+
+    def _needs_vlm(req: dict) -> bool:
+        try:
+            arts = req.get("artifacts") or {}
+            urls = arts.get("urls") or []
+            fps = arts.get("file_paths") or []
+            if urls:
+                return True
+            if any(str(p).lower().endswith((".png", ".jpg", ".jpeg", ".gif", ".webp")) for p in fps):
+                return True
+            msgs = req.get("messages") or []
+            for m in msgs:
+                content = m.get("content")
+                if isinstance(content, list):
+                    if any(isinstance(part, dict) and part.get("type") == "image_url" for part in content):
+                        return True
+        except Exception:
+            return False
+        return False
+
+    try:
+        requests = _expand_requests_io(requests)
+    except Exception:
+        pass
+    for r in requests:
+        if isinstance(r, dict) and not r.get("model"):
+            if _needs_vlm(r) and vlm_default:
+                r["model"] = vlm_default
+            elif text_default:
+                r["model"] = text_default
+
     async def _worker(idx: int, req: dict):
         model = req.get("model")
         messages = req.get("messages") or []
@@ -298,6 +331,7 @@ async def parallel_acompletions_iter(
                         "request": req,
                         "ok": True,
                         "response": resp,
+                        "content": _extract_content_from_response(resp),
                         "attempts": attempt,
                         "elapsed_s": round(loop.time() - start, 3),
                     })
@@ -312,6 +346,7 @@ async def parallel_acompletions_iter(
                             "ok": False,
                             "error": last_err["error"],
                             "status": last_err["status"],
+                            "content": None,
                             "attempts": attempt,
                             "elapsed_s": round(loop.time() - start, 3),
                         })
@@ -323,6 +358,7 @@ async def parallel_acompletions_iter(
                             "ok": False,
                             "error": last_err["error"] if last_err else "wall_time_exceeded",
                             "status": last_err and last_err.get("status"),
+                            "content": None,
                             "attempts": attempt,
                             "elapsed_s": round(loop.time() - start, 3),
                         })
@@ -341,6 +377,7 @@ async def parallel_acompletions_iter(
                             "ok": False,
                             "error": last_err["error"],
                             "status": last_err.get("status"),
+                            "content": None,
                             "attempts": attempt,
                             "elapsed_s": round(loop.time() - start, 3),
                         })
