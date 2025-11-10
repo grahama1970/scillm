@@ -68,6 +68,19 @@ def _http_get(url: str, *, max_bytes: int, timeout: float) -> Tuple[str, str]:
         return f"FETCH_ERROR: {e}", "text/plain"
 
 
+def _http_get_binary(url: str, *, timeout: float) -> Tuple[bytes, str]:
+    try:
+        import urllib.request
+
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            data = resp.read()
+            ctype = resp.headers.get("Content-Type") or "application/octet-stream"
+        return data, ctype.split(";")[0].strip().lower()
+    except Exception as e:
+        raise RuntimeError(f"FETCH_ERROR: {e}") from e
+
+
 def expand_requests_io(
     requests: List[Dict[str, Any]],
     *,
@@ -84,7 +97,9 @@ def expand_requests_io(
     out: List[Dict[str, Any]] = []
     # Default ON for simple agent experience; can be disabled via SCILLM_AUTO_IMAGE_DATAURL=0
     auto_image = str(os.getenv("SCILLM_AUTO_IMAGE_DATAURL", "1")).lower() in {"1","true","yes","on"}
+    inline_remote_images = str(os.getenv("SCILLM_INLINE_REMOTE_IMAGES", "0")).lower() in {"1","true","yes","on"}
     image_exts = {".jpg",".jpeg",".png",".gif",".webp",".bmp"}
+    inline_cache: Dict[str, str] = {}
     for req in requests or []:
         r = dict(req or {})
         text_parts: List[str] = []
@@ -95,11 +110,21 @@ def expand_requests_io(
             # Heuristic: if looks like an image and auto_image is on, append as image_url part
             if auto_image and any(url.lower().endswith(ext) for ext in image_exts):
                 msgs = list(r.get("messages") or [])
+                image_url_payload = url
+                if inline_remote_images:
+                    try:
+                        body, content_type = _http_get_binary(url, timeout=timeout)
+                        import base64
+
+                        encoded = base64.b64encode(body).decode("ascii")
+                        image_url_payload = f"data:{content_type};base64,{encoded}"
+                    except Exception:
+                        pass
                 msgs.append({
                     "role": "user",
                     "content": [
                         {"type": "text", "text": "Image input."},
-                        {"type": "image_url", "image_url": {"url": url}},
+                        {"type": "image_url", "image_url": {"url": image_url_payload}},
                     ],
                 })
                 r["messages"] = msgs
@@ -131,15 +156,33 @@ def expand_requests_io(
                 text, _ = _read_file(fpath, max_bytes=max_bytes)
                 text_parts.append(f"FILE: {os.path.basename(fpath)}\n\n{text}\n")
         # multi-urls / multi-paths
+        artifact_urls = list((r.get("artifacts") or {}).get("urls") or [])
         for u in (r.get("urls") or []):
             if isinstance(u, str) and _is_http_url(u):
                 txt, _ = _http_get(u, max_bytes=max_bytes, timeout=timeout)
                 text_parts.append(f"URL: {u}\n\n{txt}\n")
+        for u in artifact_urls:
+            if isinstance(u, str) and _is_http_url(u) and inline_remote_images:
+                if u not in inline_cache:
+                    try:
+                        body, ctype = _http_get_binary(u, timeout=timeout)
+                        import base64
+
+                        inline_cache[u] = f"data:{ctype};base64,{base64.b64encode(body).decode('ascii')}"
+                    except Exception:
+                        inline_cache[u] = u
+                # store replacement for later message rewrite if needed
+                r.setdefault("_artifacts_inline", {})[u] = inline_cache[u]
         for p in (r.get("paths") or []):
             if isinstance(p, str) and os.path.exists(p):
                 txt, _ = _read_file(p, max_bytes=max_bytes)
                 text_parts.append(f"FILE: {os.path.basename(p)}\n\n{txt}\n")
 
+        if inline_remote_images:
+            msgs = list(r.get("messages") or [])
+            if msgs:
+                _inline_message_images(msgs, inline_cache, timeout=timeout)
+                r["messages"] = msgs
         if text_parts:
             body = "\n\n".join(text_parts)
             msgs = list(r.get("messages") or [])
@@ -147,3 +190,25 @@ def expand_requests_io(
             r["messages"] = msgs
         out.append(r)
     return out
+
+
+def _inline_message_images(messages: List[Dict[str, Any]], cache: Dict[str, str], *, timeout: float) -> None:
+    for msg in messages:
+        content = msg.get("content")
+        if isinstance(content, list):
+            for part in content:
+                if isinstance(part, dict) and part.get("type") == "image_url":
+                    payload = part.get("image_url") or {}
+                    if isinstance(payload, dict):
+                        url_val = payload.get("url")
+                        if isinstance(url_val, str) and _is_http_url(url_val):
+                            if url_val not in cache:
+                                try:
+                                    body, ctype = _http_get_binary(url_val, timeout=timeout)
+                                    import base64
+
+                                    encoded = base64.b64encode(body).decode("ascii")
+                                    cache[url_val] = f"data:{ctype};base64,{encoded}"
+                                except Exception:
+                                    cache[url_val] = url_val
+                            payload["url"] = cache[url_val]

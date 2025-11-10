@@ -27,6 +27,13 @@ python scripts/sanity/chutes_batch_sanity.py
 
 # or via Makefile
 make scillm-sanity
+
+# As-completed (progress) mode
+# Use --verbose to print per-scenario lines as each finishes via parallel_acompletions_iter.
+# Add --inline-remote-images (sets SCILLM_INLINE_REMOTE_IMAGES=1) to download HTTPS image URLs and inline them (useful if the gateway cannot fetch your URLs directly).
+# The final JSON summary keeps the original order even though execution is unordered internally.
+# Example:
+# python scripts/sanity/chutes_batch_sanity.py --execute --verbose --inline-remote-images
 ```
 
 ## Project Defaults (.env)

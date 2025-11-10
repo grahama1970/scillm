@@ -50,23 +50,27 @@ async def main(argv: List[str] | None = None) -> int:
     parser.add_argument("--tenacious", dest="tenacious", action="store_true", help="Enable client-side retries/backoff within wall time")
     parser.add_argument("--no-tenacious", dest="tenacious", action="store_false", help="Disable client-side retries/backoff")
     parser.set_defaults(tenacious=True)
-    parser.add_argument("--backoff-base", type=float, default=_env_float("SCILLM_BACKOFF_BASE", 0.5), help="Exponential backoff base seconds")
-    parser.add_argument("--backoff-cap-s", type=float, default=_env_float("SCILLM_BACKOFF_CAP_S", 30.0), help="Max backoff interval seconds")
-    parser.add_argument("--wall-time-s", type=float, default=default_wall, help="Overall wall time budget seconds")
-    parser.add_argument("--timeout-s", type=float, default=default_timeout, help="Per-request provider timeout seconds")
+    parser.add_argument("--retry-initial-delay", "--backoff-base", type=float, default=_env_float("SCILLM_BACKOFF_BASE", 0.5), help="Initial delay before retries (seconds)")
+    parser.add_argument("--retry-max-delay", "--backoff-cap-s", type=float, default=_env_float("SCILLM_BACKOFF_CAP_S", 30.0), help="Maximum delay between retries (seconds)")
+    parser.add_argument("--retry-wall-time-s", "--wall-time-s", type=float, default=default_wall, help="Overall retry wall time per request (seconds)")
+    parser.add_argument("--request-timeout-s", "--timeout-s", type=float, default=default_timeout, help="Provider request timeout (seconds)")
     parser.add_argument("--concurrency", type=int, default=default_concurrency, help="Parallel request concurrency")
     json_sanitize_default = os.getenv("SCILLM_JSON_SANITIZE", "0").lower() in {"1", "true", "yes", "on"}
     parser.add_argument("--json-sanitize", dest="json_sanitize", action="store_true", default=json_sanitize_default,
                         help="Attempt to repair near-JSON outputs before failing strict parsing")
     parser.add_argument("--verbose", action="store_true", help="Print per-scenario progress and retry events")
+    parser.add_argument("--inline-remote-images", action="store_true", help="Download HTTPS image URLs and inline them as data URLs (avoids remote fetch issues)")
     parser.add_argument("--no-json-sanitize", dest="json_sanitize", action="store_false", help="Disable repair attempts even if env enabled")
     if not argv:
         argv = ["--execute"]
     args = parser.parse_args(argv)
 
-    wall_time_s = args.wall_time_s
-    timeout_s = args.timeout_s
+    wall_time_s = args.retry_wall_time_s
+    timeout_s = args.request_timeout_s
     concurrency = args.concurrency
+
+    if args.inline_remote_images:
+        os.environ["SCILLM_INLINE_REMOTE_IMAGES"] = "1"
 
     # Ensure local image auto-conversion
     os.environ.setdefault("SCILLM_AUTO_IMAGE_DATAURL", "1")
@@ -125,16 +129,14 @@ async def main(argv: List[str] | None = None) -> int:
         {
             "scenario": "vlm_https_image",
             "request": {
-                "url": image_url,
                 "messages": [
                     {"role": "system", "content": "Only respond in well formatted JSON"},
                     {
                         "role": "user",
-                        "content": (
-                            "Please describe the image at "
-                            f"{image_url}"
-                            " as {\"description\":<string>} strictly as JSON."
-                        ),
+                        "content": [
+                            {"type": "text", "text": "Describe the following image as {\"description\":<string>} strictly as JSON."},
+                            {"type": "image_url", "image_url": {"url": image_url}},
+                        ],
                     },
                 ],
                 "response_format": {"type": "json_object"},
@@ -190,6 +192,20 @@ async def main(argv: List[str] | None = None) -> int:
     scenarios = [entry["scenario"] for entry in batch_requests]
     requests = [entry["request"] for entry in batch_requests]
 
+    # Explicit model assignment so iterator runs mirror Router behavior
+    for idx, req in enumerate(requests):
+        scenario = scenarios[idx]
+        artifacts = req.get("artifacts") or {}
+        file_paths = artifacts.get("file_paths") or []
+        urls = artifacts.get("urls") or []
+        is_image_file = any(str(p).lower().endswith((".png", ".jpg", ".jpeg", ".gif", ".webp")) for p in file_paths)
+        needs_vlm = (
+            scenario.startswith("vlm_")
+            or is_image_file
+            or (urls and not scenario.startswith("html_"))
+        )
+        req["model"] = "chutes/vlm" if needs_vlm else "chutes/text"
+
     # Preview / dry-run mode (default if --execute not supplied)
     if args.dry_run or not args.execute:
         preview_items = []
@@ -211,8 +227,8 @@ async def main(argv: List[str] | None = None) -> int:
             "mode": "dry-run",
             "tenacious": bool(args.tenacious),
             "retry_config": {
-                "backoff_base": args.backoff_base if args.tenacious else None,
-                "backoff_cap_s": args.backoff_cap_s if args.tenacious else None,
+                "initial_delay": args.retry_initial_delay if args.tenacious else None,
+                "max_delay": args.retry_max_delay if args.tenacious else None,
                 "wall_time_s": wall_time_s,
             },
             "json_sanitize": bool(args.json_sanitize),
@@ -246,7 +262,7 @@ async def main(argv: List[str] | None = None) -> int:
     start = time.time()
     if args.verbose:
         print("INFO running parallel_acompletions_iter", flush=True)
-    raw_results: List[Dict[str, Any] | None] = [None] * len(requests)
+    raw_results: List[Dict[str, Any] | None] = [None] * len(requests)  # maintain order
     last_error = None
     try:
         async for entry in parallel_acompletions_iter(
@@ -256,29 +272,32 @@ async def main(argv: List[str] | None = None) -> int:
             wall_time_s=wall_time_s,
             timeout=timeout_s,
             tenacious=args.tenacious,
-            backoff_base=args.backoff_base,
-            backoff_cap_s=args.backoff_cap_s,
+            backoff_base=args.retry_initial_delay,
+            backoff_cap_s=args.retry_max_delay,
         ):
             idx = entry.get("index", 0)
+            if idx < 0 or idx >= len(requests):
+                continue
             req = entry.get("request") or requests[idx]
             ok = bool(entry.get("ok")) and not entry.get("error")
             err_msg = entry.get("error")
             if err_msg:
-                last_error = err_msg
+                last_error = f"idx={idx}:{err_msg}"
             status = "OK" if ok else "ERR"
             note = f" ({err_msg})" if err_msg else ""
-            if args.verbose:
-                scenario = scenarios[idx]
-                print(f"SCENARIO {scenario} -> {status}{note}", flush=True)
             if ok:
                 resp = entry.get("response")
-                content = _extract_content_from_response(resp)
+                if "content" in entry:
+                    content = entry.get("content")
+                else:
+                    content = _extract_content_from_response(resp)
                 raw_results[idx] = {
                     "request": req,
                     "response": resp,
                     "error": None,
                     "content": content,
                 }
+                preview = (content or "")[:120].replace("\n", " ")
             else:
                 raw_results[idx] = {
                     "request": req,
@@ -286,6 +305,13 @@ async def main(argv: List[str] | None = None) -> int:
                     "error": err_msg or "unknown_error",
                     "content": "",
                 }
+                preview = None
+            if args.verbose:
+                scenario = scenarios[idx]
+                if status == "OK" and preview:
+                    print(f"SCENARIO {scenario} -> {preview}", flush=True)
+                else:
+                    print(f"SCENARIO {scenario} -> {status}{note}", flush=True)
     except Exception as e:
         last_error = str(e)
         raw_results = []
@@ -369,11 +395,14 @@ async def main(argv: List[str] | None = None) -> int:
             "scenario": scenario,
             "ok": ok,
             "reason": reason,
-            "content_head": (content or "")[:160],
-            "model_used": req.get("model"),
+            "content_head": (content or "")[:160].replace("\n", " "),
+            "model_used": req.get("model") or requests[idx].get("model"),
             "artifacts": req_artifacts,
         })
         all_ok = all_ok and ok
+
+    success_count = sum(1 for it in items if it.get("ok"))
+    failure_count = len(items) - success_count
 
     elapsed = round(time.time() - start, 3)
     summary = {
@@ -383,9 +412,14 @@ async def main(argv: List[str] | None = None) -> int:
         "tenacious": bool(args.tenacious),
         "error": last_error,
         "elapsed_s": elapsed,
+        "success_count": success_count,
+        "failure_count": failure_count,
     }
     print(json.dumps(summary, ensure_ascii=False))
-    print(f"SUMMARY chutes_batch_sanity ok={1 if summary['ok'] else 0} count={len(items)} elapsed_s={elapsed}")
+    print(
+        f"SUMMARY chutes_batch_sanity ok={1 if summary['ok'] else 0} "
+        f"count={len(items)} success={success_count} failure={failure_count} elapsed_s={elapsed}"
+    )
     return 0 if summary["ok"] else 1
 
 
@@ -400,9 +434,9 @@ if __name__ == "__main__":
 
 """
 python scripts/sanity/chutes_batch_sanity.py \
---execute --tenacious \
---backoff-base 0.5 \
---backoff-cap-s 30 \
---timeout-s 45 \
---wall-time-s 120
+--execute --tenacious --verbose --inline-remote-images \
+--retry-initial-delay 0.5 \
+--retry-max-delay 30 \
+--request-timeout-s 45 \
+--retry-wall-time-s 120
 """

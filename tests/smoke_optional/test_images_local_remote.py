@@ -10,7 +10,7 @@ def test_compress_image_local(tmp_path):
         from PIL import Image  # type: ignore
     except Exception:
         pytest.skip("Pillow not installed")
-    from litellm.extras.images import compress_image
+    from litellm.extras.image_utils import compress_image
 
     p = tmp_path / "t.png"
     im = Image.new("RGB", (32, 32), color=(255, 0, 0))
@@ -27,7 +27,7 @@ async def test_fetch_remote_image_cache(monkeypatch, tmp_path):
         from PIL import Image  # type: ignore
     except Exception:
         pytest.skip("extras not installed")
-    from litellm.extras.images import fetch_remote_image
+    from litellm.extras.image_utils import fetch_remote_image
 
     # create a fake jpeg bytes
     buf = io.BytesIO()
@@ -60,4 +60,3 @@ async def test_fetch_remote_image_cache(monkeypatch, tmp_path):
     data_url2 = await run()
     assert data_url1 == data_url2
     assert data_url1.startswith("data:image/")
-

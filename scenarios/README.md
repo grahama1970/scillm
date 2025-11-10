@@ -150,7 +150,7 @@ make run-scenarios
 ### `image_compression_release.py`
 
 - Compresses the file pointed to by `RELEASE_IMAGE_PATH` using the helper in
-  `litellm.extras.images`.
+  `litellm.extras.image_utils`.
 
 ### `chutes_release.py`
 

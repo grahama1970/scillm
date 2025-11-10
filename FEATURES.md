@@ -149,7 +149,12 @@ SimpleNamespace(
 ```
 
 ### Advanced (Experimental)
-- `parallel_as_completed(requests)` — yields results as they finish (unordered). Not guaranteed stable; prefer `parallel_acompletions` for deterministic ordering.
+- `parallel_acompletions_iter(requests, ...)` — stable as-completed iterator; yields `{index, request, ok, response|error, content?, attempts, elapsed_s}`. Caller controls final ordering/aggregation.
+- `parallel_as_completed(requests)` (legacy) — older surface; prefer `parallel_acompletions_iter`.
+
+The sanity script uses `parallel_acompletions_iter` to stream progress yet still emits a deterministic JSON summary.
+
+Inline helper (optional): set `SCILLM_INLINE_REMOTE_IMAGES=1` (the sanity script’s `--inline-remote-images` flag does this) to download HTTPS URLs locally and embed them as data URLs before dispatch. Handy when the gateway cannot fetch a given CDN but you still want the probe to pass.
 
 ## Router — 429 Retries (Opt‑In)
 
