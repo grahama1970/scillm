@@ -11,12 +11,39 @@ Goals
 
 from __future__ import annotations
 
+import atexit as _atexit
 import asyncio as _asyncio
+import importlib.util as _ilu
 import os as _os
+import sys as _sys
 import time as _time
 from contextlib import contextmanager as _contextmanager, asynccontextmanager as _asynccontextmanager
 from typing import Any as _Any, Dict as _Dict, Tuple as _Tuple
 from urllib.parse import urlparse as _urlparse
+
+# ---------------------------------------------------------------------------
+# Package aliasing for sibling loaders
+# ---------------------------------------------------------------------------
+# Some downstream repos (e.g., extractor) vendor a minimal shim that loads this
+# file via ``importlib.util.spec_from_file_location("_scillm_sibling", …)``. In
+# that mode Python does not record us as the real ``scillm`` package, so relative
+# imports such as ``from .http_openai_like import …`` would fail and the shim
+# would conclude that ``scillm.completion`` is unavailable. To keep the paved
+# path intact we retroactively register the canonical package + search path when
+# we detect that we were imported under an alternate name.
+if "__path__" not in globals():
+    __path__ = [_os.path.dirname(__file__)]  # type: ignore[assignment]
+
+
+def _import_local_module(alias: str, relative_filename: str):
+    path = _os.path.join(_os.path.dirname(__file__), relative_filename)
+    spec = _ilu.spec_from_file_location(alias, path)
+    if spec is None or spec.loader is None:
+        raise ModuleNotFoundError(f"Unable to load {relative_filename} from {path}")
+    module = _ilu.module_from_spec(spec)
+    _sys.modules.setdefault(alias, module)
+    spec.loader.exec_module(module)
+    return module
 
 # --- Internal lazy import helpers -------------------------------------------------
 
@@ -271,7 +298,11 @@ def _sc_postprocess_require_nonempty(resp):
         pass
     return resp
 
-from .http_openai_like import direct_openai_chat as _direct_openai_chat  # factored out
+try:  # pragma: no cover - prefer standard package import
+    from .http_openai_like import direct_openai_chat as _direct_openai_chat  # type: ignore
+except (ModuleNotFoundError, ImportError):
+    _http_mod = _import_local_module("_scillm_http_openai_like", "http_openai_like.py")
+    _direct_openai_chat = getattr(_http_mod, "direct_openai_chat")
 
 
 def completion(*args, **kwargs):  # type: ignore[no-redef]
@@ -490,24 +521,53 @@ async def acompletion(*args, **kwargs):  # type: ignore[no-redef]
 # ---------------- Background controls & shutdown ----------------------------------
 
 def disable_background_services() -> None:
-    """Disable litellm background logging worker (idempotent)."""
+    """Disable litellm background logging worker (idempotent, no stray coroutines)."""
+
+    import inspect
     global _BG_DISABLED
     ltl = _ensure_litellm()
     try:
         from litellm.litellm_core_utils import logging_worker as _lw  # type: ignore
 
-        class _NoopLoggingWorker(_lw.LoggingWorker):  # type: ignore
-            def _ensure_queue(self):
-                return
+        # Best-effort: stop the existing worker and clear its queue to avoid
+        # "coroutine was never awaited" warnings on shutdown.
+        try:
+            worker = getattr(_lw, "GLOBAL_LOGGING_WORKER", None)
+            if worker is not None:
+                async def _stop():
+                    with _asyncio.CancelledError:  # type: ignore
+                        pass
+                    try:
+                        await worker.flush()  # type: ignore
+                    except Exception:
+                        pass
+                    try:
+                        await worker.stop()  # type: ignore
+                    except Exception:
+                        pass
+                _run_coro_sync(_stop())
+        except Exception:
+            pass
+
+        class _NullLoggingWorker(_lw.LoggingWorker):  # type: ignore
+            def _ensure_queue(self):  # noqa: D401
+                # Minimal queue to keep interface stable
+                self._queue = None
 
             def start(self):  # noqa: D401
                 return
 
             def enqueue(self, coroutine):  # type: ignore[override]
+                # Immediately close/consume coroutine to avoid runtime warnings
+                try:
+                    if inspect.iscoroutine(coroutine):
+                        coroutine.close()
+                except Exception:
+                    pass
                 return
 
             def ensure_initialized_and_enqueue(self, async_coroutine):  # type: ignore[override]
-                return
+                return self.enqueue(async_coroutine)
 
             async def stop(self):  # type: ignore[override]
                 return
@@ -518,7 +578,7 @@ def disable_background_services() -> None:
             async def clear_queue(self):  # type: ignore[override]
                 return
 
-        _lw.GLOBAL_LOGGING_WORKER = _NoopLoggingWorker()  # type: ignore
+        _lw.GLOBAL_LOGGING_WORKER = _NullLoggingWorker()  # type: ignore
         _BG_DISABLED = True
     except Exception:
         pass
@@ -590,6 +650,10 @@ def shutdown_clients() -> None:
 
 
 shutdown = shutdown_clients
+try:
+    _atexit.register(shutdown_clients)
+except Exception:
+    pass
 
 
 @_contextmanager
@@ -634,13 +698,21 @@ async def acompletion_json(model: str, messages: list[dict], *, max_tokens: int 
     return await acompletion(model=model, messages=messages, max_tokens=max_tokens, api_base=api_base, api_key=api_key, **kwargs)
 
 
-from .batch import (
-    parallel_acompletions,
-    parallel_acompletions_env,
-    parallel_acompletions_iter,
-    parallel_acompletions_simple,
-    parallel_acompletions_simple_env,
-)
+try:  # pragma: no cover - prefer package import
+    from .batch import (
+        parallel_acompletions,
+        parallel_acompletions_env,
+        parallel_acompletions_iter,
+        parallel_acompletions_simple,
+        parallel_acompletions_simple_env,
+    )
+except (ModuleNotFoundError, ImportError):
+    _batch_mod = _import_local_module("_scillm_batch", "batch.py")
+    parallel_acompletions = getattr(_batch_mod, "parallel_acompletions")
+    parallel_acompletions_env = getattr(_batch_mod, "parallel_acompletions_env")
+    parallel_acompletions_iter = getattr(_batch_mod, "parallel_acompletions_iter")
+    parallel_acompletions_simple = getattr(_batch_mod, "parallel_acompletions_simple")
+    parallel_acompletions_simple_env = getattr(_batch_mod, "parallel_acompletions_simple_env")
 
 
 def models_probe(api_base: str, api_key: str | None = None) -> _Dict:
@@ -670,14 +742,159 @@ def chat_probe_json(api_base: str, api_key: str | None, model: str) -> _Dict:
         return {"ok": False, "status": None, "elapsed_ms": int((_time.time()-t0)*1000), "error": str(e)[:256]}
 
 
-# -------------------- Quota/Cap signaling ----------------------------------------
+# -------------------- Quota/Cap signaling + usage helpers ------------------------
+
 
 class QuotaExceededError(Exception):
-    pass
+    """Raised when Chutes/SciLLM determines quota/budget is exhausted.
+
+    This is intentionally stricter than a generic 429: we only promote to
+    QuotaExceededError when the underlying error (HTTP status / JSON body)
+    clearly indicates quota/credits exhaustion, not transient capacity.
+    """
+
+
+class CapacityExceededError(Exception):
+    """Raised when the provider signals capacity/rate-limit (HTTP 429)."""
+
+    def __init__(self, message: str, *, model: str | None = None, provider: str | None = None, status: int | None = None, retry_after: float | None = None, reason: str = "capacity_exhausted"):
+        super().__init__(message)
+        self.model = model
+        self.provider = provider
+        self.status = status
+        self.retry_after = retry_after
+        self.reason = reason
 
 
 def _normalize_quota_exception(exc: Exception) -> Exception:
-    txt = str(getattr(exc, "message", exc)).lower()
-    if any(k in txt for k in ("quota", "cap", "limit exceeded", "out of credits", "insufficient_quota")):
-        return QuotaExceededError(str(exc))
-    return exc
+    """
+    Best-effort normalization of provider errors into QuotaExceededError.
+
+    Strategy:
+    - Inspect HTTP status and JSON error body (when available) for explicit
+      quota/budget signals (e.g. type == "budget_exhausted", "insufficient_quota").
+    - Fall back to keyword heuristics on the message as a last resort.
+    - Leave capacity/infra 429s and generic 5xx alone so callers can treat
+      them as transient.
+    """
+    try:
+        try:
+            from litellm.exceptions import RateLimitError as _RateLimitError  # type: ignore
+        except Exception:  # pragma: no cover - litellm not importable in some slim envs
+            _RateLimitError = None  # type: ignore
+
+        # Prefer structured signals when litellm exposes an httpx.Response
+        status = getattr(exc, "status_code", None) or getattr(exc, "status", None)
+        body_type = None
+        body_code = None
+        body_msg = None
+        resp = getattr(exc, "response", None)
+        if status is None and hasattr(resp, "status_code"):
+            try:
+                status = resp.status_code
+            except Exception:
+                pass
+        if resp is not None:
+            # httpx.Response or similar
+            try:
+                if hasattr(resp, "json"):
+                    data = resp.json()
+                else:
+                    data = None
+            except Exception:
+                data = None
+            if isinstance(data, dict):
+                err = data.get("error") or data
+                body_type = str(err.get("type") or "").lower() if isinstance(err, dict) else None
+                body_code = str(err.get("code") or "").lower() if isinstance(err, dict) else None
+                body_msg = str(err.get("message") or "") if isinstance(err, dict) else None
+        msg = str(getattr(exc, "message", exc))
+        txt = (body_msg or msg or "").lower()
+
+        # Explicit quota/budget signals from body
+        quota_keywords = ("quota", "limit exceeded", "out of credits", "insufficient_quota", "budget_exhausted")
+        if body_type and any(k in body_type for k in ("budget_exhausted", "quota", "insufficient_quota")):
+            return QuotaExceededError(msg)
+        if body_code and any(k in body_code for k in ("quota", "insufficient_quota")):
+            return QuotaExceededError(msg)
+
+        # Status-based hint: 402 is reserved for billing/quota on Chutes
+        if isinstance(status, int) and status == 402:
+            return QuotaExceededError(msg)
+
+        # Last-resort heuristic on message text (kept for backwards compatibility)
+        if any(k in txt for k in quota_keywords):
+            return QuotaExceededError(msg)
+
+        # Capacity / rate-limit normalization (429) to keep surfaced exceptions clean
+        if _RateLimitError is not None and isinstance(exc, _RateLimitError):
+            reason = "capacity_exhausted"
+            retry_after = getattr(exc, "retry_after", None)
+            provider = getattr(exc, "llm_provider", None) or getattr(exc, "provider", None)
+            model = getattr(exc, "model", None)
+            cap = CapacityExceededError(msg, model=model, provider=provider, status=status, retry_after=retry_after, reason=reason)
+            try:
+                setattr(cap, "scillm_meta", {
+                    "reason": reason,
+                    "status": status,
+                    "retry_after": retry_after,
+                    "provider": provider,
+                    "model": model,
+                })
+            except Exception:
+                pass
+            return cap
+        return exc
+    except Exception:
+        # Never fail normalization; fall back to original exception
+        return exc
+
+
+def budget_status() -> _Dict:
+    """
+    Return a lightweight budget/usage snapshot for Chutes.
+
+    Delegates to chutes.middleware.budget_guard.budget_metadata() when
+    CHUTES_API_BASE / CHUTES_API_KEY are configured; otherwise returns {}.
+
+    Fields (when available):
+      - plan: str
+      - daily_limit: int
+      - used_today: int
+      - remaining: int
+      - reset_at: ISO8601 string
+      - credits_balance: float|null
+    """
+    try:
+        from chutes.middleware.budget_guard import budget_metadata  # type: ignore
+    except Exception:
+        return {}
+    try:
+        return budget_metadata() or {}
+    except Exception:
+        return {}
+
+
+def payg_status() -> _Dict:
+    """
+    Return a coarse PAYG status snapshot for Chutes.
+
+    Delegates to chutes.middleware.budget_guard.payg_snapshot().
+    Fields (when available):
+      - ok: bool
+      - payg_active: bool
+      - used: int
+      - limit: int
+      - remaining: int
+      - cost_usd_today: float|null
+      - reset_at: ISO8601 string
+    """
+    try:
+        from chutes.middleware.budget_guard import payg_snapshot  # type: ignore
+    except Exception:
+        return {}
+    try:
+        snap = payg_snapshot()
+        return snap or {}
+    except Exception:
+        return {}

@@ -14,7 +14,8 @@ from scillm.extras.chutes_simple import (
 import json as _json
 import urllib.request as _urlreq
 import urllib.error as _urlerr
-from typing import Optional as _Optional
+from typing import Optional as _Optional, Dict as _Dict, Any as _Any
+from scillm.paved.shutdown import shutdown, maybe_disable_paved_logging_from_env
 
 __all__ = [
     "chutes_chat_json",
@@ -26,7 +27,105 @@ __all__ = [
     "preflight_text_tenacious",
     "sanity_preflight",
     "parallel_preflight_text",
+    "shutdown",
+    "maybe_disable_paved_logging_from_env",
 ]
+
+
+def _extract_error_details(exc: Exception) -> _Dict[str, _Any]:
+    """
+    Best-effort extraction of useful error details from a Chutes/LiteLLM exception.
+
+    Normalizes:
+      - status: HTTP status code when available
+      - detail/body: JSON body or text snippet
+      - reason: quota_exhausted | rate_limited | no_instances_available | infra | unknown
+    """
+    details: _Dict[str, _Any] = {
+        "exc_type": type(exc).__name__,
+        "message": str(exc),
+    }
+    status = getattr(exc, "status", None) or getattr(exc, "status_code", None) or getattr(exc, "http_status", None)
+    if isinstance(status, int):
+        details["status"] = status
+
+    # Try to pull structured body from attached response (httpx / LiteLLM errors)
+    body_json: _Any = None
+    body_text: str | None = None
+    resp = getattr(exc, "response", None)
+    if resp is not None:
+        try:
+            if hasattr(resp, "json"):
+                body_json = resp.json()
+            else:
+                body_json = None
+        except Exception:
+            body_json = None
+        if body_json is None:
+            try:
+                txt = getattr(resp, "text", None)
+                if txt is None and hasattr(resp, "content"):
+                    txt = resp.content.decode("utf-8", "replace")
+                if isinstance(txt, str):
+                    body_text = txt
+            except Exception:
+                body_text = None
+
+    if isinstance(body_json, dict):
+        details["body"] = body_json
+        # Common Chutes shapes: {"detail": "..."} or {"error": {...}}
+        if isinstance(body_json.get("detail"), str):
+            details["detail"] = body_json["detail"]
+        err_block = body_json.get("error")
+        if isinstance(err_block, dict):
+            et = err_block.get("type")
+            if isinstance(et, str):
+                details["error_type"] = et
+            ec = err_block.get("code")
+            if isinstance(ec, str):
+                details["error_code"] = ec
+            em = err_block.get("message")
+            if isinstance(em, str) and "detail" not in details:
+                details["detail"] = em
+    elif body_text:
+        # Truncate to keep payload compact
+        details["body_text"] = body_text[:512]
+
+    # Classify a coarse-grained reason for DevOps
+    text_blob = " ".join(
+        [
+            str(details.get("detail") or ""),
+            str(details.get("message") or ""),
+            str(details.get("body_text") or ""),
+            str(details.get("error_type") or ""),
+            str(details.get("error_code") or ""),
+        ]
+    ).lower()
+
+    reason: str | None = None
+    if isinstance(status, int):
+        if status == 402:
+            reason = "quota_exhausted"
+        elif status == 429:
+            if "no instances available" in text_blob:
+                reason = "no_instances_available"
+            elif any(k in text_blob for k in ("budget_exhausted", "insufficient_quota", "out of credits", "quota")):
+                reason = "quota_exhausted"
+            else:
+                reason = "rate_limited"
+        elif status >= 500:
+            reason = "infra"
+    if reason is None:
+        if "no instances available" in text_blob:
+            reason = "no_instances_available"
+        elif any(k in text_blob for k in ("budget_exhausted", "insufficient_quota", "out of credits", "quota")):
+            reason = "quota_exhausted"
+        elif any(k in text_blob for k in ("rate limit", "too many requests", "throttl")):
+            reason = "rate_limited"
+    if reason is None:
+        reason = "unknown"
+    details["reason"] = reason
+    return details
 
 
 def preflight_text(*, api_base: str, api_key: str, model: str, timeout: float = 20.0) -> bool:
@@ -163,10 +262,9 @@ def preflight_text_tenacious(
                     return False, {"exc_type": "ValueError", "message": "non-json content"}
             elif content is not None:
                 return True, None
-            return False, {"exc_type": "Empty", "message": "no content"}
+            return False, {"exc_type": "Empty", "message": "no content", "reason": "unknown"}
         except Exception as exc:
-            status = getattr(exc, "status", None) or getattr(exc, "status_code", None) or getattr(exc, "http_status", None)
-            return False, {"exc_type": type(exc).__name__, "message": str(exc), "status": status}
+            return False, _extract_error_details(exc)
     finally:
         for k, v in _prev.items():
             if v is None:
@@ -285,12 +383,11 @@ def parallel_preflight_text(
                         _json.loads(content)
                         return True, None
                     except Exception:
-                        last = {"exc_type": "ValueError", "message": "non-json content"}
+                        last = {"exc_type": "ValueError", "message": "non-json content", "reason": "unknown"}
                 else:
                     return True, None
             except Exception as exc:
-                status = getattr(exc, "status", None) or getattr(exc, "status_code", None) or getattr(exc, "http_status", None)
-                last = {"exc_type": type(exc).__name__, "message": str(exc), "status": status}
+                last = _extract_error_details(exc)
             # time check
             if (_asyncio.get_event_loop().time() - start) >= wall_time_s:
                 return False, last
@@ -323,3 +420,28 @@ def parallel_preflight_text(
         # if already in loop, create nested
         loop = _asyncio.get_event_loop()
         return loop.run_until_complete(_run_many())
+
+
+def shutdown() -> bool:
+    """Explicit paved-path shutdown helper.
+
+    Actions:
+    - Disables litellm/scillm async logging queue (idempotent).
+    - Closes shared httpx/aiohttp clients used by scillm/litellm.
+
+    Safe to call multiple times (e.g., at process exit or after a batch).
+    """
+
+    try:
+        from scillm import disable_background_services as _disable_bg_services  # type: ignore
+
+        _disable_bg_services()
+    except Exception:
+        pass
+    try:
+        from scillm import shutdown as _shutdown  # type: ignore
+
+        _shutdown()
+    except Exception:
+        pass
+    return True

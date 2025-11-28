@@ -10,8 +10,43 @@ from scillm import Router, completion
 from litellm.exceptions import APIConnectionError, APIError, RateLimitError, Timeout
 
 from .auto_router import auto_router_from_env
-from chutes.middleware.budget_guard import budget_register_attempt, budget_snapshot
-from chutes.middleware.metrics import tenacious_sleep, tenacious_retry
+
+_MISSING_CHUTES_MIDDLEWARE = False
+_CHUTES_WARNED = False
+
+
+def _middleware_warn(message: str) -> None:
+    global _CHUTES_WARNED
+    if _CHUTES_WARNED:
+        return
+    _CHUTES_WARNED = True
+    try:
+        print(f"[scillm.chutes] WARNING: {message}")
+    except Exception:
+        pass
+
+
+try:
+    from chutes.middleware.budget_guard import budget_register_attempt, budget_snapshot
+    from chutes.middleware.metrics import tenacious_sleep, tenacious_retry
+except Exception:  # pragma: no cover - optional runtime dependency
+    _MISSING_CHUTES_MIDDLEWARE = True
+
+    def budget_register_attempt(*_args, **_kwargs):  # type: ignore
+        _middleware_warn("chutes.middleware not available; budget telemetry disabled. Reinstall scillm >=1.77.3 or include the chutes package.")
+        return {}
+
+    def budget_snapshot(*_args, **_kwargs):  # type: ignore
+        _middleware_warn("chutes.middleware not available; budget telemetry disabled. Reinstall scillm >=1.77.3 or include the chutes package.")
+        return {}
+
+    def tenacious_sleep(delay: float, *_, **__):  # type: ignore
+        _middleware_warn("chutes.middleware.metrics not available; using basic sleep.")
+        time.sleep(delay)
+
+    def tenacious_retry(*_args, **_kwargs):  # type: ignore
+        _middleware_warn("chutes.middleware.metrics not available; tenacious retry telemetry disabled.")
+        return False
 
 try:  # pragma: no cover - optional telemetry
     from scillm.telemetry import metrics as sc_metrics  # type: ignore

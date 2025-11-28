@@ -42,8 +42,10 @@ Single source of truth for how agents and projects use SciLLM in this repo. Keep
 - Don’t: add wrappers, conditional import hacks, manual Authorization headers, or raw `/chat/completions` calls in projects.
 
 ## Troubleshooting
-- If `/v1/models` is 200 but `/v1/chat/completions` intermittently returns 401/503: tenacity will back off; allow the batch to run to its wall budget. For strict JSON, prefer a JSON‑capable model or let preflight auto‑select.
+- If `/v1/models` is 200 but `/v1/chat/completions` intermittently returns 401/503: tenacity will back off; allow the batch to run to its wall budget. For strict JSON, prefer a JSON-capable model or let preflight auto-select.
 - For multimodal, ensure `CHUTES_VLM_MODEL` is set; local image files require `SCILLM_AUTO_IMAGE_DATAURL=1` (default on).
+- Downstream repos (`../extractor`, `../devops`, `../amd`, `../pi-mono`) pin SciLLM via `scillm @ file:///home/graham/workspace/experiments/litellm`. After any change run `./scripts/update_scillm_dependents.sh` so their environments pick up the new editable build before rerunning doctors/pipelines.
+- If a router call returns a successful HTTP response but `choices[0].message.content` is empty, downstream stages (e.g., Stage 07 reflow, Stage 09 summarizer) now call `_direct_scillm_json` helpers to replay the same payload via `scillm.acompletion` automatically. Treat these as upstream model issues; the fallback is built in, so no local shims are required.
 
 ## Where to Look
 - Batch implementation: `scillm/batch.py` (semaphore, backoff, result objects)

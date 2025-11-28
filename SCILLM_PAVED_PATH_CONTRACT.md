@@ -24,6 +24,10 @@ Hard Rules (Do / Don’t)
 - DON’T implement client‑side alternates/fallbacks for Step 07; preflight must fail fast so operators can fix routing/quota. Use Router flows only where explicitly intended.
 - DON’T swallow preflight errors. Surface structured details (`exc_type`, `message`, `status`) to the caller.
 
+Packaging expectations
+- `pip install scillm>=1.77.3` ships the paved helpers (`scillm.paved.*`) **and** the `chutes.middleware.*` modules they depend on. If an ImportError still occurs, upgrade or reinstall the wheel instead of patching a venv manually.
+- The `openai_like` provider now accepts Bearer-only auth. Pass `api_key=` and SciLLM will project the token into the correct header (Bearer or `x-api-key`) for Chutes.
+
 Step 07 (Knowledge) Requirements
 - Preflight: `sanity_preflight(api_base, api_key, model, parallel=SCILLM_PREFLIGHT_PARALLEL|3, wall_time_s=SCILLM_PREFLIGHT_WALL_S|30)`
 - On failure: return `preflight_details` (dict) to the pipeline summary.
@@ -68,4 +72,4 @@ Exceptions
 
 Change History
 - 2025‑11‑09: Initial version. Codified paved helpers and strict “no manual headers / no raw HTTP” policy for DevOps.
-
+- 2025‑11‑10: Documented bundled middleware + Bearer-only provider so DevOps doesn’t patch venvs manually.

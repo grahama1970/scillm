@@ -163,6 +163,10 @@ Troubleshooting
 
 Doctor (one-shot): `make codex-agent-doctor`
 
+### Keeping Downstream Repos in Sync
+
+Several sibling projects (`extractor`, `devops`, `amd`, `pi-mono`) install SciLLM via `scillm @ file:///home/graham/workspace/experiments/litellm`. After landing SciLLM changes, run `./scripts/update_scillm_dependents.sh` to reinstall the editable build inside each downstream repo before asking those agents to rerun doctors or pipelines.
+
 ---
 ## Quick Links
 | Topic | File |
