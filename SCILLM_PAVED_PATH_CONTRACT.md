@@ -24,6 +24,9 @@ Hard Rules (Do / Don’t)
 - DON’T implement client‑side alternates/fallbacks for Step 07; preflight must fail fast so operators can fix routing/quota. Use Router flows only where explicitly intended.
 - DON’T swallow preflight errors. Surface structured details (`exc_type`, `message`, `status`) to the caller.
 
+JSON validation (strict mode)
+- Opt in with `SCILLM_JSON_STRICT=1` (or `strict_json=True` on the call). When enabled and `response_format={"type":"json_object"}` is set, SCILLM raises `JsonParseError` on empty/non‑JSON content and attaches `scillm_meta` with `reason=json_parse_failed`, `sample`, `raw_len`, `model`, and `provider`. This keeps errors actionable without bespoke wrappers.
+
 Packaging expectations
 - `pip install scillm>=1.77.3` ships the paved helpers (`scillm.paved.*`) **and** the `chutes.middleware.*` modules they depend on. If an ImportError still occurs, upgrade or reinstall the wheel instead of patching a venv manually.
 - The `openai_like` provider now accepts Bearer-only auth. Pass `api_key=` and SciLLM will project the token into the correct header (Bearer or `x-api-key`) for Chutes.

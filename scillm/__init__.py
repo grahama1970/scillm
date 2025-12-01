@@ -199,6 +199,49 @@ class EmptyContentError(Exception):
         self.provider = provider
 
 
+class JsonParseError(Exception):
+    def __init__(self, model: str, provider: str, sample: str, raw_len: int):
+        super().__init__(f"json_parse_failed sample='{sample}'")
+        self.reason = "json_parse_failed"
+        self.model = model
+        self.provider = provider
+        self.sample = sample
+        self.raw_len = raw_len
+
+
+def _sc_strict_json_enabled(kwargs: dict) -> bool:
+    env = str(_os.getenv("SCILLM_JSON_STRICT", "0")).lower() in {"1", "true", "yes", "on"}
+    flag = bool(kwargs.get("strict_json")) or bool(kwargs.get("_sc_strict_json"))
+    return env or flag
+
+
+def _sc_validate_json_content(resp, model: str, provider: str):
+    """
+    Strict JSON validation (opt-in via SCILLM_JSON_STRICT=1 or strict_json=True).
+    Raises JsonParseError with sample + raw length for easy debugging.
+    """
+    try:
+        import json as _json
+        content = getattr(resp.choices[0].message, "content", None)
+        if not isinstance(content, str) or not content.strip():
+            raise JsonParseError(model=model, provider=provider, sample=str(content)[:240], raw_len=len(content or ""))  # type: ignore[arg-type]
+        try:
+            _json.loads(content)
+            return  # success
+        except Exception:
+            sample = content.strip()[:240]
+            raise JsonParseError(model=model, provider=provider, sample=sample, raw_len=len(content))
+    except JsonParseError as jpe:
+        try:
+            setattr(jpe, "scillm_meta", {"reason": jpe.reason, "model": model, "provider": provider, "raw_len": jpe.raw_len, "sample": jpe.sample})
+        except Exception:
+            pass
+        raise
+    except Exception:
+        # Do not block callers on validator failure
+        return
+
+
 def _sc_allow_empty_responses() -> bool:
     return _os.getenv("SCILLM_ALLOW_EMPTY_RESPONSES", "0").lower() in {"1", "true", "yes", "y"}
 
@@ -331,6 +374,7 @@ def completion(*args, **kwargs):  # type: ignore[no-redef]
         bump_amount = int(kwargs.pop("max_tokens_bump", 160))
         model = args[0] if args else kwargs.get("model")
         messages = kwargs.get("messages") or []
+        provider = kwargs.get("custom_llm_provider") or "openai_like"
         attempts = 0
         base_max_tokens = kwargs.get("max_tokens")
         last_exc = None
@@ -357,9 +401,14 @@ def completion(*args, **kwargs):  # type: ignore[no-redef]
                 else:
                     raise
             if not (retry_on_empty and not _sc_allow_empty_responses() and _sc_messages_have_prompt(messages)):
-                return _sc_postprocess_require_nonempty(resp)
+                result = _sc_postprocess_require_nonempty(resp)
+                if _sc_strict_json_enabled(kwargs):
+                    _sc_validate_json_content(result, model=model or "unknown", provider=provider)
+                return result
             if not _sc_response_is_empty(resp):
                 result = _sc_postprocess_require_nonempty(resp)
+                if _sc_strict_json_enabled(kwargs):
+                    _sc_validate_json_content(result, model=model or "unknown", provider=provider)
                 try:
                     meta = dict(getattr(result, "scillm_meta", {}) or {})
                     meta.setdefault("attempts", attempts)
@@ -413,6 +462,7 @@ async def acompletion(*args, **kwargs):  # type: ignore[no-redef]
         bump_amount = int(kwargs.pop("max_tokens_bump", 160))
         model = args[0] if args else kwargs.get("model")
         messages = kwargs.get("messages") or []
+        provider = kwargs.get("custom_llm_provider") or "openai_like"
         attempts = 0
         base_max_tokens = kwargs.get("max_tokens")
         last_exc = None
@@ -474,9 +524,14 @@ async def acompletion(*args, **kwargs):  # type: ignore[no-redef]
                 else:
                     raise e_all
             if not (retry_on_empty and not _sc_allow_empty_responses() and _sc_messages_have_prompt(messages)):
-                return _sc_postprocess_require_nonempty(resp)
+                result = _sc_postprocess_require_nonempty(resp)
+                if _sc_strict_json_enabled(kwargs):
+                    _sc_validate_json_content(result, model=model or "unknown", provider=provider)
+                return result
             if not _sc_response_is_empty(resp):
                 result = _sc_postprocess_require_nonempty(resp)
+                if _sc_strict_json_enabled(kwargs):
+                    _sc_validate_json_content(result, model=model or "unknown", provider=provider)
                 try:
                     meta = dict(getattr(result, "scillm_meta", {}) or {})
                     meta.setdefault("attempts", attempts)

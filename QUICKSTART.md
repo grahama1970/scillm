@@ -13,6 +13,71 @@ Before you start, verify the Chutes front door:
 make chutes-front-door
 ```
 
+## SCILLM Agent Cheat Sheet (one page)
+
+- **Surfaces (pick one)**
+  - Chutes / OpenAI‑compatible: `custom_llm_provider="openai_like"`, `api_base=$CHUTES_API_BASE` (includes `/v1`), `api_key=$CHUTES_API_KEY`.
+  - Local Ollama: `custom_llm_provider="ollama"`, `api_base=${OLLAMA_API_BASE:-http://127.0.0.1:11434}`; model is the Ollama tag (e.g., `qwen3:1.7b`). Prefixing `ollama/` is optional; LiteLLM strips it.
+  - Codex‑agent sidecar: set `CODEX_AGENT_API_BASE` (no `/v1`), model from `/v1/models`, provider `custom_llm_provider="codex-agent"` or model prefix `codex-agent/…`.
+
+- **Minimal examples**
+  - Paved JSON (Chutes):
+    ```python
+    from scillm import completion
+    r = completion(
+        model=os.environ["CHUTES_MODEL_ID"],
+        api_base=os.environ["CHUTES_API_BASE"],
+        api_key=os.environ["CHUTES_API_KEY"],
+        custom_llm_provider="openai_like",
+        messages=[{"role":"user","content":"Return only {\"ok\":true} as JSON."}],
+        response_format={"type":"json_object"},
+        temperature=0, timeout=20,
+    )
+    print(r.choices[0].message.content)
+    ```
+  - Local Ollama JSON:
+    ```python
+    import os
+    from scillm import completion
+    os.environ.setdefault("OLLAMA_API_BASE", "http://127.0.0.1:11434")
+    r = completion(
+        model=os.environ.get("OLLAMA_MODEL","qwen3:1.7b"),
+        api_base=os.environ["OLLAMA_API_BASE"],
+        custom_llm_provider="ollama",
+        messages=[{"role":"user","content":"ping"}],
+        temperature=0, max_tokens=64, timeout=15,
+    )
+    print(r.choices[0].message.content)
+    ```
+  - Parallel batch (paved, Chutes):
+    ```python
+    from scillm import parallel_acompletions
+    resps = parallel_acompletions(
+        model=os.environ["CHUTES_MODEL_ID"],
+        api_base=os.environ["CHUTES_API_BASE"],
+        api_key=os.environ["CHUTES_API_KEY"],
+        custom_llm_provider="openai_like",
+        messages_list=[[{"role":"user","content":"hi"}]]*3,
+        response_format={"type":"json_object"},
+    )
+    ```
+
+- **Discover models**
+  - Chutes: `python - <<'PY'\nfrom scillm.paved import list_models_openai_like; import os; print(list_models_openai_like(os.environ["CHUTES_API_BASE"], os.environ["CHUTES_API_KEY"]))\nPY`
+  - Ollama: `curl -s ${OLLAMA_API_BASE:-http://127.0.0.1:11434}/api/tags | jq -r '..|.name? // empty'`
+  - Codex‑agent: `curl -s ${CODEX_AGENT_API_BASE}/v1/models | jq -r '.data[].id'`
+
+- **Troubleshooting quick hits**
+  - 404 model not found on Chutes → pick a model from `/v1/models` or set `CHUTES_MODEL_ID`.
+  - Local model not found → ensure `ollama list` shows the tag and `OLLAMA_API_BASE` points to the host‑reachable port.
+  - Bearer vs x-api-key → let paved helpers set headers; don’t add `extra_headers`.
+  - Shut down shared clients: `from scillm.paved import shutdown; shutdown()`.
+
+- **Environment defaults (suggested)**
+  - `CHUTES_API_BASE=https://llm.chutes.ai/v1`, `CHUTES_API_KEY=...`, `CHUTES_MODEL_ID=<from /v1/models>`
+  - `OLLAMA_API_BASE=http://127.0.0.1:11434`, `OLLAMA_MODEL=qwen3:1.7b`
+  - `CODEX_AGENT_API_BASE=http://127.0.0.1:8788`
+
 ## Sanity Checks (Text + VLM, Batch)
 
 Use the built‑in 5‑call sanity script (text + VLM) to verify your tenant/models end‑to‑end. It prints a single JSON summary and exits 0/1. The calls cover strict‑JSON echo, France/Paris, HTTPS VLM, local file‑path VLM, and an inline HTML classification fixture (token `luminous-harvest`) so html/file-path extraction regressions show up immediately.
