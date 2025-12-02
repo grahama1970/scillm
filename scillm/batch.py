@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import asyncio as _asyncio
-from typing import List, Dict, AsyncIterator, Any, Optional
+import json as _json
+from typing import List, Dict, AsyncIterator, Any, Optional, Callable
 
 from . import acompletion as _acompletion  # reuse wrapper
 import os as _os
@@ -25,6 +26,9 @@ async def parallel_acompletions(
     default_max_tokens: int | None = None,
     default_temperature: float | None = None,
     response_format: dict | None = None,
+    # NEW: structured JSON helpers
+    schema: Any | None = None,  # jsonschema dict or callable(payload) -> Any
+    retry_invalid_json: int = 0,
 ) -> list:
     """Batch async chat completions with bounded concurrency and optional tenacity.
 
@@ -100,6 +104,29 @@ async def parallel_acompletions(
             "Set model per request or set CHUTES_MODEL_ID/CHUTES_TEXT_MODEL."
         )
 
+    strict_env = str(_os.environ.get("SCILLM_JSON_STRICT", "0")).lower() in {"1", "true", "yes", "on"}
+
+    def _validate_payload(payload: Any) -> Optional[str]:
+        """Return None if valid; error string otherwise."""
+        if schema is None:
+            return None
+        try:
+            if callable(schema):
+                schema(payload)  # may raise
+                return None
+            # assume jsonschema-like dict
+            try:
+                import jsonschema  # type: ignore
+            except Exception:
+                return "jsonschema_not_installed"
+            try:
+                jsonschema.validate(payload, schema)  # type: ignore
+                return None
+            except Exception as e:  # noqa: BLE001
+                return str(e)
+        except Exception as e:  # noqa: BLE001
+            return str(e)
+
     async def _one(idx: int, req: dict):
         model = req.get("model")
         messages = req.get("messages") or []
@@ -138,7 +165,40 @@ async def parallel_acompletions(
                             retry_on_empty=False,
                             empty_retries=0,
                         )
-                    results[idx] = resp
+                    # Extract content now to allow json validation/retry
+                    try:
+                        content = _extract_content_from_response(resp)
+                    except Exception:
+                        content = None
+                    # Validate JSON if requested
+                    need_validate = strict_env or schema is not None or retry_invalid_json > 0
+                    if need_validate and isinstance(content, str):
+                        try:
+                            parsed = _json.loads(content)
+                            schema_err = _validate_payload(parsed)
+                            if schema_err:
+                                raise ValueError(f"schema_invalid: {schema_err}")
+                        except Exception as je:  # noqa: BLE001
+                            if attempt <= retry_invalid_json + 1:
+                                delay = min(backoff_cap_s, backoff_base * (2 ** max(0, attempt - 1)))
+                                try:
+                                    await _asyncio.sleep(delay)
+                                except Exception:
+                                    pass
+                                continue
+                            results[idx] = {
+                                "error": f"invalid_json: {je}",
+                                "status": None,
+                                "content": None,
+                                "raw": str(content)[:240],
+                            }
+                            return
+                    results[idx] = {
+                        "error": None,
+                        "status": None,
+                        "content": content,
+                        "response": resp,
+                    }
                     return
                 except Exception as exc:  # normalize transient/backoff
                     status = getattr(exc, "status", None) or getattr(exc, "status_code", None) or getattr(exc, "http_status", None)
@@ -167,28 +227,48 @@ async def parallel_acompletions(
     await _asyncio.gather(*[_one(i, r or {}) for i, r in enumerate(requests)])
 
     # Normalize to Router-like parallel result objects
+    summary = {
+        "total": len(results),
+        "ok": 0,
+        "invalid_json": 0,
+        "provider_error": 0,
+        "empty_content": 0,
+        "other_error": 0,
+    }
     out: List[Dict[str, Any]] = []
     for i, r in enumerate(results):
         req = requests[i] if i < len(requests) else {}
         if isinstance(r, dict) and r.get("error"):
+            err = r.get("error") or ""
+            if "invalid_json" in err:
+                summary["invalid_json"] += 1
+            elif "empty_content" in err:
+                summary["empty_content"] += 1
+            else:
+                summary["provider_error"] += 1
             out.append({
                 "index": i,
                 "request": req,
                 "response": None,
                 "error": r.get("error"),
                 "status": r.get("status"),
-                "content": None,
+                "content": r.get("content"),
+                "raw": r.get("raw"),
             })
         else:
-            content = _extract_content_from_response(r)
+            summary["ok"] += 1
+            content = r.get("content") if isinstance(r, dict) else _extract_content_from_response(r)
             out.append({
                 "index": i,
                 "request": req,
-                "response": r,
+                "response": r if not isinstance(r, dict) else r.get("response"),
                 "error": None,
                 "status": None,
                 "content": content,
             })
+    # attach summary on the first item to avoid breaking return type
+    if out:
+        out[0]["summary"] = summary
     return out
 
 

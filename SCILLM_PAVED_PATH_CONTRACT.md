@@ -33,6 +33,10 @@ Parallel batch (openai_like / Chutes)
 - Return shape: list of dicts with `index, request, response, error, status, content`. When `response_format` is json_object, `content` may be a dict or string. Check `error`/`status` per item.
 - Guards: if `api_base`/`api_key` or `model` are missing after env defaults, SCILLM raises `ValueError` early instead of hanging.
 - Recommended defaults to avoid silent waits: `tenacious=False`, `timeout=20-30`, `wall_time_s=120-300`, `concurrency=4-8`, `response_format={"type":"json_object"}`. Keep `SCILLM_JSON_STRICT=1` in CI to surface bad JSON.
+- Structured JSON helpers:
+  - `schema=` (jsonschema dict or callable) validates each item’s parsed JSON; failures set `error="invalid_json: …"` and keep `raw` sample.
+  - `retry_invalid_json=N` retries invalid JSON up to N times with backoff (same messages).
+  - `summary` attached to the first item: counts of ok/invalid_json/provider_error/empty_content.
 - Minimal example:
 ```python
 resps = await parallel_acompletions(
