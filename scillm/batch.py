@@ -4,6 +4,11 @@ import asyncio as _asyncio
 import json as _json
 from typing import List, Dict, AsyncIterator, Any, Optional, Callable
 
+try:
+    from scillm.extras.json_utils import clean_json_string as _clean_json_string  # type: ignore
+except Exception:  # pragma: no cover - optional
+    _clean_json_string = None
+
 from . import acompletion as _acompletion  # reuse wrapper
 import os as _os
 from .preprocess import expand_requests_io as _expand_requests_io
@@ -29,7 +34,7 @@ async def parallel_acompletions(
     # NEW: structured JSON helpers
     schema: Any | None = None,  # jsonschema dict or callable(payload) -> Any
     retry_invalid_json: int = 0,
-    repair_invalid_json: bool = False,
+    repair_invalid_json: Optional[bool] = None,
 ) -> list:
     """Batch async chat completions with bounded concurrency and optional tenacity.
 
@@ -106,6 +111,8 @@ async def parallel_acompletions(
         )
 
     strict_env = str(_os.environ.get("SCILLM_JSON_STRICT", "0")).lower() in {"1", "true", "yes", "on"}
+    env_repair_default = str(_os.environ.get("SCILLM_REPAIR_INVALID_JSON", "1")).lower() in {"1", "true", "yes", "on"}
+    effective_repair = env_repair_default if repair_invalid_json is None else bool(repair_invalid_json)
 
     def _validate_payload(payload: Any) -> Optional[str]:
         """Return None if valid; error string otherwise."""
@@ -184,7 +191,7 @@ async def parallel_acompletions(
                     except Exception:
                         content = None
                     # Validate JSON if requested
-                    need_validate = strict_env or schema is not None or retry_invalid_json > 0
+                    need_validate = strict_env or schema is not None or retry_invalid_json > 0 or effective_repair
                     repaired_flag = False
                     if need_validate and isinstance(content, str):
                         repaired = False
@@ -192,9 +199,15 @@ async def parallel_acompletions(
                             parsed = _json.loads(content)
                         except Exception:
                             parsed = None
-                        if parsed is None and repair_invalid_json:
+                        if parsed is None and effective_repair:
                             parsed, repair_err = _repair_json(content)
                             repaired = parsed is not None
+                        if parsed is None and effective_repair and _clean_json_string:
+                            try:
+                                parsed = _clean_json_string(content, return_dict=True)  # type: ignore
+                                repaired = parsed is not None
+                            except Exception:
+                                parsed = None
                         if parsed is not None:
                             schema_err = _validate_payload(parsed)
                             if schema_err:
