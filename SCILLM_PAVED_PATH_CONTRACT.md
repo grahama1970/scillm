@@ -27,6 +27,55 @@ Hard Rules (Do / Don’t)
 JSON validation (strict mode)
 - Opt in with `SCILLM_JSON_STRICT=1` (or `strict_json=True` on the call). When enabled and `response_format={"type":"json_object"}` is set, SCILLM raises `JsonParseError` on empty/non‑JSON content and attaches `scillm_meta` with `reason=json_parse_failed`, `sample`, `raw_len`, `model`, and `provider`. This keeps errors actionable without bespoke wrappers.
 
+Parallel batch (openai_like / Chutes)
+- Signature (v1.77.4): `parallel_acompletions(requests, *, api_base, api_key, custom_llm_provider='openai_like', concurrency=6, timeout=20, wall_time_s=900, default_max_tokens=None, default_temperature=None, response_format=None, tenacious=True, …)`
+- Each request dict may contain: `model`, `messages`, `max_tokens?`, `temperature?`, `response_format?`, `api_base?`, `api_key?`.
+- Return shape: list of dicts with `index, request, response, error, status, content`. When `response_format` is json_object, `content` may be a dict or string. Check `error`/`status` per item.
+- Guards: if `api_base`/`api_key` or `model` are missing after env defaults, SCILLM raises `ValueError` early instead of hanging.
+- Recommended defaults to avoid silent waits: `tenacious=False`, `timeout=20-30`, `wall_time_s=120-300`, `concurrency=4-8`, `response_format={"type":"json_object"}`. Keep `SCILLM_JSON_STRICT=1` in CI to surface bad JSON.
+- Minimal example:
+```python
+resps = await parallel_acompletions(
+    [
+      {"messages":[{"role":"system","content":"Return JSON only."},
+                   {"role":"user","content":"Return {\"ok\":true} as JSON."}],
+       "response_format":{"type":"json_object"},
+       "max_tokens":64,
+       "temperature":0,
+       "model": os.environ["CHUTES_MODEL_ID"]},
+    ],
+    api_base=os.environ["CHUTES_API_BASE"],
+    api_key=os.environ["CHUTES_API_KEY"],
+    custom_llm_provider="openai_like",
+    concurrency=4,
+    timeout=20,
+    wall_time_s=120,
+    response_format={"type":"json_object"},
+    tenacious=False,
+)
+for r in resps:
+    if r["error"]:
+        print("error", r["status"], r["error"])
+    else:
+        print("content", r["content"])
+```
+
+Debugging quick-guide (Chutes)
+- Text sanity (JSON echo):
+```
+curl -sS -H "Authorization: Bearer $CHUTES_API_KEY" -H 'Content-Type: application/json' \
+  -d '{"model":"'"$CHUTES_MODEL_ID"'","messages":[{"role":"user","content":"Return only {\"ok\":true} as JSON."}],"response_format":{"type":"json_object"},"max_tokens":64,"temperature":0}' \
+  "$CHUTES_API_BASE/chat/completions"
+```
+Expect HTTP 200 and body containing `"ok":true`.
+- Multimodal sanity (remote image URL, still returns JSON):
+```
+curl -sS -H "Authorization: Bearer $CHUTES_API_KEY" -H 'Content-Type: application/json' \
+  -d '{"model":"'"$CHUTES_VLM_MODEL"'","messages":[{"role":"user","content":[{"type":"text","text":"Describe the image in one JSON object with key desc"},{"type":"image_url","image_url":{"url":"https://picsum.photos/seed/scillm/256/256"}}]}],"response_format":{"type":"json_object"},"max_tokens":128,"temperature":0}' \
+  "$CHUTES_API_BASE/chat/completions"
+```
+Expect HTTP 200 and a JSON object (e.g., `{"desc":"..."}`). If these fail (non‑200 or empty), the upstream is down; parallel_acompletions will also fail.
+
 Packaging expectations
 - `pip install scillm>=1.77.3` ships the paved helpers (`scillm.paved.*`) **and** the `chutes.middleware.*` modules they depend on. If an ImportError still occurs, upgrade or reinstall the wheel instead of patching a venv manually.
 - The `openai_like` provider now accepts Bearer-only auth. Pass `api_key=` and SciLLM will project the token into the correct header (Bearer or `x-api-key`) for Chutes.

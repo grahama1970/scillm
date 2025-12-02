@@ -39,6 +39,11 @@ async def parallel_acompletions(
         api_base = (_os.environ.get("CHUTES_API_BASE") or "").strip() or None
     if not api_key:
         api_key = (_os.environ.get("CHUTES_API_KEY") or "").strip() or None
+    if not api_base or not api_key:
+        raise ValueError(
+            "parallel_acompletions requires api_base and api_key "
+            "(set CHUTES_API_BASE / CHUTES_API_KEY or pass explicitly)"
+        )
 
     # Optional Router support
     _router = router
@@ -77,7 +82,8 @@ async def parallel_acompletions(
     except Exception:
         pass
 
-    for r in requests:
+    missing_model = []
+    for idx, r in enumerate(requests):
         if not isinstance(r, dict):
             continue
         if r.get("model"):
@@ -86,6 +92,13 @@ async def parallel_acompletions(
             r["model"] = vlm_default
         elif text_default:
             r["model"] = text_default
+        if not r.get("model"):
+            missing_model.append(idx)
+    if missing_model:
+        raise ValueError(
+            f"parallel_acompletions missing model for request(s): {missing_model}. "
+            "Set model per request or set CHUTES_MODEL_ID/CHUTES_TEXT_MODEL."
+        )
 
     async def _one(idx: int, req: dict):
         model = req.get("model")
