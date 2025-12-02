@@ -37,6 +37,7 @@ Parallel batch (openai_like / Chutes)
   - `schema=` (jsonschema dict or callable) validates each item’s parsed JSON; failures set `error="invalid_json: …"` and keep `raw` sample.
   - `retry_invalid_json=N` retries invalid JSON up to N times with backoff (same messages).
   - `summary` attached to the first item: counts of ok/invalid_json/provider_error/empty_content.
+  - `repair_invalid_json=True` tries to salvage by trimming to outer braces before failing; repaired items are marked `repaired=true` in results/summary.
 - Minimal example:
 ```python
 resps = await parallel_acompletions(

@@ -29,6 +29,7 @@ async def parallel_acompletions(
     # NEW: structured JSON helpers
     schema: Any | None = None,  # jsonschema dict or callable(payload) -> Any
     retry_invalid_json: int = 0,
+    repair_invalid_json: bool = False,
 ) -> list:
     """Batch async chat completions with bounded concurrency and optional tenacity.
 
@@ -127,6 +128,18 @@ async def parallel_acompletions(
         except Exception as e:  # noqa: BLE001
             return str(e)
 
+    def _repair_json(text: str) -> tuple[Optional[Any], Optional[str]]:
+        """Best-effort repair: trim to outer braces and parse."""
+        try:
+            start = text.find("{")
+            end = text.rfind("}")
+            if start != -1 and end != -1 and end > start:
+                trimmed = text[start : end + 1]
+                return _json.loads(trimmed), None
+        except Exception as e:  # noqa: BLE001
+            return None, str(e)
+        return None, "no_braces"
+
     async def _one(idx: int, req: dict):
         model = req.get("model")
         messages = req.get("messages") or []
@@ -172,13 +185,25 @@ async def parallel_acompletions(
                         content = None
                     # Validate JSON if requested
                     need_validate = strict_env or schema is not None or retry_invalid_json > 0
+                    repaired_flag = False
                     if need_validate and isinstance(content, str):
+                        repaired = False
                         try:
                             parsed = _json.loads(content)
+                        except Exception:
+                            parsed = None
+                        if parsed is None and repair_invalid_json:
+                            parsed, repair_err = _repair_json(content)
+                            repaired = parsed is not None
+                        if parsed is not None:
                             schema_err = _validate_payload(parsed)
                             if schema_err:
-                                raise ValueError(f"schema_invalid: {schema_err}")
-                        except Exception as je:  # noqa: BLE001
+                                parsed = None
+                                je = ValueError(f"schema_invalid: {schema_err}")
+                            else:
+                                content = parsed
+                                repaired_flag = repaired
+                        if parsed is None:
                             if attempt <= retry_invalid_json + 1:
                                 delay = min(backoff_cap_s, backoff_base * (2 ** max(0, attempt - 1)))
                                 try:
@@ -187,16 +212,18 @@ async def parallel_acompletions(
                                     pass
                                 continue
                             results[idx] = {
-                                "error": f"invalid_json: {je}",
+                                "error": "invalid_json",
                                 "status": None,
                                 "content": None,
                                 "raw": str(content)[:240],
+                                "repaired": False,
                             }
                             return
                     results[idx] = {
                         "error": None,
                         "status": None,
                         "content": content,
+                        "repaired": repaired_flag,
                         "response": resp,
                     }
                     return
@@ -234,6 +261,7 @@ async def parallel_acompletions(
         "provider_error": 0,
         "empty_content": 0,
         "other_error": 0,
+        "repaired": 0,
     }
     out: List[Dict[str, Any]] = []
     for i, r in enumerate(results):
@@ -254,9 +282,12 @@ async def parallel_acompletions(
                 "status": r.get("status"),
                 "content": r.get("content"),
                 "raw": r.get("raw"),
+                "repaired": r.get("repaired"),
             })
         else:
             summary["ok"] += 1
+            if isinstance(r, dict) and r.get("repaired"):
+                summary["repaired"] += 1
             content = r.get("content") if isinstance(r, dict) else _extract_content_from_response(r)
             out.append({
                 "index": i,
@@ -265,6 +296,7 @@ async def parallel_acompletions(
                 "error": None,
                 "status": None,
                 "content": content,
+                "repaired": r.get("repaired") if isinstance(r, dict) else False,
             })
     # attach summary on the first item to avoid breaking return type
     if out:
