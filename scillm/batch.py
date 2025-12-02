@@ -111,7 +111,7 @@ async def parallel_acompletions(
         )
 
     strict_env = str(_os.environ.get("SCILLM_JSON_STRICT", "0")).lower() in {"1", "true", "yes", "on"}
-    env_repair_default = str(_os.environ.get("SCILLM_REPAIR_INVALID_JSON", "1")).lower() in {"1", "true", "yes", "on"}
+    env_repair_default = str(_os.environ.get("SCILLM_REPAIR_INVALID_JSON", "0")).lower() in {"1", "true", "yes", "on"}
     effective_repair = env_repair_default if repair_invalid_json is None else bool(repair_invalid_json)
 
     def _validate_payload(payload: Any) -> Optional[str]:
