@@ -223,6 +223,16 @@ r = completion(
 print(r.choices[0].message.get("content",""))
 ```
 
+### One-command SCILLM stack (proxy + redis + arangodb + ollama + bridges)
+
+Spin up everything locally:
+```bash
+docker compose -f deploy/docker/compose.scillm.stack.yml up -d
+# optional: preload a local model
+docker exec scillm-ollama ollama pull qwen3:1.7b
+```
+Internal services: redis, arangodb, ollama, codeworld-bridge (8887), lean4-bridge (8787), scillm-proxy (4000). Expose ports only if needed.
+
 Preflight helper (library)
 
 ```python

@@ -101,6 +101,18 @@ Minimal pick‑and‑go
   - `curl -sS http://127.0.0.1:4010/v1/budget | jq`
   - A successful JSON chat with `curl -i` will show the headers above.
 
+### One-command SCILLM stack (includes redis, arangodb, ollama, codeworld, lean4)
+
+For a full local stack (proxy + cache + graph + local models + bridges):
+```bash
+docker compose -f deploy/docker/compose.scillm.stack.yml up -d
+# optional: pull a local model into ollama
+docker exec scillm-ollama ollama pull qwen3:1.7b
+```
+Services (internal network unless you expose ports): redis, arangodb, ollama, codeworld-bridge (8887), lean4-bridge (8787), scillm-proxy (4000). Add ports only if you need host access.
+
+Lightweight bring-up: run with `--profile lite` once profiles are added, or comment out heavy services (ollama) if you don’t need local models.
+
 <details><summary><b>What Each Piece Is (One‑liners)</b></summary>
 
 - CodeWorld: strategy orchestrator with optional MCTS; run N variants, score, and pick winners.
