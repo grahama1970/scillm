@@ -375,6 +375,11 @@ def completion(*args, **kwargs):  # type: ignore[no-redef]
         model = args[0] if args else kwargs.get("model")
         messages = kwargs.get("messages") or []
         provider = kwargs.get("custom_llm_provider") or "openai_like"
+        # 5xx retry knobs (opt-in by default)
+        retry_5xx = bool(kwargs.pop("retry_5xx", str(_os.getenv("SCILLM_RETRY_5XX", "1")).lower() in {"1","true","yes","on"}))
+        max_retries_5xx = int(kwargs.pop("max_retries_5xx", _os.getenv("SCILLM_MAX_RETRIES_5XX", "3")) or 0)
+        backoff_base_5xx = float(kwargs.pop("backoff_base_5xx", _os.getenv("SCILLM_BACKOFF_BASE_5XX", "0.5")) or 0.5)
+        backoff_cap_5xx = float(kwargs.pop("backoff_cap_5xx", _os.getenv("SCILLM_BACKOFF_CAP_5XX", "8")) or 8.0)
         attempts = 0
         base_max_tokens = kwargs.get("max_tokens")
         last_exc = None
@@ -508,6 +513,13 @@ async def acompletion(*args, **kwargs):  # type: ignore[no-redef]
                 status = getattr(e_all, "status", None) or getattr(e_all, "status_code", None) or getattr(e_all, "http_status", None)
                 msg_low = str(e_all).lower()
                 transient_5xx = (status in {500,502,503,504}) or ("service unavailable" in msg_low) or ("temporarily" in msg_low)
+                if retry_5xx and transient_5xx and attempts <= max_retries_5xx:
+                    delay = min(backoff_cap_5xx, backoff_base_5xx * (2 ** max(0, attempts - 1)))
+                    try:
+                        _time.sleep(delay)
+                    except Exception:
+                        pass
+                    continue
                 if _sc_is_chutes_base(api_base) and transient_5xx:
                     try:
                         payload = {

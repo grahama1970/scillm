@@ -35,6 +35,10 @@ async def parallel_acompletions(
     schema: Any | None = None,  # jsonschema dict or callable(payload) -> Any
     retry_invalid_json: int = 0,
     repair_invalid_json: Optional[bool] = None,
+    retry_5xx: Optional[bool] = None,
+    max_retries_5xx: Optional[int] = None,
+    backoff_base_5xx: Optional[float] = None,
+    backoff_cap_5xx: Optional[float] = None,
 ) -> list:
     """Batch async chat completions with bounded concurrency and optional tenacity.
 
@@ -113,6 +117,10 @@ async def parallel_acompletions(
     strict_env = str(_os.environ.get("SCILLM_JSON_STRICT", "0")).lower() in {"1", "true", "yes", "on"}
     env_repair_default = str(_os.environ.get("SCILLM_REPAIR_INVALID_JSON", "0")).lower() in {"1", "true", "yes", "on"}
     effective_repair = env_repair_default if repair_invalid_json is None else bool(repair_invalid_json)
+    retry_5xx_eff = bool(str(_os.environ.get("SCILLM_RETRY_5XX", "1")).lower() in {"1","true","yes","on"}) if retry_5xx is None else bool(retry_5xx)
+    max_retries_5xx_eff = int(_os.environ.get("SCILLM_MAX_RETRIES_5XX", "3")) if max_retries_5xx is None else int(max_retries_5xx)
+    backoff_base_5xx_eff = float(_os.environ.get("SCILLM_BACKOFF_BASE_5XX", "0.5")) if backoff_base_5xx is None else float(backoff_base_5xx)
+    backoff_cap_5xx_eff = float(_os.environ.get("SCILLM_BACKOFF_CAP_5XX", "8")) if backoff_cap_5xx is None else float(backoff_cap_5xx)
 
     def _validate_payload(payload: Any) -> Optional[str]:
         """Return None if valid; error string otherwise."""
@@ -243,6 +251,22 @@ async def parallel_acompletions(
                 except Exception as exc:  # normalize transient/backoff
                     status = getattr(exc, "status", None) or getattr(exc, "status_code", None) or getattr(exc, "http_status", None)
                     last_err = {"error": str(exc), "status": status}
+                    msg_low = str(exc).lower()
+                    transient = (
+                        status in {429, 500, 502, 503, 504}
+                        or any(k in msg_low for k in ("timeout", "rate limit", "retry", "capacity", "temporarily", "backoff"))
+                    )
+                    if retry_5xx_eff and transient and status in {500,502,503,504} and attempt <= max_retries_5xx_eff:
+                        elapsed = _asyncio.get_event_loop().time() - start
+                        if elapsed >= wall_time_s:
+                            results[idx] = last_err
+                            return
+                        delay = min(backoff_cap_5xx_eff, backoff_base_5xx_eff * (2 ** max(0, attempt - 1)))
+                        try:
+                            await _asyncio.sleep(delay)
+                        except Exception:
+                            pass
+                        continue
                     if not tenacious:
                         results[idx] = last_err
                         return
