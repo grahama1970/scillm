@@ -468,6 +468,11 @@ async def acompletion(*args, **kwargs):  # type: ignore[no-redef]
         model = args[0] if args else kwargs.get("model")
         messages = kwargs.get("messages") or []
         provider = kwargs.get("custom_llm_provider") or "openai_like"
+        # 5xx retry knobs (async path)
+        retry_5xx = bool(kwargs.pop("retry_5xx", str(_os.getenv("SCILLM_RETRY_5XX", "1")).lower() in {"1","true","yes","on"}))
+        max_retries_5xx = int(kwargs.pop("max_retries_5xx", _os.getenv("SCILLM_MAX_RETRIES_5XX", "3")) or 0)
+        backoff_base_5xx = float(kwargs.pop("backoff_base_5xx", _os.getenv("SCILLM_BACKOFF_BASE_5XX", "0.5")) or 0.5)
+        backoff_cap_5xx = float(kwargs.pop("backoff_cap_5xx", _os.getenv("SCILLM_BACKOFF_CAP_5XX", "8")) or 8.0)
         attempts = 0
         base_max_tokens = kwargs.get("max_tokens")
         last_exc = None
@@ -516,7 +521,7 @@ async def acompletion(*args, **kwargs):  # type: ignore[no-redef]
                 if retry_5xx and transient_5xx and attempts <= max_retries_5xx:
                     delay = min(backoff_cap_5xx, backoff_base_5xx * (2 ** max(0, attempts - 1)))
                     try:
-                        _time.sleep(delay)
+                        await _asyncio.sleep(delay)
                     except Exception:
                         pass
                     continue
