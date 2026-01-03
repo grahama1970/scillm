@@ -27,7 +27,7 @@
 * Also check (if needed):
 
   * `tests/local_testing/*` (new smokes)
-  * `docs/scillm/QUICKSTART.md`, `docs/scillm/ENV_REFERENCE.md` (explicit policy and flags)
+  * `QUICKSTART.md`, `ENV_REFERENCE.md` (explicit policy and flags)
 
 **Objectives**
 

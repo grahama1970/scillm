@@ -7,164 +7,14 @@
 
 # SciLLM Multi‑Surface Quickstart
 
-Before you start, verify the Chutes front door:
-
-```bash
-make chutes-front-door
-```
-
-## SCILLM Agent Cheat Sheet (one page)
-
-- **Surfaces (pick one)**
-  - Chutes / OpenAI‑compatible: `custom_llm_provider="openai_like"`, `api_base=$CHUTES_API_BASE` (includes `/v1`), `api_key=$CHUTES_API_KEY`.
-  - Local Ollama: `custom_llm_provider="ollama"`, `api_base=${OLLAMA_API_BASE:-http://127.0.0.1:11434}`; model is the Ollama tag (e.g., `qwen3:1.7b`). Prefixing `ollama/` is optional; LiteLLM strips it.
-  - Codex‑agent sidecar: set `CODEX_AGENT_API_BASE` (no `/v1`), model from `/v1/models`, provider `custom_llm_provider="codex-agent"` or model prefix `codex-agent/…`.
-
-- **Minimal examples**
-  - Paved JSON (Chutes):
-    ```python
-    from scillm import completion
-    r = completion(
-        model=os.environ["CHUTES_MODEL_ID"],
-        api_base=os.environ["CHUTES_API_BASE"],
-        api_key=os.environ["CHUTES_API_KEY"],
-        custom_llm_provider="openai_like",
-        messages=[{"role":"user","content":"Return only {\"ok\":true} as JSON."}],
-        response_format={"type":"json_object"},
-        temperature=0, timeout=20,
-    )
-    print(r.choices[0].message.content)
-    ```
-  - Local Ollama JSON:
-    ```python
-    import os
-    from scillm import completion
-    os.environ.setdefault("OLLAMA_API_BASE", "http://127.0.0.1:11434")
-    r = completion(
-        model=os.environ.get("OLLAMA_MODEL","qwen3:1.7b"),
-        api_base=os.environ["OLLAMA_API_BASE"],
-        custom_llm_provider="ollama",
-        messages=[{"role":"user","content":"ping"}],
-        temperature=0, max_tokens=64, timeout=15,
-    )
-    print(r.choices[0].message.content)
-    ```
-  - Batch (paved, Chutes):
-    ```python
-    import asyncio, os
-    from scillm import batch_acompletions
-
-    async def main():
-        reqs = [
-            {"model": os.environ["CHUTES_MODEL_ID"], "messages": [{"role": "user", "content": "hi"}], "response_format": {"type": "json_object"}},
-            {"model": os.environ["CHUTES_MODEL_ID"], "messages": [{"role": "user", "content": "hi"}], "response_format": {"type": "json_object"}},
-            {"model": os.environ["CHUTES_MODEL_ID"], "messages": [{"role": "user", "content": "hi"}], "response_format": {"type": "json_object"}},
-        ]
-        resps = await batch_acompletions(
-            reqs,
-            api_base=os.environ["CHUTES_API_BASE"],
-            api_key=os.environ["CHUTES_API_KEY"],
-            custom_llm_provider="openai_like",
-            concurrency=4,
-            timeout=20,
-            wall_time_s=120,
-        )
-        print([r.get("content") if isinstance(r, dict) and not r.get("error") else r for r in resps])
-
-    asyncio.run(main())
-    ```
-
-- **Discover models**
-  - Chutes: `python - <<'PY'\nfrom scillm.paved import list_models_openai_like; import os; print(list_models_openai_like(os.environ["CHUTES_API_BASE"], os.environ["CHUTES_API_KEY"]))\nPY`
-  - Ollama: `curl -s ${OLLAMA_API_BASE:-http://127.0.0.1:11434}/api/tags | jq -r '..|.name? // empty'`
-  - Codex‑agent: `curl -s ${CODEX_AGENT_API_BASE}/v1/models | jq -r '.data[].id'`
-
-- **Troubleshooting quick hits**
-  - 404 model not found on Chutes → pick a model from `/v1/models` or set `CHUTES_MODEL_ID`.
-  - Local model not found → ensure `ollama list` shows the tag and `OLLAMA_API_BASE` points to the host‑reachable port.
-  - Bearer vs x-api-key → let paved helpers set headers; don’t add `extra_headers`.
-  - Shut down shared clients: `from scillm.paved import shutdown; shutdown()`.
-
-- **Environment defaults (suggested)**
-  - `CHUTES_API_BASE=https://llm.chutes.ai/v1`, `CHUTES_API_KEY=...`, `CHUTES_MODEL_ID=<from /v1/models>`
-  - `OLLAMA_API_BASE=http://127.0.0.1:11434`, `OLLAMA_MODEL=qwen3:1.7b`
-  - `CODEX_AGENT_API_BASE=http://127.0.0.1:8788`
-
-## Core Paved Paths (Most‑Used)
-
-Use these three patterns by default:
-
-1) **Single model (simple calls)**  
-   `completion(...)` / `acompletion(...)` — same as LiteLLM.
-
-2) **LLM batches (progress or ordered results)**  
-   - Ordered: `batch_acompletions(...)`  
-   - Progress/as‑completed: `batch_acompletions_iter(...)`
-
-3) **Formal proofs (Lean4/Certainly)**  
-   - `certainly_prove(items=[...])` or `completion(... custom_llm_provider="certainly" ...)`  
-   - Results live in `resp.additional_kwargs["certainly"]["results"]`
-
-Multi‑model fallback/routing: **use `Router(model_list=...)`** as the standard path (avoid custom fallback loops).
-
-## Sanity Checks (Text + VLM, Batch)
-
-Use the built‑in 5‑call sanity script (text + VLM) to verify your tenant/models end‑to‑end. It prints a single JSON summary and exits 0/1. The calls cover strict‑JSON echo, France/Paris, HTTPS VLM, local file‑path VLM, and an inline HTML classification fixture (token `luminous-harvest`) so html/file-path extraction regressions show up immediately.
-
-```bash
-# Required env: CHUTES_API_BASE, CHUTES_API_KEY
-# Preferred: CHUTES_TEXT_MODEL (or CHUTES_MODEL_ID)
-# For VLM prompts: CHUTES_VLM_MODEL
-
-PYTHONPATH=$(pwd) \
-python scripts/sanity/chutes_batch_sanity.py
-
-# or via Makefile
-make scillm-sanity
-
-# As-completed (progress) mode
-# Use --verbose to print per-scenario lines as each finishes via parallel_acompletions_iter.
-# Add --inline-remote-images (sets SCILLM_INLINE_REMOTE_IMAGES=1) to download HTTPS image URLs and inline them (useful if the gateway cannot fetch your URLs directly).
-# The final JSON summary keeps the original order even though execution is unordered internally.
-# Example:
-# python scripts/sanity/chutes_batch_sanity.py --execute --verbose --inline-remote-images
-```
-
-## Project Defaults (.env)
-
-These are the repo‑wide defaults we ship in `.env` for convenience. They are examples; always verify your tenant actually serves them via `GET $CHUTES_API_BASE/models` (or run `make chutes-front-door`).
-
-```bash
-# New default models
-export CHUTES_MODEL_ID="${CHUTES_MODEL_ID:-moonshotai/Kimi-K2-Thinking}"      # text (recommended)
-export CHUTES_VLM_MODEL="${CHUTES_VLM_MODEL:-Qwen/Qwen3-VL-235B-A22B-Instruct}" # vision
-export CHUTES_TOOLS_MODEL="${CHUTES_TOOLS_MODEL:-moonshotai/Kimi-K2-Instruct-0905}"
-
-# Optional: Router fallbacks (used only when you opt into Router alternates)
-export CHUTES_TEXT_MODEL_ALT1="moonshotai/Kimi-K2-Instruct-0905"
-export CHUTES_TEXT_MODEL_ALT2="deepseek-ai/DeepSeek-R1-0528"
-export CHUTES_TEXT_MODEL_ALT3="Qwen/Qwen3-235B-A22B-Instruct-2507"
-export CHUTES_VLM_MODEL_ALT1="Qwen/Qwen2.5-VL-72B-Instruct"
-export CHUTES_VLM_MODEL_ALT2="OpenGVLab/InternVL3-78B"
-```
-
-Notes
-- These defaults may not be routable on all tenants. If `make chutes-front-door` fails or `/models` doesn’t list them, pick any listed model and export it to override.
-- “One way” still applies: the endpoint and Bearer auth are identical for text and vision; only the model id and `messages` body differ. Fallbacks apply only when you explicitly use the Router alternates.
-
 ## SciLLM Paved Path (Chutes) — Copy/Paste Recipe (Unified Bearer Auth)
 
 Use this single, verified path for Chutes (OpenAI‑compatible) JSON chat. It hides provider quirks and uses Authorization: Bearer for both JSON and streaming.
 
-Base rule: Chutes uses a base WITH `/v1` (e.g., `https://llm.chutes.ai/v1`). codex‑agent and mini‑agent bases do NOT include `/v1`.
-
-> Policy (paved path): Pipelines must not implement bespoke client‑side fallbacks, retries, or alternate model selection. If preflight fails, fail fast. Operators should fix routing/quota or export a different model via env. Router alternates (`*_ALT*`) apply only when you explicitly use a Router flow.
-
 - Env
-  - `CHUTES_API_BASE=https://llm.chutes.ai/v1`  (Chutes includes `/v1`)
+  - `CHUTES_API_BASE=https://llm.chutes.ai/v1`
   - `CHUTES_API_KEY=cpk_…`
-  - `CHUTES_MODEL_ID=<text-capable model from GET /v1/models>`
-    - Legacy alias: `CHUTES_TEXT_MODEL` (auto-mapped if `CHUTES_MODEL_ID` unset)
+  - `CHUTES_TEXT_MODEL=moonshotai/Kimi-K2-Instruct-0905`
 
 - Code (deterministic JSON, closes Router internally)
 
@@ -197,138 +47,6 @@ out = chutes_router_json(
 )
 print(out.choices[0].message.get("content"))
 ```
-
-### New paved helpers (discovery + resilient preflight)
-
-- `scillm.paved.list_models_openai_like(api_base, api_key, timeout=15)`
-  - GET `/models` with Authorization: Bearer; falls back to `x-api-key` on HTTP 401.
-  - Returns a simple list of model ids.
-- `scillm.paved.sanity_preflight(api_base, api_key, model, require_listed=True, wall_time_s=30, timeout=20, parallel=3)`
-  - Short‑wall, parallel strict‑JSON probe using the paved path. Returns `(ok, model, details)`.
-  - Set `SCILLM_PREFLIGHT_PARALLEL` to control parallelism (default 3).
-
-Repo policy
-- DevOps steps call these paved helpers directly (no manual headers, no bespoke retries).
-- Step 07 uses `sanity_preflight` before any fan‑out; on failure, it surfaces `preflight_details`.
-
-### Chutes Front Door (curl + Python)
-
-Env
-
-```bash
-export CHUTES_API_BASE="https://llm.chutes.ai/v1"   # includes /v1
-export CHUTES_API_KEY="cpk_…"
-# Canonical text model id from GET $CHUTES_API_BASE/models
-export CHUTES_MODEL_ID="${CHUTES_MODEL_ID:-$CHUTES_TEXT_MODEL}"
-```
-
-1) Preflight: list model ids (200 OK)
-
-```bash
-curl -sS -H "Authorization: Bearer $CHUTES_API_KEY" "$CHUTES_API_BASE/models" | jq -r '.data[].id' | head -n1
-```
-
-2) One JSON chat (strict JSON)
-
-```bash
-curl -sS -H "Authorization: Bearer $CHUTES_API_KEY" -H "Content-Type: application/json" \
-  -d '{"model":"'"$CHUTES_MODEL_ID"'","response_format":{"type":"json_object"},"messages":[{"role":"user","content":"Return only {\"ok\":true} as JSON."}],"max_tokens":16,"temperature":0}' \
-  "$CHUTES_API_BASE/chat/completions" | jq -r '.choices[0].message.content'
-```
-
-3) Python helper (same contract)
-
-```python
-import os
-from scillm import completion
-r = completion(
-  model=os.environ["CHUTES_MODEL_ID"],
-  api_base=os.environ["CHUTES_API_BASE"],
-  api_key=os.environ["CHUTES_API_KEY"],  # becomes Authorization: Bearer
-  custom_llm_provider="openai_like",
-  messages=[{"role":"user","content":"Return only {\\\"ok\\\":true} as JSON."}],
-  response_format={"type":"json_object"},
-  temperature=0, max_tokens=16, timeout=30)
-print(r.choices[0].message.get("content",""))
-```
-
-### One-command SCILLM stack (proxy + redis + arangodb + ollama + bridges)
-
-Spin up everything locally:
-```bash
-docker compose -f deploy/docker/compose.scillm.stack.yml up -d
-# optional: preload a local model
-docker exec scillm-ollama ollama pull qwen3:1.7b
-```
-Internal services: redis, arangodb, ollama, codeworld-bridge (8887), lean4-bridge (8787), scillm-proxy (4000). Expose ports only if needed.
-
-Preflight helper (library)
-
-```python
-import os
-from scillm.paved import preflight_text
-ok = preflight_text(api_base=os.environ["CHUTES_API_BASE"], api_key=os.environ["CHUTES_API_KEY"], model=os.environ["CHUTES_MODEL_ID"])
-print({"ok": ok})
-```
-
-## Repo‑Wide Model Choices (Primary + Alternates)
-
-This repo ships opinionated defaults in `.env` that downstream steps rely on. Use these consistently across scripts and CI:
-
-- Text (primary): `CHUTES_TEXT_MODEL="moonshotai/Kimi-K2-Instruct-0905"`
-- Text alternates: `CHUTES_TEXT_MODEL_ALT1`, `CHUTES_TEXT_MODEL_ALT2`
-- Vision (primary): `CHUTES_VLM_MODEL="Qwen/Qwen3-VL-235B-A22B-Instruct"`
-- Vision alternates: `CHUTES_VLM_MODEL_ALT1`, `CHUTES_VLM_MODEL_ALT2`
-- Tools (function‑calling): `CHUTES_TOOLS_MODEL` (text‑capable)
-
-Important behavior by step:
-- Step 07 (knowledge generation) currently reads only the primary `CHUTES_TEXT_MODEL` via the paved path preflight. It does not auto‑fallback to `*_ALT*`. If the primary is not routable, either fix routing/quota or temporarily export a known‑good model before running Step 07.
-- Router flows (e.g., `scillm.paved.chutes_router_json`) honor alternates automatically based on env.
-
-Recommended “first‑routable” preflight (tries primary then alternates, picks one that returns strict JSON):
-
-```bash
-export CHUTES_API_BASE="https://llm.chutes.ai/v1"
-export CHUTES_API_KEY=cpk_...
-
-TEXT_CAND=(
-  "${CHUTES_TEXT_MODEL}"
-  "${CHUTES_TEXT_MODEL_ALT1}"
-  "${CHUTES_TEXT_MODEL_ALT2}"
-)
-
-for M in "${TEXT_CAND[@]}"; do
-  [[ -z "$M" ]] && continue
-  OUT=$(curl -sS -H "Authorization: Bearer $CHUTES_API_KEY" -H 'Content-Type: application/json' \
-    -d '{"model":"'"$M"'","response_format":{"type":"json_object"},"messages":[{"role":"user","content":"Return only {\"ok\":true} as JSON."}],"max_tokens":16,"temperature":0}' \
-    "$CHUTES_API_BASE/chat/completions" | jq -r '.choices[0].message.content' 2>/dev/null || true)
-  if [[ "$OUT" == '{"ok":true}' ]]; then
-    export CHUTES_TEXT_MODEL="$M"
-    echo "[preflight] selected text model: $M"
-    break
-  fi
-done
-
-if [[ -z "${CHUTES_TEXT_MODEL:-}" ]]; then
-  echo "[preflight] no routable text model found; check quota/route" >&2
-  exit 2
-fi
-```
-
-Vision (VLM) preflight (must use a VLM id; text‑only will 400/422):
-
-```bash
-export CHUTES_VLM_MODEL="${CHUTES_VLM_MODEL:-Qwen/Qwen3-VL-235B-A22B-Instruct}"
-IMG="https://picsum.photos/seed/scillm/256/256"
-curl -sS -H "Authorization: Bearer $CHUTES_API_KEY" -H "Content-Type: application/json" \
-  -d '{"model":"'"$CHUTES_VLM_MODEL"'","messages":[{"role":"user","content":[{"type":"text","text":"vision preflight"},{"type":"image_url","image_url":{"url":"'"$IMG"'"}}]}],"max_tokens":32}' \
-  "$CHUTES_API_BASE/chat/completions" | jq -r '.choices[0].message.content' | sed -n '1p'
-```
-
-Notes
-- Text‑only models cannot be used for multimodal calls; pick a VLM from `/v1/models` and set `CHUTES_VLM_MODEL`.
-- If Step 07 fails preflight on the primary, either (a) fix routing/quota for that model, or (b) export a routable model (from the loop above) just for that run. Router‑based flows can rely on `*_ALT*` automatically.
-
 
 ### Budget & Metrics quick path
 
@@ -365,76 +83,10 @@ curl -si -H 'Authorization: Bearer sk-dev-proxy-123' \
     `"$CHUTES_API_BASE/chat/completions"` → 200
 
 - Notes
-  - Use Authorization: Bearer for both non‑stream JSON and streaming. Do not use `x-api-key` in requests; the client may auto-fallback only on 401.
+  - Use Authorization: Bearer for both non‑stream JSON and streaming. Some gateways accept `x-api-key` for non‑stream JSON; this path standardizes on Bearer.
   - JSON mode content may be string or dict; normalize both if you post‑process.
   - If you construct Router yourself, call `await router.aclose()` when done.
   - Pin exactly one `CHUTES_TEXT_MODEL`/`CHUTES_VLM_MODEL` (alternates are disabled in locked bearer mode).
-
-### Multimodal (Vision) — One Way, Same Contract
-
-Use the exact same OpenAI‑compatible endpoint and Bearer auth. For images, include an image_url part with a fetchable HTTPS URL (do not use data: URIs).
-
-> Important — pick a vision-capable model: Text-only models cannot accept `image_url` content and will return 400/422. Set `CHUTES_VLM_MODEL` to a VLM from `GET $CHUTES_API_BASE/models`.
-
-- Env
-  - `CHUTES_VLM_MODEL=Qwen/Qwen3-VL-235B-A22B-Instruct`  (example vision model; pick one from `/v1/models`)
-
-- cURL (non‑stream JSON)
-
-```bash
-IMG="https://picsum.photos/seed/scillm/256/256"   # public, fetchable URL
-curl -sS -X POST "$CHUTES_API_BASE/chat/completions" \
-  -H "Authorization: Bearer $CHUTES_API_KEY" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model": "'"$CHUTES_VLM_MODEL"'",
-    "messages": [
-      {"role":"user","content":[
-        {"type":"text","text":"Describe this image in one short sentence."},
-        {"type":"image_url","image_url":{"url":"'"$IMG"'"}}
-      ]}
-    ],
-    "max_tokens": 128,
-    "temperature": 0.2
-  }'
-```
-
-- Python (blocking JSON)
-
-```python
-import os
-from scillm import completion
-img = "https://picsum.photos/seed/scillm/256/256"  # public, fetchable URL
-r = completion(
-  model=os.environ["CHUTES_VLM_MODEL"],
-  api_base=os.environ["CHUTES_API_BASE"],
-  api_key=None,
-  custom_llm_provider="openai_like",
-  messages=[{"role":"user","content":[
-    {"type":"text","text":"Describe this image in one short sentence."},
-    {"type":"image_url","image_url":{"url": img}}
-  ]}],
-  max_tokens=128, temperature=0.2)
-print(r.choices[0].message.get("content",""))
-```
-
-Notes (Vision)
-- Same endpoint and Bearer header as text; only the `messages` body adds the `image_url` part.
-- Use HTTPS URLs that your gateway can fetch. Some sites return 403 to server fetchers; prefer your own pre‑signed S3/GCS URLs or a public image host.
-- Data URIs (base64) may not be enabled on your tenant; use HTTPS image URLs for multimodal.
-- Capabilities: If `/v1/models` includes a `capabilities` field (e.g., `["text"]`, `["vision"]`), pick accordingly. If not present on your tenant, use the "Quick VLM preflight" below to verify that a model accepts `image_url`.
-
-#### Quick VLM preflight (fails fast for wrong model)
-
-```bash
-IMG="https://picsum.photos/seed/scillm/256/256"
-curl -sS -H "Authorization: Bearer $CHUTES_API_KEY" -H "Content-Type: application/json" \
-  -d '{"model":"'"$CHUTES_VLM_MODEL"'","messages":[{"role":"user","content":[
-        {"type":"text","text":"vision preflight"},
-        {"type":"image_url","image_url":{"url":"'"$IMG"'"}}]}],"max_tokens":4}' \
-  "$CHUTES_API_BASE/chat/completions" \
-  | jq -r 'if .error then .error.message else .choices[0].message.content end'
-```
 
 > Environment Prefix Preference: Use `SCILLM_` (e.g. `SCILLM_ENABLE_CODEX_AGENT=1`). Legacy `LITELLM_` variables still work.
 > Model IDs: Replace `<MODEL_ID>` placeholders with real IDs from `GET $CODEX_AGENT_API_BASE/v1/models`.
@@ -448,7 +100,6 @@ This unified quickstart covers:
 4. Certainly / Lean4 bridge
 
 If you only need Lean4 specifics, see `LEAN4_QUICKSTART.md` (can be factored separately).
-Paved‑path example: see `SCILLM_PAVED_PATH_CONTRACT.md#certainly--lean4-paved-path`.
 ## 0) Prerequisites
 
 | Item | Minimum | Notes |
@@ -460,18 +111,6 @@ Paved‑path example: see `SCILLM_PAVED_PATH_CONTRACT.md#certainly--lean4-paved-
 | Redis (optional) | 6+ | Caching & session history; auto‑fallback to in‑memory |
 
 > Replace `<MODEL_ID>` wherever shown with an actual ID discovered via `GET $CODEX_AGENT_API_BASE/v1/models` or your provider listing.
-
-### Troubleshooting — Fastest fixes
-
-| Symptom | Likely cause | Fix |
-|---|---|---|
-| 401 Unauthorized | Missing/invalid Bearer | Set `CHUTES_API_KEY`; ensure `Authorization: Bearer` header. |
-| 404 on /chat/completions | Base missing `/v1` | Set `CHUTES_API_BASE` to include `/v1`. |
-| 404/400 “model not found” | Bad model id | Use an id from `GET $CHUTES_API_BASE/models`. |
-| 422 validation error | Malformed body | Include `messages`; set `Content-Type: application/json`. |
-| 429 | Capacity/RPM | Back off; retry with cooldown. |
-| Vision returns 403 fetch | Image host blocks server fetch | Use pre‑signed S3/GCS or permissive HTTPS host. |
-| Content not strict JSON | Provider returns prose | Use `response_format={"type":"json_object"}`; sanitize client‑side if needed. |
 
 ## 1) Install (Local Dev)
 
@@ -547,8 +186,7 @@ Happy Path (shared base)
 - Use `Authorization: Bearer` for both JSON and streaming.
 - Single JSON call (Python):
   ```python
-import os
-from scillm import completion
+from scillm import completion, os
 r = completion(
   model=os.environ["CHUTES_MODEL_ID"],
   api_base=os.environ["CHUTES_API_BASE"],
@@ -587,8 +225,7 @@ print(r.choices[0].message.get("content",""))
   ```
 - Streaming (text):
   ```python
-  import os, asyncio
-  from scillm import acompletion
+  from scillm import acompletion, os, asyncio
   async def main():
     s = await acompletion(
       model=os.environ["CHUTES_TEXT_MODEL"], api_base=os.environ["CHUTES_API_BASE"],
@@ -612,8 +249,7 @@ print(r.choices[0].message.get("content",""))
   ```
 - Batch (Router JSON): set `x-api-key` in `model_list`:
   ```python
-  import os
-  from scillm import Router
+  from scillm import Router, os
   router = Router(model_list=[{"model_name":"chutes","litellm_params":{
     "model": os.environ["CHUTES_MODEL_ID"],
     "api_base": os.environ["CHUTES_API_BASE"],

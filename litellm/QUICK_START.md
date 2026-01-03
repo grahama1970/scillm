@@ -48,7 +48,7 @@ export LITELLM_ENABLE_CODEX_AGENT=1
 python ../scenarios/codex_agent_router.py
 ```
 
-For more details, see <a href="../docs/scillm/QUICKSTART.md">docs/scillm/QUICKSTART.md</a>.
+For more details, see the root <a href="../QUICKSTART.md">QUICKSTART.md</a>.
 
 ## 5) MCTS Demo (CodeWorld, experimental)
 

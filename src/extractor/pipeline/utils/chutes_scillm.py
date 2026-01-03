@@ -4,63 +4,9 @@ from __future__ import annotations
 import os
 from typing import Any, Dict, List, Optional
 
-try:
-    from scillm import completion as sc_completion  # type: ignore
-except Exception:
-    sc_completion = None  # type: ignore
-try:
-    from scillm.extras.autoscale import controller  # type: ignore
-except Exception:
-    # Fallback no-op controller to avoid import-time coupling
-    class _NoopController:
-        def acquire(self):
-            class _C:
-                def __enter__(self_inner):
-                    return None
-                def __exit__(self_inner, *a):
-                    return False
-            return _C()
-        def note_success(self, *a, **k):
-            pass
-        def note_rate_limit(self, *a, **k):
-            pass
-    def controller():  # type: ignore
-        return _NoopController()
+from scillm import completion as sc_completion
+from scillm.extras.autoscale import controller
 import httpx, time, random
-
-
-def _probe_models(base: str, key: str) -> bool:
-    try:
-        url = base.rstrip("/") + "/models"
-        r = httpx.get(
-            url,
-            headers={"Authorization": f"Bearer {key}", "Accept": "application/json"},
-            timeout=6.0,
-        )
-        if r.status_code != 200:
-            return False
-        j = r.json()
-        return isinstance(j, dict) and "data" in j
-    except Exception:
-        return False
-
-
-def _normalize_base(base: str, key: str) -> str:
-    b = (base or "").strip().rstrip("/")
-    if not b:
-        return b
-    # Prefer the provided base if it works; otherwise try toggling "/v1" suffix.
-    if _probe_models(b, key):
-        return b
-    alt = b[:-3] if b.endswith("/v1") else (b + "/v1")
-    if _probe_models(alt, key):
-        try:
-            # Cache for this process and help downstream calls.
-            os.environ["CHUTES_API_BASE"] = alt
-        except Exception:
-            pass
-        return alt
-    return b
 
 
 def _base_and_key() -> tuple[str, str]:
@@ -70,7 +16,6 @@ def _base_and_key() -> tuple[str, str]:
         raise ValueError("CHUTES_API_BASE not set")
     if not key:
         raise ValueError("CHUTES_API_KEY not set")
-    base = _normalize_base(base, key)
     return base, key
 
 
@@ -113,51 +58,49 @@ def chutes_chat(
     response_format: Optional[Dict[str, Any]] = None,
     temperature: Optional[float] = None,
     timeout: int | float = 60,
-    max_tokens: Optional[int] = None,
 ) -> Dict[str, Any]:
     base, key = _base_and_key()
-    if sc_completion is not None:
-        def _call(headers: Dict[str, str]) -> Dict[str, Any]:
-            eff_headers = {
-                'Content-Type': 'application/json',
-                'Accept': 'application/json',
-                **(headers or {}),
-            }
-            t0 = time.perf_counter()
-            res = sc_completion(
-                model=model,
-                api_base=base,
-                api_key=None,
-                custom_llm_provider="openai_like",
-                messages=messages,
-                response_format=response_format,
-                temperature=temperature,
-                timeout=timeout,
-                max_tokens=max_tokens or int(os.getenv("CHUTES_MAX_TOKENS", "128") or 128),
-                extra_headers=eff_headers,
-            )
-            try:
-                controller().note_success(latency_ms=(time.perf_counter() - t0) * 1000.0)
-            except Exception:
-                pass
-            return res
-        # Attempt scillm path first; force Bearer for Chutes
-        auth_attempts = [
-            {"Authorization": f"Bearer {key}"},
-        ]
-        for hdr in auth_attempts:
-            try:
-                with controller().acquire():
-                    return _call(hdr)
-            except Exception as e:  # try next style
-                last_err = e
+    def _call(headers: Dict[str, str]) -> Dict[str, Any]:
+        eff_headers = {
+            'Content-Type': 'application/json',
+            'Accept': 'application/json',
+            **(headers or {}),
+        }
+        t0 = time.perf_counter()
+        res = sc_completion(
+            model=model,
+            api_base=base,
+            api_key=None,
+            custom_llm_provider="openai_like",
+            messages=messages,
+            response_format=response_format,
+            temperature=temperature,
+            timeout=timeout,
+            extra_headers=eff_headers,
+        )
+        try:
+            controller().note_success(latency_ms=(time.perf_counter() - t0) * 1000.0)
+        except Exception:
+            pass
+        return res
+    # Attempt scillm path first with 2 auth styles; then fallback to direct HTTP with backoff
+    auth_attempts = [
+        {"Authorization": f"Bearer {key}"},
+        {"x-api-key": key},
+        {"Authorization": key},
+    ]
+    for hdr in auth_attempts:
+        try:
+            with controller().acquire():
+                return _call(hdr)
+        except Exception as e:  # try next style
+            last_err = e
     # Direct HTTP with backoff on 429/503
     payload = {"model": model, "messages": messages}
     if response_format is not None:
         payload["response_format"] = response_format
     if temperature is not None:
         payload["temperature"] = temperature
-    payload["max_tokens"] = int(max_tokens or int(os.getenv("CHUTES_MAX_TOKENS", "128") or 128))
     headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json", "Accept": "application/json"}
 
     max_attempts = int(os.getenv("CHUTES_BACKOFF_MAX", "3"))

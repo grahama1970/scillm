@@ -88,7 +88,7 @@ Minimal pick‑and‑go
   - Prometheus at `/metrics`; import `dashboards/scillm_budget_lite_grafana.json`.
   - Budget status: `GET /v1/budget` returns `{limit, remaining, reset_at, price_per_call_usd}` (price may be 0.0 unless configured).
 - Direct to provider (fastest)
-  - Copy the provider snippet in `docs/scillm/QUICKSTART.md` and run.
+  - Copy the provider snippet in `QUICKSTART.md` and run.
 
 ### Budget headers & endpoint (what to expect)
 - On 200 and 4xx responses the proxy injects:
@@ -100,18 +100,6 @@ Minimal pick‑and‑go
 - Quick probe (local defaults):
   - `curl -sS http://127.0.0.1:4010/v1/budget | jq`
   - A successful JSON chat with `curl -i` will show the headers above.
-
-### One-command SCILLM stack (includes redis, arangodb, ollama, codeworld, lean4)
-
-For a full local stack (proxy + cache + graph + local models + bridges):
-```bash
-docker compose -f deploy/docker/compose.scillm.stack.yml up -d
-# optional: pull a local model into ollama
-docker exec scillm-ollama ollama pull qwen3:1.7b
-```
-Services (internal network unless you expose ports): redis, arangodb, ollama, codeworld-bridge (8887), lean4-bridge (8787), scillm-proxy (4000). Add ports only if you need host access.
-
-Lightweight bring-up: run with `--profile lite` once profiles are added, or comment out heavy services (ollama) if you don’t need local models.
 
 <details><summary><b>What Each Piece Is (One‑liners)</b></summary>
 
@@ -175,28 +163,14 @@ Troubleshooting
 
 Doctor (one-shot): `make codex-agent-doctor`
 
-### Keeping Downstream Repos in Sync
-
-Several sibling projects (`extractor`, `devops`, `amd`, `pi-mono`) install SciLLM via `scillm @ file:///home/graham/workspace/experiments/litellm`. After landing SciLLM changes, run `./scripts/update_scillm_dependents.sh` to reinstall the editable build inside each downstream repo before asking those agents to rerun doctors or pipelines.
-
 ---
 ## Quick Links
 | Topic | File |
 |-------|------|
-| Feature matrix & patterns | [docs/scillm/FEATURES.md](docs/scillm/FEATURES.md) |
-| Multi‑Surface Quickstart | [docs/scillm/QUICKSTART.md](docs/scillm/QUICKSTART.md) |
-| Auto Code → Review → Green (codex‑agent) | [docs/scillm/QUICKSTART.md](docs/scillm/QUICKSTART.md#scenario-auto-code-review-green-codex-agent) |
+| Feature matrix & patterns | [FEATURES.md](FEATURES.md) |
+| Multi‑Surface Quickstart | [QUICKSTART.md](QUICKSTART.md) |
+| Auto Code → Review → Green (codex‑agent) | [QUICKSTART.md](QUICKSTART.md#scenario-auto-code-review-green-codex-agent) |
 | Lean4 / Certainly specifics | `scenarios/lean4_*`, `scenarios/certainly_*` |
-
-#### Units Collaboration (Lean4 / Certainly)
-
-The bridge defaults to a collaborative units flow — it never assumes units.
-
-- Policy: `ask_always` (default). The server returns 422 with a single, clear prompt and a JSON example.
-- Confirm: re‑post with `engineering_confirmed: true` to proceed.
-- Preview: `POST /bridge/units/normalize` shows the same prompt/preview without running Lean4.
-
-See `docs/UNITS_COLLABORATION.md` for the minimal set of fields and accepted units.
 | Parallel fan‑out example | `feature_recipes/parallel_acompletions.py` |
 | MCTS & autogen | `scenarios/mcts_codeworld_demo.py` |
 | Retry guide | `docs/guide/RATE_LIMIT_RETRIES.md` |
@@ -467,7 +441,7 @@ Mini‑Agent (MCP)
   - `uvicorn litellm.experimental_mcp_client.mini_agent.agent_proxy:app --host 127.0.0.1 --port 8788`
 - Probe: `curl -sSf http://127.0.0.1:8788/ready`
 - In‑process sample: `python examples/mini_agent_inprocess.py` (uses LocalMCPInvoker)
-- See also: feature_recipes/MINI_AGENT.md and docs/scillm/CONTEXT.md runbook pointers.
+- See also: feature_recipes/MINI_AGENT.md and CONTEXT.md runbook pointers.
 
 ## When To Use CodeWorld
 
@@ -562,7 +536,7 @@ Fork Status (our fork)
 Fork Quick Start (Recap)
 1. `make run-scenarios`
 2. (Optional) `docker compose -f local/docker/compose.agents.yml up --build -d` for mini + codex endpoints
-3. See [docs/scillm/QUICKSTART.md](docs/scillm/QUICKSTART.md) for scenario commands
+3. See [QUICKSTART.md](QUICKSTART.md) for scenario commands
 4. Mini‑Agent docs: `docs/my-website/docs/experimental/mini-agent.md`
 5. Project status: `docs/archive/STATE_OF_PROJECT.md`
 

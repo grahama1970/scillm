@@ -10,43 +10,8 @@ from scillm import Router, completion
 from litellm.exceptions import APIConnectionError, APIError, RateLimitError, Timeout
 
 from .auto_router import auto_router_from_env
-
-_MISSING_CHUTES_MIDDLEWARE = False
-_CHUTES_WARNED = False
-
-
-def _middleware_warn(message: str) -> None:
-    global _CHUTES_WARNED
-    if _CHUTES_WARNED:
-        return
-    _CHUTES_WARNED = True
-    try:
-        print(f"[scillm.chutes] WARNING: {message}")
-    except Exception:
-        pass
-
-
-try:
-    from chutes.middleware.budget_guard import budget_register_attempt, budget_snapshot
-    from chutes.middleware.metrics import tenacious_sleep, tenacious_retry
-except Exception:  # pragma: no cover - optional runtime dependency
-    _MISSING_CHUTES_MIDDLEWARE = True
-
-    def budget_register_attempt(*_args, **_kwargs):  # type: ignore
-        _middleware_warn("chutes.middleware not available; budget telemetry disabled. Reinstall scillm >=1.77.3 or include the chutes package.")
-        return {}
-
-    def budget_snapshot(*_args, **_kwargs):  # type: ignore
-        _middleware_warn("chutes.middleware not available; budget telemetry disabled. Reinstall scillm >=1.77.3 or include the chutes package.")
-        return {}
-
-    def tenacious_sleep(delay: float, *_, **__):  # type: ignore
-        _middleware_warn("chutes.middleware.metrics not available; using basic sleep.")
-        time.sleep(delay)
-
-    def tenacious_retry(*_args, **_kwargs):  # type: ignore
-        _middleware_warn("chutes.middleware.metrics not available; tenacious retry telemetry disabled.")
-        return False
+from chutes.middleware.budget_guard import budget_register_attempt, budget_snapshot
+from chutes.middleware.metrics import tenacious_sleep, tenacious_retry
 
 try:  # pragma: no cover - optional telemetry
     from scillm.telemetry import metrics as sc_metrics  # type: ignore
@@ -544,15 +509,13 @@ def chutes_chat_json(
                     last_retry_after_s = delay
                     total_sleep_s += delay
                     if time.time() - start > max_wall_time_s:
-                        from litellm.exceptions import Timeout as _Timeout
-                        raise _Timeout(message="tenacious wall time exceeded while waiting for reset", model=model, llm_provider="openai_like") from exc
+                        raise Timeout("tenacious wall time exceeded while waiting for reset") from exc
                     continue
             last_retry_after_s = hint
             delay = _tenacious_sleep(attempt, hint, base=backoff_base, cap_s=backoff_cap_s)
             total_sleep_s += delay
             if time.time() - start > max_wall_time_s:
-                from litellm.exceptions import Timeout as _Timeout
-                raise _Timeout(message=f"tenacious wall time exceeded after {attempt} attempts", model=model, llm_provider="openai_like") from exc
+                raise Timeout(f"tenacious wall time exceeded after {attempt} attempts") from exc
 
 
 def _tenacious_sleep(attempt: int, retry_after_hint: Optional[float], *, base: float, cap_s: int) -> float:
@@ -693,15 +656,13 @@ def chutes_router_json(
                                 last_retry_after_s = delay
                                 total_sleep_s += delay
                                 if time.time() - start > max_wall_time_s:
-                                    from litellm.exceptions import Timeout as _Timeout
-                                    raise _Timeout(message="tenacious wall time exceeded while waiting for reset", model=model, llm_provider="openai_like") from exc
+                                    raise Timeout("tenacious wall time exceeded while waiting for reset") from exc
                                 continue
                         last_retry_after_s = hint
                         delay = _tenacious_sleep(attempt, hint, base=backoff_base, cap_s=backoff_cap_s)
                         total_sleep_s += delay
                         if time.time() - start > max_wall_time_s:
-                            from litellm.exceptions import Timeout as _Timeout
-                            raise _Timeout(message=f"tenacious wall time exceeded after {attempt} attempts", model=model, llm_provider="openai_like") from exc
+                            raise Timeout(f"tenacious wall time exceeded after {attempt} attempts") from exc
                 return result
             else:
                 if sc_pacing is not None:

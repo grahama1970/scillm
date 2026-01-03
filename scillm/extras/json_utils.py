@@ -10,7 +10,7 @@ import logging
 import os
 import re
 from pathlib import Path
-from typing import Any, Union, List, Dict, Iterable
+from typing import Any, Union, List, Dict
 
 from json_repair import repair_json
 
@@ -22,8 +22,7 @@ __all__ = [
     "save_json_to_file",
     "parse_json",
     "clean_json_string",
-    "load_jsonl",
-    "iter_jsonl"
+    "load_jsonl"
 ]
 
 logger = logging.getLogger(__name__)
@@ -71,24 +70,10 @@ def save_json_to_file(data: Any, file_path: str) -> None:
         json.dump(data, handle, indent=4)
 
 
-def iter_jsonl(path: Path) -> Iterable[Dict[str, Any]]:
-    if not path.exists():
-        return []
-    with path.open("r", encoding="utf-8", errors="ignore") as fh:
-        for line in fh:
-            s = line.strip()
-            if not s:
-                continue
-            try:
-                yield json.loads(s)
-            except Exception:
-                continue
-
-
 _JSON_PATTERN = re.compile(r"(\[.*\]|\{.*\})", re.DOTALL)
 
 
-def parse_json(content: str) -> Union[Dict[str, Any], List[Any], str]:
+def parse_json(content: str) -> Union[dict, list, str]:
     """Attempt to parse ``content`` as JSON; fall back to repairing the string."""
 
     try:

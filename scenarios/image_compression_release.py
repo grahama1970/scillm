@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Compress a real image using litellm.extras.image_utils.compress_image."""
+"""Compress a real image using litellm.extras.images.compress_image."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ import sys
 
 from dotenv import find_dotenv, load_dotenv
 
-from litellm.extras.image_utils import compress_image
+from litellm.extras.images import compress_image
 
 load_dotenv(find_dotenv())
 

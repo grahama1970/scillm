@@ -1,10 +1,8 @@
-# Changelog
+# Changelog (Fork)
 
-## 1.77.9 (unreleased)
-- parallel_acompletions: schema validation summary, optional repair_invalid_json (opt-in), attached batch summary counts.
-- completion/parallel_acompletions: configurable 5xx retry/backoff (env or kwargs) for Chutes/openai_like paths.
-- Logging: env knobs to silence MAX_CALLBACKS warning and tune callback cap.
-- Docs: one-command SCILLM stack bring-up; chat UI plan and UI reference scaffold.
-
-## 1.77.8
-- Local changes prior to structured JSON and retry improvements.
+## v0.1.1-exp (2025-09-19)
+- Experimental mini-agent (in-code loop) with local tools and optional HTTP tools.
+- Router: extracted streaming iterator seam (opt-in via `LITELLM_ROUTER_CORE=extracted`).
+- Import-time robustness: fastuuid→uuid fallbacks; MCP soft-dep import guards.
+- HTTP diagnostics: short body tail in errors for triage.
+- Offline smokes + CI workflow.

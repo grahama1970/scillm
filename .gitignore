@@ -99,10 +99,6 @@ tests/litellm/litellm_core_utils/llm_cost_calc/log.txt
 tests/test_custom_dir/*
 test.py
 local/ollama/
-local/mcp_servers.json
-local/tmp/
-local/run_artifacts/
-local/notes/
 
 litellm_config.yaml
 .cursor

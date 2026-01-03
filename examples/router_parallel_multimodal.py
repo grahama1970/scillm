@@ -12,7 +12,7 @@ from __future__ import annotations
 import asyncio
 import os
 from litellm import Router
-from litellm.extras.image_utils import compress_image
+from litellm.extras.images import compress_image
 
 
 def msg_text(txt: str):
@@ -87,3 +87,4 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+

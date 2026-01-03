@@ -4,7 +4,7 @@ Branch: https://github.com/grahama1970/scillm/tree/feat/codeworld-provider
 
 Files to review
 - README.md (root)
-- docs/scillm/QUICKSTART.md
+- QUICKSTART.md (root)
 - litellm/README.md
 - litellm/QUICK_START.md
 

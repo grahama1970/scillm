@@ -7,12 +7,6 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
-# Skip this test module if Jinja is not installed (optional extra)
-try:
-    import jinja2  # noqa: F401
-except Exception:
-    pytest.skip("jinja2 not installed; skipping dotprompt tests", allow_module_level=True)
-
 sys.path.insert(
     0, os.path.abspath("../../..")
 )  # Adds the parent directory to the system path
