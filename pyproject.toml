@@ -4,7 +4,7 @@
 
 [project]
 name = "scillm"
-version = "1.77.2"
+version = "1.78.2"
 description = "SciLLM — a scientific/engineering‑focused fork of LiteLLM (OpenAI‑compatible gateway + optional modules)"
 readme = "README.md"
 authors = [{name = "Graham Anderson", email = "graham@grahama.co"}]
@@ -137,7 +137,7 @@ proxy-dev = [
 profile = "black"
 
 [tool.commitizen]
-version = "1.77.2"
+version = "1.78.2"
 version_files = ["pyproject.toml:^version"]
 
 [tool.mypy]

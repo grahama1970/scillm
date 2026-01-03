@@ -63,7 +63,7 @@ def load_prompt() -> str:
 def read_repo_context() -> str:
     # Keep lightweight: include PROJECT_READY summary + NEXT_STEPS if present
     parts: list[str] = []
-    for rel in ("PROJECT_READY.md", "NEXT_STEPS.md", "README.md"):
+    for rel in ("PROJECT_READY.md", "docs/scillm/NEXT_STEPS.md", "README.md"):
         fp = Path(rel)
         if fp.exists():
             try:

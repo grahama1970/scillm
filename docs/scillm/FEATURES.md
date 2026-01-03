@@ -24,6 +24,23 @@ New in this revision:
 ## Environment Prefix (One‑liner)
 Prefer: `SCILLM_ENABLE_CODEWORLD=1` etc. (All `SCILLM_ENABLE_*` have `LITELLM_ENABLE_*` fallbacks.)
 
+## Core Paved Paths (Most‑Used)
+
+Use these by default to reduce confusion:
+
+1) **Single model (simple calls)**  
+   `completion(...)` / `acompletion(...)`
+
+2) **LLM batches**  
+   - Ordered list: `batch_acompletions(...)` (alias of `parallel_acompletions`)  
+   - Progress/as‑completed: `batch_acompletions_iter(...)` (alias of `parallel_acompletions_iter`)
+
+3) **Formal proofs (Lean4/Certainly)**  
+   - `certainly_prove(items=[...])` or `completion(... custom_llm_provider="certainly" ...)`
+   - Results live in `resp.additional_kwargs["certainly"]["results"]`
+
+Multi‑model fallback/routing: **use `Router(model_list=...)`** as the standard path (avoid custom fallback loops).
+
 ## Core Providers & Surfaces
 
 | Area | Feature | What It Does | How To Use (one‑liner) | Files/Notes |
@@ -148,7 +165,13 @@ SimpleNamespace(
 ```
 
 ### Advanced (Experimental)
-- `parallel_as_completed(requests)` — yields results as they finish (unordered). Not guaranteed stable; prefer `parallel_acompletions` for deterministic ordering.
+- `parallel_acompletions_iter(requests, ...)` — stable as-completed iterator; yields `{index, request, ok, response|error, content?, attempts, elapsed_s}`. Caller controls final ordering/aggregation.
+  - Supports the same JSON repair/validation knobs as `parallel_acompletions`: `schema=`, `retry_invalid_json=`, `repair_invalid_json=`.
+- `parallel_as_completed(requests)` (legacy) — older surface; prefer `parallel_acompletions_iter`.
+
+The sanity script uses `parallel_acompletions_iter` to stream progress yet still emits a deterministic JSON summary.
+
+Inline helper (optional): set `SCILLM_INLINE_REMOTE_IMAGES=1` (the sanity script’s `--inline-remote-images` flag does this) to download HTTPS URLs locally and embed them as data URLs before dispatch. Handy when the gateway cannot fetch a given CDN but you still want the probe to pass.
 
 ## Router — 429 Retries (Opt‑In)
 
@@ -256,6 +279,7 @@ Batch example (canonical envelope):
   "options": {"max_seconds": 120}
 }
 ```
+Paved‑path example: see `SCILLM_PAVED_PATH_CONTRACT.md#certainly--lean4-paved-path`.
 
 
 ## Chutes Model Resolution (Alias, Once per Session)
