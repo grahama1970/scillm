@@ -49,17 +49,29 @@ make chutes-front-door
     )
     print(r.choices[0].message.content)
     ```
-  - Parallel batch (paved, Chutes):
+  - Batch (paved, Chutes):
     ```python
-    from scillm import parallel_acompletions
-    resps = parallel_acompletions(
-        model=os.environ["CHUTES_MODEL_ID"],
-        api_base=os.environ["CHUTES_API_BASE"],
-        api_key=os.environ["CHUTES_API_KEY"],
-        custom_llm_provider="openai_like",
-        messages_list=[[{"role":"user","content":"hi"}]]*3,
-        response_format={"type":"json_object"},
-    )
+    import asyncio, os
+    from scillm import batch_acompletions
+
+    async def main():
+        reqs = [
+            {"model": os.environ["CHUTES_MODEL_ID"], "messages": [{"role": "user", "content": "hi"}], "response_format": {"type": "json_object"}},
+            {"model": os.environ["CHUTES_MODEL_ID"], "messages": [{"role": "user", "content": "hi"}], "response_format": {"type": "json_object"}},
+            {"model": os.environ["CHUTES_MODEL_ID"], "messages": [{"role": "user", "content": "hi"}], "response_format": {"type": "json_object"}},
+        ]
+        resps = await batch_acompletions(
+            reqs,
+            api_base=os.environ["CHUTES_API_BASE"],
+            api_key=os.environ["CHUTES_API_KEY"],
+            custom_llm_provider="openai_like",
+            concurrency=4,
+            timeout=20,
+            wall_time_s=120,
+        )
+        print([r.get("content") if isinstance(r, dict) and not r.get("error") else r for r in resps])
+
+    asyncio.run(main())
     ```
 
 - **Discover models**
@@ -77,6 +89,23 @@ make chutes-front-door
   - `CHUTES_API_BASE=https://llm.chutes.ai/v1`, `CHUTES_API_KEY=...`, `CHUTES_MODEL_ID=<from /v1/models>`
   - `OLLAMA_API_BASE=http://127.0.0.1:11434`, `OLLAMA_MODEL=qwen3:1.7b`
   - `CODEX_AGENT_API_BASE=http://127.0.0.1:8788`
+
+## Core Paved Paths (Most‑Used)
+
+Use these three patterns by default:
+
+1) **Single model (simple calls)**  
+   `completion(...)` / `acompletion(...)` — same as LiteLLM.
+
+2) **LLM batches (progress or ordered results)**  
+   - Ordered: `batch_acompletions(...)`  
+   - Progress/as‑completed: `batch_acompletions_iter(...)`
+
+3) **Formal proofs (Lean4/Certainly)**  
+   - `certainly_prove(items=[...])` or `completion(... custom_llm_provider="certainly" ...)`  
+   - Results live in `resp.additional_kwargs["certainly"]["results"]`
+
+Multi‑model fallback/routing: **use `Router(model_list=...)`** as the standard path (avoid custom fallback loops).
 
 ## Sanity Checks (Text + VLM, Batch)
 
@@ -419,6 +448,7 @@ This unified quickstart covers:
 4. Certainly / Lean4 bridge
 
 If you only need Lean4 specifics, see `LEAN4_QUICKSTART.md` (can be factored separately).
+Paved‑path example: see `SCILLM_PAVED_PATH_CONTRACT.md#certainly--lean4-paved-path`.
 ## 0) Prerequisites
 
 | Item | Minimum | Notes |

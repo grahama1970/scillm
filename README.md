@@ -88,7 +88,7 @@ Minimal pick‑and‑go
   - Prometheus at `/metrics`; import `dashboards/scillm_budget_lite_grafana.json`.
   - Budget status: `GET /v1/budget` returns `{limit, remaining, reset_at, price_per_call_usd}` (price may be 0.0 unless configured).
 - Direct to provider (fastest)
-  - Copy the provider snippet in `QUICKSTART.md` and run.
+  - Copy the provider snippet in `docs/scillm/QUICKSTART.md` and run.
 
 ### Budget headers & endpoint (what to expect)
 - On 200 and 4xx responses the proxy injects:
@@ -183,9 +183,9 @@ Several sibling projects (`extractor`, `devops`, `amd`, `pi-mono`) install SciLL
 ## Quick Links
 | Topic | File |
 |-------|------|
-| Feature matrix & patterns | [FEATURES.md](FEATURES.md) |
-| Multi‑Surface Quickstart | [QUICKSTART.md](QUICKSTART.md) |
-| Auto Code → Review → Green (codex‑agent) | [QUICKSTART.md](QUICKSTART.md#scenario-auto-code-review-green-codex-agent) |
+| Feature matrix & patterns | [docs/scillm/FEATURES.md](docs/scillm/FEATURES.md) |
+| Multi‑Surface Quickstart | [docs/scillm/QUICKSTART.md](docs/scillm/QUICKSTART.md) |
+| Auto Code → Review → Green (codex‑agent) | [docs/scillm/QUICKSTART.md](docs/scillm/QUICKSTART.md#scenario-auto-code-review-green-codex-agent) |
 | Lean4 / Certainly specifics | `scenarios/lean4_*`, `scenarios/certainly_*` |
 
 #### Units Collaboration (Lean4 / Certainly)
@@ -467,7 +467,7 @@ Mini‑Agent (MCP)
   - `uvicorn litellm.experimental_mcp_client.mini_agent.agent_proxy:app --host 127.0.0.1 --port 8788`
 - Probe: `curl -sSf http://127.0.0.1:8788/ready`
 - In‑process sample: `python examples/mini_agent_inprocess.py` (uses LocalMCPInvoker)
-- See also: feature_recipes/MINI_AGENT.md and CONTEXT.md runbook pointers.
+- See also: feature_recipes/MINI_AGENT.md and docs/scillm/CONTEXT.md runbook pointers.
 
 ## When To Use CodeWorld
 
@@ -562,7 +562,7 @@ Fork Status (our fork)
 Fork Quick Start (Recap)
 1. `make run-scenarios`
 2. (Optional) `docker compose -f local/docker/compose.agents.yml up --build -d` for mini + codex endpoints
-3. See [QUICKSTART.md](QUICKSTART.md) for scenario commands
+3. See [docs/scillm/QUICKSTART.md](docs/scillm/QUICKSTART.md) for scenario commands
 4. Mini‑Agent docs: `docs/my-website/docs/experimental/mini-agent.md`
 5. Project status: `docs/archive/STATE_OF_PROJECT.md`
 

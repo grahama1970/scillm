@@ -70,4 +70,4 @@ Central index of key environment variables. Prefer `SCILLM_` prefix; legacy `LIT
 - Treat autogen code/proofs as untrusted until verified.
 
 ---
-See also: [FEATURES.md](FEATURES.md), [QUICKSTART.md](QUICKSTART.md), [docs/guide/RATE_LIMIT_RETRIES.md](docs/guide/RATE_LIMIT_RETRIES.md).
+See also: [FEATURES.md](FEATURES.md), [QUICKSTART.md](QUICKSTART.md), [docs/guide/RATE_LIMIT_RETRIES.md](../guide/RATE_LIMIT_RETRIES.md).

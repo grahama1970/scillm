@@ -71,7 +71,9 @@ async def parallel_acompletions(
     # Default models from env if missing on a request
     text_default = _os.environ.get("CHUTES_MODEL_ID") or _os.environ.get("CHUTES_TEXT_MODEL")
     vlm_default = _os.environ.get("CHUTES_VLM_MODEL")
-
+    strict_env = str(_os.environ.get("SCILLM_JSON_STRICT", "0")).lower() in {"1", "true", "yes", "on"}
+    env_repair_default = str(_os.environ.get("SCILLM_REPAIR_INVALID_JSON", "0")).lower() in {"1", "true", "yes", "on"}
+    effective_repair = env_repair_default if repair_invalid_json is None else bool(repair_invalid_json)
     def _needs_vlm(req: dict) -> bool:
         try:
             msgs = req.get("messages") or []
@@ -114,9 +116,6 @@ async def parallel_acompletions(
             "Set model per request or set CHUTES_MODEL_ID/CHUTES_TEXT_MODEL."
         )
 
-    strict_env = str(_os.environ.get("SCILLM_JSON_STRICT", "0")).lower() in {"1", "true", "yes", "on"}
-    env_repair_default = str(_os.environ.get("SCILLM_REPAIR_INVALID_JSON", "0")).lower() in {"1", "true", "yes", "on"}
-    effective_repair = env_repair_default if repair_invalid_json is None else bool(repair_invalid_json)
     retry_5xx_eff = bool(str(_os.environ.get("SCILLM_RETRY_5XX", "1")).lower() in {"1","true","yes","on"}) if retry_5xx is None else bool(retry_5xx)
     max_retries_5xx_eff = int(_os.environ.get("SCILLM_MAX_RETRIES_5XX", "3")) if max_retries_5xx is None else int(max_retries_5xx)
     backoff_base_5xx_eff = float(_os.environ.get("SCILLM_BACKOFF_BASE_5XX", "0.5")) if backoff_base_5xx is None else float(backoff_base_5xx)
@@ -400,6 +399,13 @@ async def parallel_acompletions_iter(
     timeout: float = 20.0,
     backoff_base: float = 0.5,
     backoff_cap_s: float = 30.0,
+    default_max_tokens: int | None = None,
+    default_temperature: float | None = None,
+    response_format: dict | None = None,
+    # NEW: structured JSON helpers (iterator parity)
+    schema: Any | None = None,
+    retry_invalid_json: int = 0,
+    repair_invalid_json: Optional[bool] = None,
 ) -> AsyncIterator[Dict[str, Any]]:
     """Yield results as they complete (as_completed style).
 
@@ -419,6 +425,9 @@ async def parallel_acompletions_iter(
 
     text_default = _os.environ.get("CHUTES_MODEL_ID") or _os.environ.get("CHUTES_TEXT_MODEL")
     vlm_default = _os.environ.get("CHUTES_VLM_MODEL")
+    strict_env = str(_os.environ.get("SCILLM_JSON_STRICT", "0")).lower() in {"1", "true", "yes", "on"}
+    env_repair_default = str(_os.environ.get("SCILLM_REPAIR_INVALID_JSON", "0")).lower() in {"1", "true", "yes", "on"}
+    effective_repair = env_repair_default if repair_invalid_json is None else bool(repair_invalid_json)
 
     def _needs_vlm(req: dict) -> bool:
         try:
@@ -450,14 +459,47 @@ async def parallel_acompletions_iter(
             elif text_default:
                 r["model"] = text_default
 
+    def _validate_payload(payload: Any) -> Optional[str]:
+        """Return None if valid; error string otherwise."""
+        if schema is None:
+            return None
+        try:
+            if callable(schema):
+                schema(payload)  # may raise
+                return None
+            # assume jsonschema-like dict
+            try:
+                import jsonschema  # type: ignore
+            except Exception:
+                return "jsonschema_not_installed"
+            try:
+                jsonschema.validate(payload, schema)  # type: ignore
+                return None
+            except Exception as e:  # noqa: BLE001
+                return str(e)
+        except Exception as e:  # noqa: BLE001
+            return str(e)
+
+    def _repair_json(text: str) -> tuple[Optional[Any], Optional[str]]:
+        """Best-effort repair: trim to outer braces and parse."""
+        try:
+            start = text.find("{")
+            end = text.rfind("}")
+            if start != -1 and end != -1 and end > start:
+                trimmed = text[start : end + 1]
+                return _json.loads(trimmed), None
+        except Exception as e:  # noqa: BLE001
+            return None, str(e)
+        return None, "no_braces"
+
     async def _worker(idx: int, req: dict):
         model = req.get("model")
         messages = req.get("messages") or []
         _api_base = req.get("api_base") or api_base
         _api_key = req.get("api_key") or api_key
-        _rf = req.get("response_format")
-        _mt = req.get("max_tokens")
-        _temp = req.get("temperature")
+        _rf = req.get("response_format") or response_format
+        _mt = req.get("max_tokens", default_max_tokens)
+        _temp = req.get("temperature", default_temperature)
         start = loop.time()
         attempt = 0
         last_err: dict | None = None
@@ -488,12 +530,57 @@ async def parallel_acompletions_iter(
                             retry_on_empty=False,
                             empty_retries=0,
                         )
+                    # Extract content now to allow json validation/retry
+                    content = _extract_content_from_response(resp)
+                    need_validate = strict_env or schema is not None or retry_invalid_json > 0 or effective_repair
+                    repaired_flag = False
+                    if need_validate and isinstance(content, str):
+                        repaired = False
+                        try:
+                            parsed = _json.loads(content)
+                        except Exception:
+                            parsed = None
+                        if parsed is None and effective_repair:
+                            parsed, _ = _repair_json(content)
+                            repaired = parsed is not None
+                        if parsed is None and effective_repair and _clean_json_string:
+                            try:
+                                parsed = _clean_json_string(content, return_dict=True)  # type: ignore
+                                repaired = parsed is not None
+                            except Exception:
+                                parsed = None
+                        if parsed is not None:
+                            schema_err = _validate_payload(parsed)
+                            if schema_err:
+                                parsed = None
+                            else:
+                                content = parsed
+                                repaired_flag = repaired
+                        if parsed is None:
+                            if attempt <= retry_invalid_json + 1:
+                                delay = min(backoff_cap_s, backoff_base * (2 ** max(0, attempt - 1)))
+                                await _asyncio.sleep(delay)
+                                continue
+                            await q.put({
+                                "index": idx,
+                                "request": req,
+                                "ok": False,
+                                "error": "invalid_json",
+                                "status": None,
+                                "content": None,
+                                "raw": str(content)[:240],
+                                "repaired": False,
+                                "attempts": attempt,
+                                "elapsed_s": round(loop.time() - start, 3),
+                            })
+                            return
                     await q.put({
                         "index": idx,
                         "request": req,
                         "ok": True,
                         "response": resp,
-                        "content": _extract_content_from_response(resp),
+                        "content": content,
+                        "repaired": repaired_flag,
                         "attempts": attempt,
                         "elapsed_s": round(loop.time() - start, 3),
                     })

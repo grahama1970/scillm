@@ -6,15 +6,23 @@ Scope
 - Applies to all code under `experiments/devops/**` (pipelines, workflows, scripts, CLIs, notebooks with executable code).
 - Documentation may include `curl` examples for ops visibility, but executable code must follow this contract.
 
+Canonical surfaces (to reduce confusion)
+- Single model: `completion(...)` / `acompletion(...)`
+- Batch: `batch_acompletions(...)` or `batch_acompletions_iter(...)` (aliases for `parallel_*`)
+- Formal proofs: `certainly_prove(...)` / `completion(... custom_llm_provider="certainly" ...)`
+- Multi‑model routing: **only** `Router(model_list=...)` (avoid custom fallback loops)
+
 Hard Rules (Do / Don’t)
 - DO use SciLLM directly:
   - `from scillm import acompletion, completion`
+  - For large batch fan-out: `from scillm import batch_acompletions, batch_acompletions_iter` (aliases for the parallel_* APIs)
   - `from scillm.paved import sanity_preflight, list_models_openai_like, chutes_chat_json`
 - DO pass credentials via `api_key=`; SciLLM canonicalizes headers for Chutes.
 - DO request strict JSON when applicable: `response_format={"type":"json_object"}`.
 - DO use paved preflight + discovery:
   - List models: `list_models_openai_like(api_base, api_key)` (Bearer → x‑api‑key fallback handled internally)
-  - Preflight: `sanity_preflight(api_base, api_key, model, parallel=3, wall_time_s=30)`
+  - Preflight (sync helper): `sanity_preflight(api_base=..., api_key=..., model=..., parallel=3, wall_time_s=30)`
+    - If you are already inside an event loop (async code), run it in a thread: `await asyncio.to_thread(sanity_preflight, api_base=..., api_key=..., model=...)`
 - DO use Router only via SciLLM helpers (never reimplement):
   - `from scillm import Router` or `from scillm.paved import chutes_router_json`
 
@@ -30,6 +38,10 @@ JSON validation (strict mode)
 Parallel batch (openai_like / Chutes)
 - Signature (v1.77.4): `parallel_acompletions(requests, *, api_base, api_key, custom_llm_provider='openai_like', concurrency=6, timeout=20, wall_time_s=900, default_max_tokens=None, default_temperature=None, response_format=None, tenacious=True, …)`
 - Each request dict may contain: `model`, `messages`, `max_tokens?`, `temperature?`, `response_format?`, `api_base?`, `api_key?`.
+- Important: unlike `acompletion(...)`, `parallel_acompletions(...)` does **not** accept a top-level `model=` kwarg. Put `model` inside each request dict (or rely on `CHUTES_MODEL_ID`/`CHUTES_TEXT_MODEL` defaults).
+- Also note: `messages_list=...` is **not** a Python API parameter; it is a CLI convenience used by `scillm-tool parallel` to build the per-item request dicts.
+- Progress: if you need progress logging / as-completed checkpointing, use `parallel_acompletions_iter(...)` (or its alias `batch_acompletions_iter(...)`) instead of waiting on one big `await parallel_acompletions(...)`.
+  - Iterator parity: `schema=`, `retry_invalid_json=`, and `repair_invalid_json=` are supported at the iterator level too.
 - Return shape: list of dicts with `index, request, response, error, status, content`. When `response_format` is json_object, `content` may be a dict or string. Check `error`/`status` per item.
 - Guards: if `api_base`/`api_key` or `model` are missing after env defaults, SCILLM raises `ValueError` early instead of hanging.
 - Recommended defaults to avoid silent waits: `tenacious=False`, `timeout=20-30`, `wall_time_s=120-300`, `concurrency=4-8`, `response_format={"type":"json_object"}`. Keep `SCILLM_JSON_STRICT=1` in CI to surface bad JSON.
@@ -38,7 +50,98 @@ Parallel batch (openai_like / Chutes)
   - `retry_invalid_json=N` retries invalid JSON up to N times with backoff (same messages).
   - `summary` attached to the first item: counts of ok/invalid_json/provider_error/empty_content.
   - `repair_invalid_json=True` (opt-in; env `SCILLM_REPAIR_INVALID_JSON=1`) salvages malformed JSON (trim braces, then `clean_json_string` when available) before failing; repaired items are marked `repaired=true` in results/summary.
-- Minimal example:
+- Example (one model, multiple requests):
+```python
+import asyncio
+import os
+
+from scillm import parallel_acompletions
+
+MODEL = os.environ["CHUTES_MODEL_ID"]
+
+async def main():
+    reqs = [
+        {
+            "model": MODEL,
+            "messages": [{"role": "user", "content": 'Return only {"ok":true} as JSON.'}],
+            "response_format": {"type": "json_object"},
+            "max_tokens": 64,
+            "temperature": 0,
+        },
+        {
+            "model": MODEL,
+            "messages": [{"role": "user", "content": 'Return only {"n":1} as JSON.'}],
+            "response_format": {"type": "json_object"},
+            "max_tokens": 64,
+            "temperature": 0,
+        },
+    ]
+
+    resps = await parallel_acompletions(
+        reqs,
+        api_base=os.environ["CHUTES_API_BASE"],
+        api_key=os.environ["CHUTES_API_KEY"],
+        custom_llm_provider="openai_like",
+        concurrency=4,
+        timeout=20,
+        wall_time_s=120,
+        response_format={"type":"json_object"},
+        tenacious=False,
+    )
+    for r in resps:
+        if r["error"]:
+            print("error", r["status"], r["error"])
+        else:
+            print("content", r["content"])
+
+asyncio.run(main())
+```
+
+- Example with progress (recommended for large batches):
+```python
+import asyncio
+import os
+
+from scillm import batch_acompletions_iter
+
+MODEL = os.environ["CHUTES_MODEL_ID"]
+
+async def main():
+    reqs = [
+        {"model": MODEL, "messages": [{"role": "user", "content": "hi"}], "response_format": {"type": "json_object"}},
+        {"model": MODEL, "messages": [{"role": "user", "content": "hi"}], "response_format": {"type": "json_object"}},
+    ]
+    done = ok = err = 0
+    async for ev in batch_acompletions_iter(
+        reqs,
+        api_base=os.environ["CHUTES_API_BASE"],
+        api_key=os.environ["CHUTES_API_KEY"],
+        custom_llm_provider="openai_like",
+        # Optional JSON validation/repair (same as parallel_acompletions)
+        # schema=MY_JSON_SCHEMA,
+        # retry_invalid_json=1,
+        # repair_invalid_json=True,
+        concurrency=6,
+        timeout=60,
+        wall_time_s=900,
+        tenacious=True,
+    ):
+        done += 1
+        ok += int(bool(ev.get("ok")))
+        err += int(not ev.get("ok"))
+        if done % 25 == 0 or not ev.get("ok"):
+            print(f"{done}/{len(reqs)} ok={ok} err={err} idx={ev.get('index')} status={ev.get('status')} elapsed_s={ev.get('elapsed_s')}")
+
+asyncio.run(main())
+```
+
+- Common mistake (don’t do this):
+```python
+# ❌ wrong: parallel_acompletions has no model= or messages_list= kwargs
+# await parallel_acompletions(model=..., messages_list=[[...], [...]], api_base=..., api_key=...)
+```
+
+- Minimal example (single request):
 ```python
 resps = await parallel_acompletions(
     [
@@ -65,6 +168,61 @@ for r in resps:
         print("content", r["content"])
 ```
 
+Certainly / Lean4 (paved path)
+- Explicit signature (most used):
+```python
+def certainly_prove(
+    *,
+    items: List[Dict[str, Any]],
+    flags: Optional[List[str]] = None,
+    request_timeout: float = 120.0,
+    max_seconds: Optional[float] = None,
+    session_id: Optional[str] = None,
+    track_id: Optional[str] = None,
+    api_base: Optional[str] = None,
+    require_proved: bool = False,
+) -> LiteLLMResponse: ...
+```
+
+- Canonical item shape: `{"requirement_text": "0 + n = n"}` (alias: `{"text": ...}`).
+- **Primary results live in** `resp.additional_kwargs["certainly"]["results"]`.
+- `resp.choices[0].message["content"]` is just a short summary string.
+- Strategies/tactics are passed via `flags=` (Lean4 CLI flags), not as item keys.
+- Best practice: keep items for requirements + metadata only; put solver config in `flags=`.
+
+- Minimal example (bridge provider):
+```python
+import os
+from scillm import completion
+
+resp = completion(
+    model="certainly",
+    custom_llm_provider="certainly",
+    api_base=os.getenv("CERTAINLY_BRIDGE_BASE", "http://127.0.0.1:8787"),
+    messages=[{"role": "system", "content": "Certainly/Lean4"}],
+    items=[{"requirement_text": "Nat.add_comm"}],
+    max_seconds=120,
+    flags=["--strategies", "direct,structured"],
+    session_id="stage-08",
+    track_id="run-001",
+)
+summary = resp.choices[0].message["content"]  # string summary
+payload = resp.additional_kwargs["certainly"]  # full bridge payload (summary/results/statistics)
+```
+
+- Helper (paved convenience):
+```python
+from scillm.extras.providers import certainly_prove
+
+resp = certainly_prove(
+    items=[{"requirement_text": "Nat.add_assoc"}],
+    api_base=os.getenv("CERTAINLY_BRIDGE_BASE", "http://127.0.0.1:8787"),
+    flags=["--strategies", "direct,structured"],
+    max_seconds=120,
+)
+payload = resp.additional_kwargs["certainly"]
+```
+
 Debugging quick-guide (Chutes)
 - Text sanity (JSON echo):
 ```
@@ -86,7 +244,8 @@ Packaging expectations
 - The `openai_like` provider now accepts Bearer-only auth. Pass `api_key=` and SciLLM will project the token into the correct header (Bearer or `x-api-key`) for Chutes.
 
 Step 07 (Knowledge) Requirements
-- Preflight: `sanity_preflight(api_base, api_key, model, parallel=SCILLM_PREFLIGHT_PARALLEL|3, wall_time_s=SCILLM_PREFLIGHT_WALL_S|30)`
+- Preflight: `sanity_preflight(api_base=..., api_key=..., model=..., parallel=SCILLM_PREFLIGHT_PARALLEL|3, wall_time_s=SCILLM_PREFLIGHT_WALL_S|30)`
+  - If Step 07 runs in an async worker, wrap it: `await asyncio.to_thread(sanity_preflight, api_base=..., api_key=..., model=..., parallel=..., wall_time_s=...)`
 - On failure: return `preflight_details` (dict) to the pipeline summary.
 - Runtime calls: `scillm.acompletion(..., api_key=CHUTES_API_KEY, custom_llm_provider="openai_like", response_format={"type":"json_object"})`
 
@@ -130,3 +289,5 @@ Exceptions
 Change History
 - 2025‑11‑09: Initial version. Codified paved helpers and strict “no manual headers / no raw HTTP” policy for DevOps.
 - 2025‑11‑10: Documented bundled middleware + Bearer-only provider so DevOps doesn’t patch venvs manually.
+- 2025‑12‑19: Clarified `parallel_acompletions` request shape and progress-friendly `batch_acompletions_iter` example.
+- 2025‑12‑31: Added Certainly/Lean4 signature, primary results path, and clarified item/flags usage.
