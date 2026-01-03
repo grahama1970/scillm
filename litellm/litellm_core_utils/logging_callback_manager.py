@@ -5,6 +5,7 @@ from litellm._logging import verbose_logger
 from litellm.integrations.additional_logging_utils import AdditionalLoggingUtils
 from litellm.integrations.custom_logger import CustomLogger
 from litellm.types.utils import CallbacksByType
+import os as _os
 
 if TYPE_CHECKING:
     from litellm import _custom_logger_compatible_callbacks_literal
@@ -22,7 +23,13 @@ class LoggingCallbackManager:
     """
 
     # healthy maximum number of callbacks - unlikely someone needs more than 20
-    MAX_CALLBACKS = 30
+    MAX_CALLBACKS = int(_os.getenv("LITELLM_MAX_CALLBACKS", "30"))
+    QUIET_ON_MAX = str(_os.getenv("LITELLM_SILENCE_MAX_CALLBACKS_WARN", "0")).lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
 
     def add_litellm_input_callback(self, callback: Union[CustomLogger, str]):
         """
@@ -132,9 +139,11 @@ class LoggingCallbackManager:
         Returns True if safe to add, False if would exceed limit
         """
         if len(parent_list) >= self.MAX_CALLBACKS:
-            verbose_logger.warning(
-                f"Cannot add callback - would exceed MAX_CALLBACKS limit of {self.MAX_CALLBACKS}. Current callbacks: {len(parent_list)}"
-            )
+            msg = f"Cannot add callback - would exceed MAX_CALLBACKS limit of {self.MAX_CALLBACKS}. Current callbacks: {len(parent_list)}"
+            if self.QUIET_ON_MAX:
+                verbose_logger.debug(msg)
+            else:
+                verbose_logger.warning(msg)
             return False
         return True
 
