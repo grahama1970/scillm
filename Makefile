@@ -70,6 +70,10 @@ chutes-doctor-vlm:
 ci-core:
 	PYTHONPATH=$$(pwd)/src python scripts/ci/scillm_core_check.py
 
+.PHONY: check-root-layout
+check-root-layout:
+	python3 scripts/check_root_layout.py
+
 # Guard: ensure logs do not contain raw Authorization/x-api-key values
 check-no-secrets-logs:
 	@! rg -n "Authorization:\s*Bearer\s+\w" -S . || (echo "Found Authorization token in repo logs/text" && exit 1)
