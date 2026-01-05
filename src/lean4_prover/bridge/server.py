@@ -81,8 +81,8 @@ def _normalise_requirements(requirements: List[Dict[str, Any]]) -> List[Dict[str
             raise HTTPException(status_code=400, detail=f"Requirement #{idx} missing 'requirement_text'")
         context = raw.get("context") if isinstance(raw.get("context"), dict) else {}
         metadata = raw.get("metadata") if isinstance(raw.get("metadata"), dict) else {}
-        # Optional strategies pass-through: list[str] or comma-separated str
-        strategies_val = raw.get("strategies")
+        # Optional strategies/tactics pass-through: list[str] or comma-separated str
+        strategies_val = raw.get("strategies") or raw.get("tactics")
         strategies: List[str] | None = None
         if isinstance(strategies_val, list):
             try:
@@ -171,10 +171,10 @@ async def bridge_complete(req: Lean4BridgeRequest):
     with tempfile.NamedTemporaryFile("w", suffix="_lean4_out.json", delete=False) as fout:
         output_path = Path(fout.name)
 
-    # Echo/stub mode: if explicitly requested or CLI is not present, return a minimal OK payload
+    # Echo/stub mode: explicit echo only. If CLI missing and echo not set, fail fast.
     echo = os.getenv("LEAN4_BRIDGE_ECHO", "") == "1"
     cli_path = LEAN4_REPO / "src" / "lean4_prover" / "cli_mini.py"
-    if echo or not cli_path.exists():
+    if echo:
         try:
             payload = {
                 "statistics": {"successful_proofs": len(requirements), "failed_proofs": 0, "unproved": 0},
@@ -202,11 +202,24 @@ async def bridge_complete(req: Lean4BridgeRequest):
                     "schema": "canonical+lean4@v1",
                     "options": {"max_seconds": timeout, "session_id": None, "track_id": None},
                     "provider": {"name": "certainly", "backend": "lean4"},
+                    "stub": True,
                 },
+                "warnings": ["lean4_echo_mode_enabled"],
             }
             return JSONResponse(response)
         finally:
             input_path.unlink(missing_ok=True)
+    if not cli_path.exists():
+        input_path.unlink(missing_ok=True)
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "message": "Lean4 CLI not found; bridge is not running proofs.",
+                "expected": str(cli_path),
+                "lean4_repo": str(LEAN4_REPO),
+                "hint": "Mount a valid Lean4 repo and ensure cli_mini.py exists (or set LEAN4_BRIDGE_ECHO=1 for stub).",
+            },
+        )
 
     cmd = [
         sys.executable,
@@ -242,6 +255,54 @@ async def bridge_complete(req: Lean4BridgeRequest):
 
     try:
         payload = json.loads(output_path.read_text())
+    except Exception:
+        # Fallback: parse JSONL from stdout (ignore non-JSON status lines)
+        records: List[Any] = []
+        for line in stdout.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                records.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+        if records:
+            if (
+                len(records) == 1
+                and isinstance(records[0], dict)
+                and any(k in records[0] for k in ("summary", "results", "proof_results", "statistics"))
+            ):
+                payload = records[0]
+            else:
+                proved = 0
+                failed = 0
+                for r in records:
+                    if isinstance(r, dict):
+                        if r.get("ok") is True:
+                            proved += 1
+                        elif r.get("ok") is False:
+                            failed += 1
+                payload = {
+                    "summary": {
+                        "items": len(records),
+                        "proved": proved or None,
+                        "failed": failed or None,
+                        "unproved": max(0, len(records) - proved - failed) if (proved or failed) else None,
+                    },
+                    "statistics": {},
+                    "proof_results": records,
+                    "results": records,
+                }
+        else:
+            output_path.unlink(missing_ok=True)
+            raise HTTPException(
+                status_code=500,
+                detail={
+                    "message": "Lean4 CLI produced invalid JSON",
+                    "stdout": stdout,
+                    "stderr": stderr,
+                },
+            )
     finally:
         output_path.unlink(missing_ok=True)
 

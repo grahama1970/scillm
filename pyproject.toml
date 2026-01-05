@@ -4,7 +4,7 @@
 
 [project]
 name = "scillm"
-version = "1.78.2"
+version = "1.78.8"
 description = "SciLLM — a scientific/engineering‑focused fork of LiteLLM (OpenAI‑compatible gateway + optional modules)"
 readme = "README.md"
 authors = [{name = "Graham Anderson", email = "graham@grahama.co"}]

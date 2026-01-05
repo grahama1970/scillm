@@ -175,6 +175,9 @@ def certainly_prove(
     *,
     items: List[Dict[str, Any]],
     flags: Optional[List[str]] = None,
+    strategies: Optional[List[str] | str] = None,
+    tactics: Optional[List[str] | str] = None,
+    response_format: Optional[Dict[str, Any]] = None,
     request_timeout: float = 120.0,
     max_seconds: Optional[float] = None,
     session_id: Optional[str] = None,
@@ -186,8 +189,8 @@ def certainly_prove(
 
 - Canonical item shape: `{"requirement_text": "0 + n = n"}` (alias: `{"text": ...}`).
 - **Primary results live in** `resp.additional_kwargs["certainly"]["results"]`.
-- `resp.choices[0].message["content"]` is just a short summary string.
-- Strategies/tactics are passed via `flags=` (Lean4 CLI flags), not as item keys.
+- `resp.choices[0].message["content"]` is a short summary string by default. If `response_format={"type":"json_object"}` (or `json_schema`), the content is a JSON string of the proof payload.
+- Strategies/tactics can be passed globally via `flags=` **or** per-item via `strategies`/`tactics` keys in each item.
 - Best practice: keep items for requirements + metadata only; put solver config in `flags=`.
 
 - Minimal example (bridge provider):
@@ -221,6 +224,21 @@ resp = certainly_prove(
     max_seconds=120,
 )
 payload = resp.additional_kwargs["certainly"]
+```
+
+- As-completed iterator (LLM-like fan-out, each item compiled independently):
+```python
+from scillm.extras.providers import certainly_prove_iter
+
+async for r in certainly_prove_iter(
+    items=[{"requirement_text": "Nat.add_comm"}, {"requirement_text": "Nat.add_assoc"}],
+    response_format={"type":"json_object"},
+    concurrency=4,
+):
+    if r["ok"]:
+        print("ok", r["content"])
+    else:
+        print("err", r["status"], r["error"])
 ```
 
 Debugging quick-guide (Chutes)
@@ -287,6 +305,7 @@ Exceptions
 - None for CHUTES/SciLLM. If a true exception is required, file a short design note and add a temporary allowlist entry to a local `EXCEPTIONS.md` with an expiration date.
 
 Change History
+- 2026‑01‑03: Reinforced canonical surfaces, JSON strict guidance, iterator JSON repair parity, and Certainly/Lean4 paved‑path examples.
 - 2025‑11‑09: Initial version. Codified paved helpers and strict “no manual headers / no raw HTTP” policy for DevOps.
 - 2025‑11‑10: Documented bundled middleware + Bearer-only provider so DevOps doesn’t patch venvs manually.
 - 2025‑12‑19: Clarified `parallel_acompletions` request shape and progress-friendly `batch_acompletions_iter` example.

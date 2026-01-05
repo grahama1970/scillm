@@ -11,6 +11,7 @@ Intent
 Enable with: LITELLM_ENABLE_LEAN4=1
 """
 
+import json
 import os
 import subprocess
 import time
@@ -172,6 +173,33 @@ def _summarize(resp_json: Dict[str, Any], label: str = "Lean4") -> str:
         return f"{label}: completed (see additional_kwargs.certainly)"
 
 
+def _wants_json(optional_params: dict | None) -> bool:
+    try:
+        rf = (optional_params or {}).get("response_format")
+        return isinstance(rf, dict) and rf.get("type") in {"json_object", "json_schema"}
+    except Exception:
+        return False
+
+
+def _render_content(resp_json: Dict[str, Any], label: str, optional_params: dict | None) -> str:
+    if _wants_json(optional_params) and isinstance(resp_json, dict):
+        try:
+            payload = {
+                "summary": resp_json.get("summary"),
+                "statistics": resp_json.get("statistics"),
+                "results": resp_json.get("results") or resp_json.get("proof_results"),
+                "proof_results": resp_json.get("proof_results") or resp_json.get("results"),
+                "stdout": resp_json.get("stdout"),
+                "stderr": resp_json.get("stderr"),
+                "duration_ms": resp_json.get("duration_ms"),
+                "run_manifest": resp_json.get("run_manifest"),
+            }
+            return json.dumps(payload, ensure_ascii=False)
+        except Exception:
+            pass
+    return _summarize(resp_json, label=label)
+
+
 class Lean4LLM(CustomLLM):
     def completion(
         self,
@@ -217,7 +245,7 @@ class Lean4LLM(CustomLLM):
 
         backend_label = payload.get("backend") or "lean4"
         label = "Certainly" if backend_label == "lean4" else f"Certainly/{backend_label}"
-        text = _summarize(data if isinstance(data, dict) else {}, label=label)
+        text = _render_content(data if isinstance(data, dict) else {}, label=label, optional_params=optional_params)
         model_response.model = model
         try:
             model_response.choices[0].message.content = text  # type: ignore[attr-defined]
@@ -278,7 +306,7 @@ class Lean4LLM(CustomLLM):
 
         backend_label = payload.get("backend") or "lean4"
         label = "Certainly" if backend_label == "lean4" else f"Certainly/{backend_label}"
-        text = _summarize(data if isinstance(data, dict) else {}, label=label)
+        text = _render_content(data if isinstance(data, dict) else {}, label=label, optional_params=optional_params)
         model_response.model = model
         try:
             model_response.choices[0].message.content = text  # type: ignore[attr-defined]

@@ -9,10 +9,12 @@ switching. They simply shape the payloads expected by the providers and call
 `scillm.completion`.
 """
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, AsyncIterator, Tuple
 import os
+import asyncio as _asyncio
 
 from scillm import completion as _completion  # re-exported litellm surface
+from scillm import acompletion as _acompletion
 import json as _json
 from scillm.extras.chutes import (
     ensure as _ensure_chute,
@@ -68,37 +70,19 @@ def codeworld_mcts(
     )
 
 
-def certainly_prove(
-    *,
-    items: List[Dict[str, Any]],
-    messages: Optional[List[Dict[str, Any]]] = None,
-    request_timeout: float = 120.0,
-    max_seconds: Optional[float] = None,
-    flags: Optional[List[str]] = None,
-    session_id: Optional[str] = None,
-    track_id: Optional[str] = None,
-    api_base: Optional[str] = None,
-    require_proved: bool = False,
-) -> Dict[str, Any]:
-    """Call the Certainly (Lean4) bridge via provider 'certainly' with minimal friction.
+def _parse_strategies(val: Optional[List[str] | str]) -> Optional[List[str]]:
+    if val is None:
+        return None
+    if isinstance(val, list):
+        out = [str(s).strip() for s in val if str(s).strip()]
+        return out or None
+    if isinstance(val, str):
+        parts = [p.strip() for p in val.replace("\n", ",").split(",") if p.strip()]
+        return parts or None
+    return None
 
-    - Accepts items with either 'requirement_text' (canonical) or 'text' (mapped).
-    - No env gates required; provider is registered by default. Set CERTAINLY_BRIDGE_BASE if not localhost:8787.
-    """
-    canon: List[Dict[str, Any]] = []
-    for it in items:
-        if not isinstance(it, dict):
-            continue
-        if "requirement_text" in it:
-            canon.append(it)
-        elif "text" in it:
-            tmp = dict(it)
-            tmp.setdefault("requirement_text", tmp.pop("text"))
-            canon.append(tmp)
-        else:
-            canon.append(it)
-    opt: Dict[str, Any] = {}
-    # Default LLM-on flags to lower cognitive load when CERTAINLY_LLM_DEFAULT=1
+
+def _effective_flags(flags: Optional[List[str]]) -> List[str]:
     eff_flags = list(flags or [])
     try:
         _llm_default = (os.getenv("CERTAINLY_LLM_DEFAULT") or "").strip().lower() in {"1", "true", "yes", "on"}
@@ -113,6 +97,105 @@ def certainly_prove(
             ]
     except Exception:
         pass
+    return eff_flags
+
+
+def _normalize_certainly_items(
+    items: List[Dict[str, Any]],
+    *,
+    strategies: Optional[List[str] | str] = None,
+    tactics: Optional[List[str] | str] = None,
+) -> List[Dict[str, Any]]:
+    default_strategies = _parse_strategies(strategies if strategies is not None else tactics)
+    canon: List[Dict[str, Any]] = []
+    for it in items:
+        if not isinstance(it, dict):
+            continue
+        tmp = dict(it)
+        if "requirement_text" not in tmp and "text" in tmp:
+            tmp.setdefault("requirement_text", tmp.pop("text"))
+        if "strategies" not in tmp and "tactics" in tmp:
+            parsed = _parse_strategies(tmp.pop("tactics"))
+            if parsed:
+                tmp["strategies"] = parsed
+        if "strategies" not in tmp and default_strategies:
+            tmp["strategies"] = default_strategies
+        canon.append(tmp)
+    return canon
+
+
+def _certainly_base(api_base: Optional[str]) -> str:
+    return (api_base or os.getenv("CERTAINLY_BRIDGE_BASE") or os.getenv("LEAN4_BRIDGE_BASE") or "").strip()
+
+
+def _explain_certainly_error(exc: Exception, api_base: Optional[str]) -> Tuple[str, str, Optional[int], str]:
+    base = _certainly_base(api_base)
+    status = getattr(exc, "status", None) or getattr(exc, "status_code", None) or getattr(exc, "http_status", None)
+    msg = getattr(exc, "message", None) or str(exc)
+    msg_low = str(msg).lower()
+
+    if any(k in msg_low for k in ("connection refused", "connecterror", "failed to establish", "name or service not known")):
+        reason = "Bridge unreachable"
+        fix = (
+            f"Start the Lean4 bridge and point CERTAINLY_BRIDGE_BASE at it. "
+            f"Example: `docker compose -f docker/compose.certainly.bridge.yml up -d` "
+            f"then `export CERTAINLY_BRIDGE_BASE=http://127.0.0.1:8787`."
+        )
+        return reason, fix, status, msg
+    if status in {404, 405} or "not found" in msg_low:
+        reason = "Bridge endpoint not found"
+        fix = (
+            f"Ensure CERTAINLY_BRIDGE_BASE is the bridge root (not /bridge/complete). "
+            f"Expected base like http://127.0.0.1:8787."
+        )
+        return reason, fix, status, msg
+    if status == 400 and "items" in msg_low:
+        reason = "Invalid request (missing items)"
+        fix = "Pass items=[{'requirement_text': '...'}] (or items with 'text' alias)."
+        return reason, fix, status, msg
+    if status == 504 or "max_seconds" in msg_low or "timeout" in msg_low or "exceeded" in msg_low:
+        reason = "Proof timed out"
+        fix = "Increase max_seconds or request_timeout, or simplify the requirement/tactics."
+        return reason, fix, status, msg
+    if "non-zero status" in msg_low or "invalid json" in msg_low:
+        reason = "Lean4 CLI failed"
+        fix = (
+            "Inspect bridge stdout/stderr, ensure the Lean4 repo/CLI are present, "
+            "and rerun. If stdout mixes status lines, upgrade the bridge/CLI."
+        )
+        return reason, fix, status, msg
+    if base:
+        reason = "Certainly failed"
+        fix = f"Verify the bridge is healthy at {base}/healthz and rerun."
+        return reason, fix, status, msg
+    reason = "Certainly failed"
+    fix = "Set CERTAINLY_BRIDGE_BASE to the running bridge, then rerun."
+    return reason, fix, status, msg
+
+
+def certainly_prove(
+    *,
+    items: List[Dict[str, Any]],
+    messages: Optional[List[Dict[str, Any]]] = None,
+    request_timeout: float = 120.0,
+    max_seconds: Optional[float] = None,
+    flags: Optional[List[str]] = None,
+    strategies: Optional[List[str] | str] = None,
+    tactics: Optional[List[str] | str] = None,
+    response_format: Optional[Dict[str, Any]] = None,
+    session_id: Optional[str] = None,
+    track_id: Optional[str] = None,
+    api_base: Optional[str] = None,
+    require_proved: bool = False,
+) -> Dict[str, Any]:
+    """Call the Certainly (Lean4) bridge via provider 'certainly' with minimal friction.
+
+    - Accepts items with either 'requirement_text' (canonical) or 'text' (mapped).
+    - No env gates required; provider is registered by default. Set CERTAINLY_BRIDGE_BASE if not localhost:8787.
+    """
+    canon = _normalize_certainly_items(items, strategies=strategies, tactics=tactics)
+    opt: Dict[str, Any] = {}
+    eff_flags = _effective_flags(flags)
     if eff_flags:
         opt["flags"] = eff_flags
     if max_seconds is not None:
@@ -124,16 +207,23 @@ def certainly_prove(
         options["track_id"] = track_id
     if options:
         opt["options"] = options
-    resp = _completion(
-        model="certainly/bridge",
-        custom_llm_provider="certainly",
-        messages=messages or [{"role": "system", "content": "Certainly/Lean4"}],
-        items=canon,
-        timeout=request_timeout,
-        request_timeout=request_timeout,
-        api_base=(api_base or os.getenv("CERTAINLY_BRIDGE_BASE") or os.getenv("LEAN4_BRIDGE_BASE")),
-        **opt,
-    )
+    if response_format is not None:
+        opt["response_format"] = response_format
+    try:
+        resp = _completion(
+            model="certainly/bridge",
+            custom_llm_provider="certainly",
+            messages=messages or [{"role": "system", "content": "Certainly/Lean4"}],
+            items=canon,
+            timeout=request_timeout,
+            request_timeout=request_timeout,
+            api_base=_certainly_base(api_base),
+            **opt,
+        )
+    except Exception as exc:
+        reason, fix, status, detail = _explain_certainly_error(exc, api_base)
+        msg = f"Certainly failed: {reason}. Fix: {fix}. Detail: {detail}"
+        raise RuntimeError(msg) from exc
     if require_proved:
         payload = (resp.get("additional_kwargs", {}) or {}).get("certainly", {})
         s = payload.get("summary", {}) if isinstance(payload, dict) else {}
@@ -142,6 +232,200 @@ def certainly_prove(
         if proved < total:
             raise RuntimeError(f"Lean4 verification failed: proved={proved} < total={total}")
     return resp
+
+
+async def certainly_prove_iter(
+    *,
+    items: List[Dict[str, Any]],
+    messages: Optional[List[Dict[str, Any]]] = None,
+    request_timeout: float = 120.0,
+    max_seconds: Optional[float] = None,
+    flags: Optional[List[str]] = None,
+    strategies: Optional[List[str] | str] = None,
+    tactics: Optional[List[str] | str] = None,
+    response_format: Optional[Dict[str, Any]] = None,
+    session_id: Optional[str] = None,
+    track_id: Optional[str] = None,
+    api_base: Optional[str] = None,
+    require_proved: bool = False,
+    concurrency: int = 6,
+    tenacious: bool = True,
+    wall_time_s: float = 900.0,
+    backoff_base: float = 0.5,
+    backoff_cap_s: float = 30.0,
+) -> AsyncIterator[Dict[str, Any]]:
+    """Async iterator over per-item Lean4 proof attempts (as-completed style).
+
+    Each yielded item is {index, request, ok, response|error, status?, attempts, elapsed_s}.
+    """
+    canon = _normalize_certainly_items(items, strategies=strategies, tactics=tactics)
+    eff_flags = _effective_flags(flags)
+    base = _certainly_base(api_base)
+    sem = _asyncio.Semaphore(max(1, int(concurrency)))
+    loop = _asyncio.get_event_loop()
+    q: _asyncio.Queue = _asyncio.Queue()
+
+    def _extract_content(resp: Any) -> str:
+        try:
+            if isinstance(resp, dict):
+                msg = (resp.get("choices", [{}])[0].get("message", {}) or {})
+                content = msg.get("content") or ""
+                if not content and isinstance(msg.get("reasoning_content"), str):
+                    return msg["reasoning_content"]
+                return content or ""
+            msg = resp.choices[0].message
+            content = msg.get("content") if hasattr(msg, "get") else getattr(msg, "content", "")
+            if not content and hasattr(msg, "get") and isinstance(msg.get("reasoning_content"), str):
+                return msg.get("reasoning_content")
+            return content or ""
+        except Exception:
+            return ""
+
+    async def _worker(idx: int, item: dict):
+        start = loop.time()
+        attempt = 0
+        req = {
+            "model": "certainly/bridge",
+            "custom_llm_provider": "certainly",
+            "messages": messages or [{"role": "system", "content": "Certainly/Lean4"}],
+            "items": [item],
+            "flags": eff_flags or None,
+            "max_seconds": max_seconds,
+            "session_id": session_id,
+            "track_id": track_id,
+            "response_format": response_format,
+            "api_base": base,
+        }
+        try:
+            if isinstance(item, dict) and item.get("id") is not None:
+                req["id"] = item.get("id")
+        except Exception:
+            pass
+        async with sem:
+            while True:
+                attempt += 1
+                try:
+                    opt: Dict[str, Any] = {}
+                    if eff_flags:
+                        opt["flags"] = eff_flags
+                    if max_seconds is not None:
+                        opt["max_seconds"] = max_seconds
+                    options: Dict[str, Any] = {}
+                    if session_id is not None:
+                        options["session_id"] = session_id
+                    if track_id is not None:
+                        options["track_id"] = track_id
+                    if options:
+                        opt["options"] = options
+                    if response_format is not None:
+                        opt["response_format"] = response_format
+                    resp = await _acompletion(
+                        model="certainly/bridge",
+                        custom_llm_provider="certainly",
+                        messages=req["messages"],
+                        items=req["items"],
+                        timeout=request_timeout,
+                        request_timeout=request_timeout,
+                        api_base=base,
+                        **opt,
+                    )
+                    ok = True
+                    if require_proved:
+                        payload = (resp.get("additional_kwargs", {}) or {}).get("certainly", {})
+                        s = payload.get("summary", {}) if isinstance(payload, dict) else {}
+                        proved = int((s or {}).get("proved") or 0)
+                        ok = proved >= 1
+                    payload_content = _extract_content(resp)
+                    out = {
+                        "index": idx,
+                        "request": req,
+                        "item": item,
+                        "ok": ok,
+                        "response": resp,
+                        "content": payload_content,
+                        "attempts": attempt,
+                        "elapsed_s": round(loop.time() - start, 3),
+                    }
+                    if require_proved and not ok:
+                        out["error"] = "Proof not proved"
+                        out["reason"] = "The Lean4 compilation did not prove the requirement."
+                        out["fix"] = "Adjust tactics/strategies or simplify the requirement, then retry."
+                    await q.put(out)
+                    return
+                except Exception as exc:
+                    reason, fix, status, detail = _explain_certainly_error(exc, api_base)
+                    last_err = {
+                        "error": f"{reason}. Fix: {fix}. Detail: {detail}",
+                        "status": status,
+                        "reason": reason,
+                        "fix": fix,
+                        "detail": detail,
+                    }
+                    if not tenacious:
+                        await q.put({
+                            "index": idx,
+                            "request": req,
+                            "item": item,
+                            "ok": False,
+                            "error": last_err["error"],
+                            "status": last_err["status"],
+                            "reason": last_err["reason"],
+                            "fix": last_err["fix"],
+                            "detail": last_err["detail"],
+                            "content": None,
+                            "attempts": attempt,
+                            "elapsed_s": round(loop.time() - start, 3),
+                        })
+                        return
+                    if (loop.time() - start) >= wall_time_s:
+                        await q.put({
+                            "index": idx,
+                            "request": req,
+                            "item": item,
+                            "ok": False,
+                            "error": last_err["error"] if last_err else "wall_time_exceeded",
+                            "status": last_err and last_err.get("status"),
+                            "reason": last_err and last_err.get("reason"),
+                            "fix": last_err and last_err.get("fix"),
+                            "detail": last_err and last_err.get("detail"),
+                            "content": None,
+                            "attempts": attempt,
+                            "elapsed_s": round(loop.time() - start, 3),
+                        })
+                        return
+                    msg = str(exc).lower()
+                    status_code = last_err and last_err.get("status")
+                    transient = (
+                        status_code in {429, 500, 502, 503, 504}
+                        or any(k in msg for k in ("timeout", "rate limit", "retry", "capacity", "temporarily", "backoff"))
+                    )
+                    if not transient:
+                        await q.put({
+                            "index": idx,
+                            "request": req,
+                            "item": item,
+                            "ok": False,
+                            "error": last_err["error"],
+                            "status": last_err.get("status"),
+                            "reason": last_err.get("reason"),
+                            "fix": last_err.get("fix"),
+                            "detail": last_err.get("detail"),
+                            "content": None,
+                            "attempts": attempt,
+                            "elapsed_s": round(loop.time() - start, 3),
+                        })
+                        return
+                    delay = min(backoff_cap_s, backoff_base * (2 ** max(0, attempt - 1)))
+                    await _asyncio.sleep(delay)
+
+    tasks = [loop.create_task(_worker(i, it)) for i, it in enumerate(canon)]
+    pending = set(tasks)
+    while pending:
+        done, pending = await _asyncio.wait(pending, return_when=_asyncio.FIRST_COMPLETED)
+        while not q.empty():
+            yield await q.get()
+    while not q.empty():
+        yield await q.get()
 
 
 def certainly_prove_and_summarize_with_chutes(
