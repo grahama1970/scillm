@@ -12,7 +12,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
 
 # Base OS deps + Python + build tools
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    ca-certificates curl git build-essential \
+    ca-certificates curl git build-essential docker.io \
     python3 python3-pip python3-venv \
     && rm -rf /var/lib/apt/lists/*
 
@@ -25,15 +25,17 @@ WORKDIR /app
 # Copy repo code (expects build context at repo root)
 COPY . /app
 
-# Python runtime deps for the FastAPI bridge variant in this repo
+# Python runtime deps for the FastAPI bridge + Lean4 CLI helpers
 RUN python3 -m pip install --upgrade pip && \
-    python3 -m pip install uvicorn fastapi pydantic psutil
+    python3 -m pip install \
+      uvicorn fastapi pydantic psutil \
+      typer python-dotenv loguru json-repair tenacity tqdm urlextract strip-tags pillow httpx aiohttp openai pyyaml jinja2 tiktoken tokenizers redis
 
 # Default artifacts dir inside container
 ENV CERTAINLY_ARTIFACTS_DIR=/app/local/artifacts/runs
 # Lean project lives outside image; default to /lean4 mount provided by compose
 ENV LEAN4_REPO=/lean4
-ENV PYTHONPATH=/app/src:${PYTHONPATH}
+ENV PYTHONPATH=/app:/app/src:${PYTHONPATH}
 
 EXPOSE 8787/tcp
 

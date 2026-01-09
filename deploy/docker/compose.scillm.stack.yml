@@ -50,26 +50,8 @@ services:
     security_opt:
       - no-new-privileges:true
 
-  lean4-bridge:
-    build:
-      context: ../..
-      dockerfile: deploy/docker/Dockerfile.scillm
-    command: ["sh","-lc","PYTHONPATH=src uvicorn lean4_prover.bridge.server:app --host 0.0.0.0 --port 8787"]
-    environment:
-      - LEAN4_BRIDGE_TIMEOUT_SECONDS=300
-      - LEAN4_REPO=/app
-      - CERTAINLY_REPO=/app
-    ports:
-      - "8787:8787"
-    volumes:
-      []
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "curl", "-sf", "http://127.0.0.1:8787/healthz"]
-      interval: 10s
-      timeout: 5s
-      retries: 6
-      start_period: 10s
+  # lean4-bridge: REMOVED - use direct mode via scillm.integrations.certainly
+  # If HTTP fallback needed, run the bridge server from the lean4 repo directly
 
   scillm-proxy:
     build:
@@ -86,7 +68,6 @@ services:
       - arangodb
       - redis
       - codeworld-bridge
-      - lean4-bridge
 
 volumes:
   ollama_models: {}

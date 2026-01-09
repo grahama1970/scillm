@@ -9,7 +9,7 @@ switching. They simply shape the payloads expected by the providers and call
 `scillm.completion`.
 """
 
-from typing import Any, Dict, List, Optional, AsyncIterator, Tuple
+from typing import Any, Dict, List, Optional, AsyncIterator
 import os
 import asyncio as _asyncio
 
@@ -128,49 +128,39 @@ def _certainly_base(api_base: Optional[str]) -> str:
     return (api_base or os.getenv("CERTAINLY_BRIDGE_BASE") or os.getenv("LEAN4_BRIDGE_BASE") or "").strip()
 
 
-def _explain_certainly_error(exc: Exception, api_base: Optional[str]) -> Tuple[str, str, Optional[int], str]:
-    base = _certainly_base(api_base)
-    status = getattr(exc, "status", None) or getattr(exc, "status_code", None) or getattr(exc, "http_status", None)
-    msg = getattr(exc, "message", None) or str(exc)
-    msg_low = str(msg).lower()
+def _certainly_direct_available() -> bool:
+    """Check if direct certainly import is available (preferred mode)."""
+    try:
+        from scillm.integrations.certainly import is_available
+        return is_available()
+    except ImportError:
+        return False
 
-    if any(k in msg_low for k in ("connection refused", "connecterror", "failed to establish", "name or service not known")):
-        reason = "Bridge unreachable"
-        fix = (
-            f"Start the Lean4 bridge and point CERTAINLY_BRIDGE_BASE at it. "
-            f"Example: `docker compose -f docker/compose.certainly.bridge.yml up -d` "
-            f"then `export CERTAINLY_BRIDGE_BASE=http://127.0.0.1:8787`."
-        )
-        return reason, fix, status, msg
-    if status in {404, 405} or "not found" in msg_low:
-        reason = "Bridge endpoint not found"
-        fix = (
-            f"Ensure CERTAINLY_BRIDGE_BASE is the bridge root (not /bridge/complete). "
-            f"Expected base like http://127.0.0.1:8787."
-        )
-        return reason, fix, status, msg
-    if status == 400 and "items" in msg_low:
-        reason = "Invalid request (missing items)"
-        fix = "Pass items=[{'requirement_text': '...'}] (or items with 'text' alias)."
-        return reason, fix, status, msg
-    if status == 504 or "max_seconds" in msg_low or "timeout" in msg_low or "exceeded" in msg_low:
-        reason = "Proof timed out"
-        fix = "Increase max_seconds or request_timeout, or simplify the requirement/tactics."
-        return reason, fix, status, msg
-    if "non-zero status" in msg_low or "invalid json" in msg_low:
-        reason = "Lean4 CLI failed"
-        fix = (
-            "Inspect bridge stdout/stderr, ensure the Lean4 repo/CLI are present, "
-            "and rerun. If stdout mixes status lines, upgrade the bridge/CLI."
-        )
-        return reason, fix, status, msg
-    if base:
-        reason = "Certainly failed"
-        fix = f"Verify the bridge is healthy at {base}/healthz and rerun."
-        return reason, fix, status, msg
-    reason = "Certainly failed"
-    fix = "Set CERTAINLY_BRIDGE_BASE to the running bridge, then rerun."
-    return reason, fix, status, msg
+
+def _explain_certainly_error(exc: Exception, api_base: Optional[str]) -> str:
+    """Create a helpful error message for certainly failures.
+
+    In direct mode, exceptions are already clean Python exceptions.
+    In HTTP mode, we add some context about common issues.
+    """
+    msg = str(exc)
+    msg_low = msg.lower()
+
+    # Check for common issues
+    if "container" in msg_low and "not running" in msg_low:
+        return f"{msg}\nFix: Start the Lean container with 'make lean-runner-up' in the lean4 repo."
+    if "connection refused" in msg_low or "connecterror" in msg_low:
+        base = _certainly_base(api_base)
+        if base:
+            return f"Cannot connect to certainly bridge at {base}. Is it running?"
+        return f"{msg}\nFix: Install certainly with 'pip install scillm[certainly]' or start the HTTP bridge."
+    if "timeout" in msg_low:
+        return f"Proof timed out. Try increasing max_seconds or simplifying the requirement."
+    if "items" in msg_low and ("missing" in msg_low or "required" in msg_low):
+        return "Missing items. Pass items=[{'requirement_text': '...'}]"
+
+    # Default: return the original message
+    return msg
 
 
 def certainly_prove(
@@ -183,6 +173,7 @@ def certainly_prove(
     strategies: Optional[List[str] | str] = None,
     tactics: Optional[List[str] | str] = None,
     response_format: Optional[Dict[str, Any]] = None,
+    options: Optional[Dict[str, Any]] = None,
     session_id: Optional[str] = None,
     track_id: Optional[str] = None,
     api_base: Optional[str] = None,
@@ -200,7 +191,7 @@ def certainly_prove(
         opt["flags"] = eff_flags
     if max_seconds is not None:
         opt["max_seconds"] = max_seconds
-    options: Dict[str, Any] = {}
+    options = dict(options or {})
     if session_id is not None:
         options["session_id"] = session_id
     if track_id is not None:
@@ -221,9 +212,8 @@ def certainly_prove(
             **opt,
         )
     except Exception as exc:
-        reason, fix, status, detail = _explain_certainly_error(exc, api_base)
-        msg = f"Certainly failed: {reason}. Fix: {fix}. Detail: {detail}"
-        raise RuntimeError(msg) from exc
+        msg = _explain_certainly_error(exc, api_base)
+        raise RuntimeError(f"Certainly failed: {msg}") from exc
     if require_proved:
         payload = (resp.get("additional_kwargs", {}) or {}).get("certainly", {})
         s = payload.get("summary", {}) if isinstance(payload, dict) else {}
@@ -232,6 +222,46 @@ def certainly_prove(
         if proved < total:
             raise RuntimeError(f"Lean4 verification failed: proved={proved} < total={total}")
     return resp
+
+
+def certainly_prove_simple(
+    *,
+    items: List[Dict[str, Any]],
+    messages: Optional[List[Dict[str, Any]]] = None,
+    request_timeout: float = 120.0,
+    max_seconds: Optional[float] = None,
+    flags: Optional[List[str]] = None,
+    strategies: Optional[List[str] | str] = None,
+    tactics: Optional[List[str] | str] = None,
+    response_format: Optional[Dict[str, Any]] = None,
+    options: Optional[Dict[str, Any]] = None,
+    session_id: Optional[str] = None,
+    track_id: Optional[str] = None,
+    api_base: Optional[str] = None,
+    require_proved: bool = False,
+    explain_failures: bool = True,
+) -> Dict[str, Any]:
+    """Simplified Certainly/Lean4 call: single compile attempt, optional LLM explanation."""
+    merged = dict(options or {})
+    merged.setdefault("simple", True)
+    merged.setdefault("max_refinements", 0)
+    merged.setdefault("explain_failures", bool(explain_failures))
+    merged.setdefault("no_llm", False)
+    return certainly_prove(
+        items=items,
+        messages=messages,
+        request_timeout=request_timeout,
+        max_seconds=max_seconds,
+        flags=flags,
+        strategies=strategies,
+        tactics=tactics,
+        response_format=response_format,
+        options=merged,
+        session_id=session_id,
+        track_id=track_id,
+        api_base=api_base,
+        require_proved=require_proved,
+    )
 
 
 async def certainly_prove_iter(
@@ -244,6 +274,7 @@ async def certainly_prove_iter(
     strategies: Optional[List[str] | str] = None,
     tactics: Optional[List[str] | str] = None,
     response_format: Optional[Dict[str, Any]] = None,
+    options: Optional[Dict[str, Any]] = None,
     session_id: Optional[str] = None,
     track_id: Optional[str] = None,
     api_base: Optional[str] = None,
@@ -294,6 +325,7 @@ async def certainly_prove_iter(
             "session_id": session_id,
             "track_id": track_id,
             "response_format": response_format,
+            "options": options or None,
             "api_base": base,
         }
         try:
@@ -310,7 +342,7 @@ async def certainly_prove_iter(
                         opt["flags"] = eff_flags
                     if max_seconds is not None:
                         opt["max_seconds"] = max_seconds
-                    options: Dict[str, Any] = {}
+                    options = dict(options or {})
                     if session_id is not None:
                         options["session_id"] = session_id
                     if track_id is not None:
@@ -353,25 +385,17 @@ async def certainly_prove_iter(
                     await q.put(out)
                     return
                 except Exception as exc:
-                    reason, fix, status, detail = _explain_certainly_error(exc, api_base)
-                    last_err = {
-                        "error": f"{reason}. Fix: {fix}. Detail: {detail}",
-                        "status": status,
-                        "reason": reason,
-                        "fix": fix,
-                        "detail": detail,
-                    }
+                    error_msg = _explain_certainly_error(exc, api_base)
+                    status = getattr(exc, "status_code", None) or getattr(exc, "status", None)
+                    last_err = {"error": error_msg, "status": status}
                     if not tenacious:
                         await q.put({
                             "index": idx,
                             "request": req,
                             "item": item,
                             "ok": False,
-                            "error": last_err["error"],
-                            "status": last_err["status"],
-                            "reason": last_err["reason"],
-                            "fix": last_err["fix"],
-                            "detail": last_err["detail"],
+                            "error": error_msg,
+                            "status": status,
                             "content": None,
                             "attempts": attempt,
                             "elapsed_s": round(loop.time() - start, 3),
@@ -384,17 +408,14 @@ async def certainly_prove_iter(
                             "item": item,
                             "ok": False,
                             "error": last_err["error"] if last_err else "wall_time_exceeded",
-                            "status": last_err and last_err.get("status"),
-                            "reason": last_err and last_err.get("reason"),
-                            "fix": last_err and last_err.get("fix"),
-                            "detail": last_err and last_err.get("detail"),
+                            "status": last_err.get("status") if last_err else None,
                             "content": None,
                             "attempts": attempt,
                             "elapsed_s": round(loop.time() - start, 3),
                         })
                         return
                     msg = str(exc).lower()
-                    status_code = last_err and last_err.get("status")
+                    status_code = last_err.get("status") if last_err else None
                     transient = (
                         status_code in {429, 500, 502, 503, 504}
                         or any(k in msg for k in ("timeout", "rate limit", "retry", "capacity", "temporarily", "backoff"))
@@ -407,9 +428,6 @@ async def certainly_prove_iter(
                             "ok": False,
                             "error": last_err["error"],
                             "status": last_err.get("status"),
-                            "reason": last_err.get("reason"),
-                            "fix": last_err.get("fix"),
-                            "detail": last_err.get("detail"),
                             "content": None,
                             "attempts": attempt,
                             "elapsed_s": round(loop.time() - start, 3),
@@ -426,6 +444,57 @@ async def certainly_prove_iter(
             yield await q.get()
     while not q.empty():
         yield await q.get()
+
+
+async def certainly_prove_simple_iter(
+    *,
+    items: List[Dict[str, Any]],
+    messages: Optional[List[Dict[str, Any]]] = None,
+    request_timeout: float = 120.0,
+    max_seconds: Optional[float] = None,
+    flags: Optional[List[str]] = None,
+    strategies: Optional[List[str] | str] = None,
+    tactics: Optional[List[str] | str] = None,
+    response_format: Optional[Dict[str, Any]] = None,
+    options: Optional[Dict[str, Any]] = None,
+    session_id: Optional[str] = None,
+    track_id: Optional[str] = None,
+    api_base: Optional[str] = None,
+    require_proved: bool = False,
+    concurrency: int = 6,
+    tenacious: bool = True,
+    wall_time_s: float = 900.0,
+    backoff_base: float = 0.5,
+    backoff_cap_s: float = 30.0,
+    explain_failures: bool = True,
+) -> AsyncIterator[Dict[str, Any]]:
+    """Simplified Certainly/Lean4 iterator: single compile attempt, optional LLM explanation."""
+    merged = dict(options or {})
+    merged.setdefault("simple", True)
+    merged.setdefault("max_refinements", 0)
+    merged.setdefault("explain_failures", bool(explain_failures))
+    merged.setdefault("no_llm", False)
+    async for item in certainly_prove_iter(
+        items=items,
+        messages=messages,
+        request_timeout=request_timeout,
+        max_seconds=max_seconds,
+        flags=flags,
+        strategies=strategies,
+        tactics=tactics,
+        response_format=response_format,
+        options=merged,
+        session_id=session_id,
+        track_id=track_id,
+        api_base=api_base,
+        require_proved=require_proved,
+        concurrency=concurrency,
+        tenacious=tenacious,
+        wall_time_s=wall_time_s,
+        backoff_base=backoff_base,
+        backoff_cap_s=backoff_cap_s,
+    ):
+        yield item
 
 
 def certainly_prove_and_summarize_with_chutes(

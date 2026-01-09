@@ -36,8 +36,9 @@ make run-scenarios
 
 ### `lean4_bridge_release.py`
 
-- Live E2E: calls the Lean4 bridge endpoint via a provider client identical in shape to CodeWorld’s provider.
-- Env: `CERTAINLY_BRIDGE_BASE` (alias) or `LEAN4_BRIDGE_BASE` (default `http://127.0.0.1:8787`). Start bridge with `PYTHONPATH=src uvicorn lean4_prover.bridge.server:app --port 8787`.
+- Live E2E: calls the Lean4 bridge endpoint via a provider client identical in shape to CodeWorld's provider.
+- **Preferred**: Use direct mode via `scillm.integrations.certainly` instead of HTTP bridge.
+- Env: `CERTAINLY_BRIDGE_BASE` (alias) or `LEAN4_BRIDGE_BASE` (default `http://127.0.0.1:8787`). If HTTP mode needed, start bridge from the lean4 repo.
 
 ### `lean4_router_release.py`
 

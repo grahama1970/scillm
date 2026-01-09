@@ -48,12 +48,8 @@ SERVICES: List[Service] = [
         compose_file="local/docker/compose.codeworld.bridge.yml",
         compose_services=["codeworld-bridge"],
     ),
-    Service(
-        name="certainly-bridge",
-        health_url=os.getenv("CERTAINLY_BRIDGE_BASE", "http://127.0.0.1:8791").rstrip("/") + "/healthz",
-        compose_file="local/docker/compose.certainly.bridge.yml",
-        compose_services=["certainly_bridge"],
-    ),
+    # certainly-bridge: REMOVED - use direct mode via scillm.integrations.certainly
+    # If HTTP fallback needed, run the bridge server from the lean4 repo directly
 ]
 
 

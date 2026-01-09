@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+# Simple CLI for testing Certainly proofs
+# Usage: ./scripts/certainly "Prove that n + 0 = n" [--tactics simp,rfl]
+
+set -euo pipefail
+
+# Load env if present
+[[ -f .env ]] && set -a && source .env && set +a
+
+# Check prerequisites
+if [[ -z "${OPENROUTER_API_KEY:-}" ]]; then
+    echo "ERROR: OPENROUTER_API_KEY not set" >&2
+    exit 1
+fi
+
+if ! docker ps --filter name=lean_runner --format '{{.Names}}' | grep -q lean_runner; then
+    echo "ERROR: lean_runner container not running. Start with: make lean-runner-up" >&2
+    exit 1
+fi
+
+# Run certainly
+exec python -m lean4_prover.certainly_min "$@" 2>&1 | grep -v "RuntimeWarning\|tracemalloc\|ensure_initialized"

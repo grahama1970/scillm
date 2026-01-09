@@ -169,6 +169,28 @@ for r in resps:
 ```
 
 Certainly / Lean4 (paved path)
+
+**Two Modes:**
+1. **Direct Mode (Preferred)**: When `certainly` is installed (`pip install scillm[certainly]`), the provider uses direct Python imports with no HTTP overhead.
+2. **HTTP Mode (Fallback)**: When `certainly` is not installed, falls back to HTTP bridge at `CERTAINLY_BRIDGE_BASE`.
+
+**Direct Mode API** (preferred for new code):
+```python
+from scillm.integrations.certainly import prove_requirement, is_available
+
+if is_available():
+    result = await prove_requirement(
+        requirement="Prove that n + 0 = n",
+        tactics=["simp"],
+    )
+    # result["ok"], result["best"]["lean4"], etc.
+```
+
+**Environment Variables:**
+- `SCILLM_CERTAINLY_HTTP_ONLY=1` — Force HTTP mode even if certainly installed
+- `SCILLM_CERTAINLY_DIRECT_STRICT=1` — Fail fast if direct mode fails (no fallback)
+
+**Provider API** (uses direct mode automatically when available):
 - Explicit signature (most used):
 ```python
 def certainly_prove(
@@ -178,6 +200,7 @@ def certainly_prove(
     strategies: Optional[List[str] | str] = None,
     tactics: Optional[List[str] | str] = None,
     response_format: Optional[Dict[str, Any]] = None,
+    options: Optional[Dict[str, Any]] = None,
     request_timeout: float = 120.0,
     max_seconds: Optional[float] = None,
     session_id: Optional[str] = None,
@@ -189,9 +212,30 @@ def certainly_prove(
 
 - Canonical item shape: `{"requirement_text": "0 + n = n"}` (alias: `{"text": ...}`).
 - **Primary results live in** `resp.additional_kwargs["certainly"]["results"]`.
+- In simple mode, failed results may include `explanation` (LLM-generated reason).
 - `resp.choices[0].message["content"]` is a short summary string by default. If `response_format={"type":"json_object"}` (or `json_schema`), the content is a JSON string of the proof payload.
 - Strategies/tactics can be passed globally via `flags=` **or** per-item via `strategies`/`tactics` keys in each item.
 - Best practice: keep items for requirements + metadata only; put solver config in `flags=`.
+
+- Simplified path (recommended default for pipelines)
+  - Single LLM generation + **single compile attempt** (no repair loops).
+  - Optional LLM explanation on failure (no auto‑fix).
+  - LLM enabled by default; set `options={"no_llm": True}` to force offline mode.
+  - Use the dedicated helpers or pass `options={"simple": True, "max_refinements": 0, "explain_failures": True}`.
+```python
+from scillm.extras.providers import certainly_prove_simple
+
+resp = certainly_prove_simple(
+    items=[{"requirement_text": "Nat.add_assoc", "id": "sanity-1"}],
+    # Optional: increase if Lean compile is slow
+    max_seconds=300,
+)
+payload = (resp.get("additional_kwargs", {}) or {}).get("certainly", {})
+results = payload.get("results", [])
+print("status", results[0].get("status"))
+print("lean_code", results[0].get("lean_code"))
+print("explanation", results[0].get("explanation"))  # only on failure
+```
 
 - Minimal example (bridge provider):
 ```python
@@ -239,6 +283,23 @@ async for r in certainly_prove_iter(
         print("ok", r["content"])
     else:
         print("err", r["status"], r["error"])
+```
+
+- As-completed iterator (simplified, no repair loop):
+```python
+from scillm.extras.providers import certainly_prove_simple_iter
+
+async for r in certainly_prove_simple_iter(
+    items=[{"requirement_text": "Nat.add_comm"}, {"requirement_text": "Nat.add_assoc"}],
+    response_format={"type":"json_object"},
+    concurrency=4,
+):
+    payload = (r.get("response", {}).get("additional_kwargs", {}) or {}).get("certainly", {})
+    results = payload.get("results", [])
+    if r.get("ok"):
+        print("ok", results[0].get("status"))
+    else:
+        print("err", r.get("status"), r.get("error"), results[0].get("explanation"))
 ```
 
 Debugging quick-guide (Chutes)

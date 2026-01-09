@@ -32,17 +32,15 @@ recover_codex() {
 }
 
 recover_certainly() {
+  # NOTE: certainly bridge Docker infrastructure removed from litellm repo.
+  # Use direct mode via scillm.integrations.certainly (preferred).
+  # If HTTP bridge needed, run from the lean4 repo.
   local base=${CERTAINLY_BRIDGE_BASE:-${LEAN4_BRIDGE_BASE:-http://127.0.0.1:8791}}
   base=${base%/}
   local h=$(curl -sS -m 5 -w '\nHTTP %{http_code}\n' "$base/healthz" || true)
   local okflag=0
   grep -q 'HTTP 200' <<< "$h" && grep -q '"ok":true' <<< "$h" && okflag=1
-  if [[ $okflag -eq 0 && $DO_EXEC -eq 1 && -f docker/compose.certainly.bridge.yml ]]; then
-    COMPOSE_PROJECT_NAME=scillm-bridges docker compose -f docker/compose.certainly.bridge.yml up -d >/dev/null 2>&1 || true
-    sleep 3
-    h=$(curl -sS -m 5 -w '\nHTTP %{http_code}\n' "$base/healthz" || true)
-    grep -q 'HTTP 200' <<< "$h" && grep -q '"ok":true' <<< "$h" && okflag=1
-  fi
+  # Docker auto-recovery removed - use direct mode or run bridge from lean4 repo
   summaries+=" certainly:${okflag}:${base}"
 }
 

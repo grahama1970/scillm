@@ -13,15 +13,29 @@ services:
       - OPENROUTER_API_KEY=${OPENROUTER_API_KEY:-}
       - CERTAINLY_MODEL=${CERTAINLY_MODEL:-}
       - CERTAINLY_LLM_DEFAULT=${CERTAINLY_LLM_DEFAULT:-}
+      - CERTAINLY_MAX_SECONDS=${CERTAINLY_MAX_SECONDS:-600}
+      - SCILLM_DEFAULT_MODEL=${SCILLM_DEFAULT_MODEL:-ollama/qwen3:8b}
+      - OLLAMA_BASE_URL=${OLLAMA_BASE_URL:-http://ollama:11434}
     volumes:
       # Persist artifacts onto host (optional)
       - ../local/artifacts:/app/local/artifacts
       # Mount Lean4 repo read-only so bridge can call CLI
       # Host path can be overridden via CERTAINLY_REPO_HOST
       - ${CERTAINLY_REPO_HOST:-../../lean4}:/lean4:ro
+      # Allow Lean4 CLI to manage the lean_runner container via Docker CLI
+      - /var/run/docker.sock:/var/run/docker.sock
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    networks:
+      - default
+      - scillm_default
     healthcheck:
       test: ["CMD-SHELL", "curl -fsS http://localhost:8787/healthz || exit 1"]
       interval: 20s
       timeout: 5s
       retries: 6
       start_period: 30s
+
+networks:
+  scillm_default:
+    external: true

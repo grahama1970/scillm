@@ -101,8 +101,9 @@ Use these three patterns by default:
    - Ordered: `batch_acompletions(...)`  
    - Progress/as‑completed: `batch_acompletions_iter(...)`
 
-3) **Formal proofs (Lean4/Certainly)**  
-   - `certainly_prove(items=[...])` or `completion(... custom_llm_provider="certainly" ...)`  
+3) **Formal proofs (Lean4/Certainly)**
+   - Direct mode (preferred): `from scillm.integrations.certainly import prove_requirement`
+   - Or via provider: `certainly_prove(items=[...])` / `completion(... custom_llm_provider="certainly" ...)`
    - Results live in `resp.additional_kwargs["certainly"]["results"]`
 
 Multi‑model fallback/routing: **use `Router(model_list=...)`** as the standard path (avoid custom fallback loops).
@@ -866,10 +867,14 @@ curl -sS "$CODEX_AGENT_API_BASE/v1/chat/completions" \
   | jq -r '.choices[0].message.content'
 ```
 
-## Bridge API (optional)
+## Bridge API (HTTP Fallback)
 
+**Note**: The preferred approach is direct mode via `scillm.integrations.certainly`. HTTP bridge is only needed for deployments that cannot install the certainly package.
+
+If HTTP bridge is needed, start it from the **lean4 repo** (not litellm):
 ```bash
-uvicorn lean4_prover.bridge.server:app --reload
+cd /path/to/lean4
+PYTHONPATH=src uvicorn lean4_prover.bridge.server:app --port 8787
 ```
 
 POST `/bridge/complete` with:
@@ -915,17 +920,33 @@ python scenarios/lean4_router_release.py
 
 This mirrors the CodeWorld Router pattern for a consistent developer experience.
 
-### Certainly alias (Lean4 umbrella)
+### Certainly / Lean4 (Two Modes)
 
-To call Lean4 via the umbrella provider:
+**Direct Mode (Preferred)** — Install with `pip install scillm[certainly]`:
+
+```python
+from scillm.integrations.certainly import prove_requirement, is_available
+
+if is_available():
+    result = await prove_requirement(
+        requirement="Prove that n + 0 = n",
+        tactics=["simp"],
+    )
+    if result["ok"]:
+        print(result["best"]["lean4"])
+```
+
+**Provider Mode** — Via LiteLLM completion API:
 
 ```bash
 export LITELLM_ENABLE_CERTAINLY=1
-export CERTAINLY_BRIDGE_BASE=http://127.0.0.1:8787
+export CERTAINLY_BRIDGE_BASE=http://127.0.0.1:8787  # only needed if certainly not installed
 python scenarios/certainly_adapter_demo.py
 ```
 
 Results attach under `additional_kwargs['certainly']` (optionally mirrored to `['lean4']` while migrating).
+
+When `certainly` package is installed, the provider automatically uses direct mode (no HTTP overhead).
 
 Canonical bridge schema
 - Both bridges accept a canonical envelope alongside provider-specific aliases:

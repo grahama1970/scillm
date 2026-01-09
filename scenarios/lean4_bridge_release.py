@@ -72,7 +72,7 @@ async def main() -> None:
                     {
                         "skip": True,
                         "reason": "lean4 bridge not reachable",
-                        "hint": "Start: PYTHONPATH=src uvicorn lean4_prover.bridge.server:app --port 8787",
+                        "hint": "Preferred: use direct mode via scillm.integrations.certainly. Or start bridge from lean4 repo.",
                     },
                     indent=2,
                 )

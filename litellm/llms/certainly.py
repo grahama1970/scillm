@@ -11,10 +11,23 @@ from litellm.utils import ModelResponse
 
 
 class CertainlyLLM(CustomLLM):
-    """Minimal adapter for the umbrella 'certainly' provider.
+    """Umbrella provider for formal verification (Lean4, future: Coq, etc).
 
-    For alpha, delegates to Lean4 while normalizing backend selection and
-    ensuring additional_kwargs attaches under 'certainly' (and optionally 'lean4').
+    Delegates to the appropriate backend (currently Lean4) while ensuring
+    results attach under 'certainly' in additional_kwargs.
+
+    Supports two modes (inherited from Lean4LLM):
+    1. DIRECT MODE: If certainly package installed, uses direct Python imports
+    2. HTTP MODE: Falls back to HTTP bridge at CERTAINLY_BRIDGE_BASE
+
+    Usage:
+        from litellm import completion
+        resp = completion(
+            model="certainly",
+            custom_llm_provider="certainly",
+            items=[{"requirement_text": "Prove that n + 0 = n"}],
+        )
+        result = resp.additional_kwargs["certainly"]
     """
 
     def _ensure_backend(self, optional_params: dict | None) -> dict:
