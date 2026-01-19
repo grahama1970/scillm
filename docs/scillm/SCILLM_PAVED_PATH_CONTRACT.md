@@ -318,6 +318,8 @@ curl -sS -H "Authorization: Bearer $CHUTES_API_KEY" -H 'Content-Type: applicatio
 ```
 Expect HTTP 200 and a JSON object (e.g., `{"desc":"..."}`). If these fail (non‑200 or empty), the upstream is down; parallel_acompletions will also fail.
 
+- pi-mono skill contract: `.pi/skills/scillm/vlm.py` now mirrors the paved path. `describe` and `batch` accept file paths, HTTPS URLs, or pre-encoded `data:` URIs, with `--inline-remote-images` (or env `SCILLM_INLINE_REMOTE_IMAGES=1`) to download remote assets on behalf of the gateway. CI uses `--dry-run` modes plus fixtures (local + remote URL + intentional 404) to prove the CLI guards inputs before hitting Chutes.
+
 Packaging expectations
 - `pip install scillm>=1.77.3` ships the paved helpers (`scillm.paved.*`) **and** the `chutes.middleware.*` modules they depend on. If an ImportError still occurs, upgrade or reinstall the wheel instead of patching a venv manually.
 - The `openai_like` provider now accepts Bearer-only auth. Pass `api_key=` and SciLLM will project the token into the correct header (Bearer or `x-api-key`) for Chutes.

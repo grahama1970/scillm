@@ -152,6 +152,7 @@ Retries meta (optional)
 | Router | Deterministic mode | Enforce temp=0, top_p=1; serialize fan‑out | `Router(deterministic=True)` | Also zeros freq/pres penalties in deterministic contexts |
 | Router | Schema‑first + fallback | Try JSON schema, fallback once to json_object; validation meta | `response_format={"type":"json_object"}` or schema path under provider | Additional meta in `additional_kwargs["router"]` |
 | Router | Image policy (minimal) | Guard data:image/* sizes (reject mode) | Enabled internally; no extra knobs for MVP | litellm/router.py |
+| Skill | VLM CLI remote ingestion | `.pi/skills/scillm/run.sh vlm describe` can inline HTTPS URLs (`--inline-remote-images`) and provides `--dry-run` previews | `.pi/skills/scillm/tests/run_vlm_sanity.sh` | Mirrors paved contract in pi-mono |
 
 ### Parallel Result Object (Shape)
 ```
@@ -171,7 +172,7 @@ SimpleNamespace(
 
 The sanity script uses `parallel_acompletions_iter` to stream progress yet still emits a deterministic JSON summary.
 
-Inline helper (optional): set `SCILLM_INLINE_REMOTE_IMAGES=1` (the sanity script’s `--inline-remote-images` flag does this) to download HTTPS URLs locally and embed them as data URLs before dispatch. Handy when the gateway cannot fetch a given CDN but you still want the probe to pass.
+Inline helper (optional): set `SCILLM_INLINE_REMOTE_IMAGES=1` (the sanity script’s `--inline-remote-images` flag does this) to download HTTPS URLs locally and embed them as data URLs before dispatch. Handy when the gateway cannot fetch a given CDN but you still want the probe to pass. The pi-mono skill exposes the same knob plus `--inline-remote-timeout` and `--dry-run` so CI can confirm which assets inline/skip before hitting Chutes.
 
 ## Router — 429 Retries (Opt‑In)
 

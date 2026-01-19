@@ -110,7 +110,13 @@ Multi‑model fallback/routing: **use `Router(model_list=...)`** as the standard
 
 ## Sanity Checks (Text + VLM, Batch)
 
-Use the built‑in 5‑call sanity script (text + VLM) to verify your tenant/models end‑to‑end. It prints a single JSON summary and exits 0/1. The calls cover strict‑JSON echo, France/Paris, HTTPS VLM, local file‑path VLM, and an inline HTML classification fixture (token `luminous-harvest`) so html/file-path extraction regressions show up immediately.
+Use the built-in 5-call sanity script (text + VLM) to verify your tenant/models end-to-end. It prints a single JSON summary and exits 0/1. The calls cover strict-JSON echo, France/Paris, HTTPS VLM, local file-path VLM, and an inline HTML classification fixture (token `luminous-harvest`) so html/file-path extraction regressions show up immediately.
+
+Before running large batches, run the paved preflight helper (Python or skill CLI) so Step 07 fails fast when the target model is missing. For VLM workloads, the pi-mono skill exposes `--dry-run` and `--inline-remote-images` so you can validate local file paths, HTTPS URLs, and inline conversions before making live calls:
+
+```bash
+.pi/skills/scillm/run.sh preflight preflight --model "$CHUTES_MODEL_ID" --json
+```
 
 ```bash
 # Required env: CHUTES_API_BASE, CHUTES_API_KEY
@@ -128,6 +134,10 @@ make scillm-sanity
 # Add --inline-remote-images (sets SCILLM_INLINE_REMOTE_IMAGES=1) to download HTTPS image URLs and inline them (useful if the gateway cannot fetch your URLs directly).
 # The final JSON summary keeps the original order even though execution is unordered internally.
 # Example:
+# pi-mono skill dry-runs (no creds required)
+.pi/skills/scillm/run.sh vlm describe tests/fixtures/checkerboard.png --json --dry-run
+.pi/skills/scillm/run.sh vlm describe https://picsum.photos/seed/scillm/64/64 --json --dry-run --inline-remote-images
+.pi/skills/scillm/run.sh vlm batch --input tests/fixtures/vlm_batch.jsonl --json --dry-run --inline-remote-images
 # python scripts/sanity/chutes_batch_sanity.py --execute --verbose --inline-remote-images
 ```
 
