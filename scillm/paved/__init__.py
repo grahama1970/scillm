@@ -12,8 +12,28 @@ from scillm.extras.chutes_simple import (
     chutes_healthcheck,
 )
 
+from scillm.paved.chat import (
+    chat,
+    chat_json,
+    analyze_image,
+    analyze_image_json,
+)
+from scillm.paved.preflight import (
+    sanity_preflight,
+    list_models_openai_like,
+)
+
 __all__ = [
+    # Simple chat helpers
+    "chat",
+    "chat_json",
+    "analyze_image",
+    "analyze_image_json",
+    # Chutes-specific
     "chutes_chat_json",
     "chutes_router_json",
     "chutes_healthcheck",
+    # Preflight / discovery
+    "sanity_preflight",
+    "list_models_openai_like",
 ]
