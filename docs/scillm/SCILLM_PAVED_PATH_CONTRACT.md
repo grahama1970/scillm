@@ -170,6 +170,21 @@ for r in resps:
 
 Certainly / Lean4 (paved path)
 
+**Architecture Decision: scillm as Main Caller**
+
+scillm is the paved path for certainly in production code. This keeps:
+- **Single API surface** — all providers (chutes, openai, certainly) use the same patterns
+- **Consistent orchestration** — auth, retries, logging handled uniformly by scillm
+- **Separation of concerns** — certainly focuses on proving, scillm handles integration
+
+For debugging and standalone testing, use the lean4 repo's CLI directly:
+```bash
+# Quick proof test (requires lean_runner + OPENROUTER_API_KEY)
+python -m lean4_prover.certainly_min "Prove that n + 0 = n" --tactics simp
+```
+
+Do NOT build separate certainly wrappers or CLIs in other projects — route through scillm.
+
 **Two Modes:**
 1. **Direct Mode (Preferred)**: When `certainly` is installed (`pip install scillm[certainly]`), the provider uses direct Python imports with no HTTP overhead.
 2. **HTTP Mode (Fallback)**: When `certainly` is not installed, falls back to HTTP bridge at `CERTAINLY_BRIDGE_BASE`.
@@ -184,6 +199,41 @@ if is_available():
         tactics=["simp"],
     )
     # result["ok"], result["best"]["lean4"], etc.
+```
+
+**Minimal Runnable Script** (copy-paste-run):
+```python
+#!/usr/bin/env python
+"""Minimal certainly proof example.
+
+Prerequisites:
+  - lean_runner container running (docker ps | grep lean_runner)
+  - OPENROUTER_API_KEY set
+  - scillm[certainly] installed (pip install scillm[certainly])
+"""
+import asyncio
+from scillm.integrations.certainly import prove_requirement, is_available
+
+async def main():
+    if not is_available():
+        print("ERROR: certainly not available")
+        return 1
+
+    result = await prove_requirement(
+        requirement="Prove that for any natural number n, n + 1 > n",
+        tactics=["simp", "omega"],
+    )
+
+    if result.get("ok"):
+        print("OK: Proof found")
+        print("Lean4 code:", result["best"]["lean4"][:300])
+        return 0
+    else:
+        print("FAIL:", result.get("error") or result.get("diagnosis", {}).get("diagnosis"))
+        return 1
+
+if __name__ == "__main__":
+    raise SystemExit(asyncio.run(main()))
 ```
 
 **Environment Variables:**
@@ -321,7 +371,7 @@ Expect HTTP 200 and a JSON object (e.g., `{"desc":"..."}`). If these fail (non�
 - pi-mono skill contract: `.pi/skills/scillm/vlm.py` now mirrors the paved path. `describe` and `batch` accept file paths, HTTPS URLs, or pre-encoded `data:` URIs, with `--inline-remote-images` (or env `SCILLM_INLINE_REMOTE_IMAGES=1`) to download remote assets on behalf of the gateway. CI uses `--dry-run` modes plus fixtures (local + remote URL + intentional 404) to prove the CLI guards inputs before hitting Chutes.
 
 Packaging expectations
-- `pip install scillm>=1.77.3` ships the paved helpers (`scillm.paved.*`) **and** the `chutes.middleware.*` modules they depend on. If an ImportError still occurs, upgrade or reinstall the wheel instead of patching a venv manually.
+- `pip install scillm>=1.79.0` ships the paved helpers (`scillm.paved.*`). The `chutes.middleware.*` modules are bundled in this repository under `chutes/middleware/`. If unavailable (e.g., external chutes package without middleware), paved helpers use graceful no-op fallback stubs - no manual venv patching required.
 - The `openai_like` provider now accepts Bearer-only auth. Pass `api_key=` and SciLLM will project the token into the correct header (Bearer or `x-api-key`) for Chutes.
 
 Step 07 (Knowledge) Requirements
@@ -330,8 +380,54 @@ Step 07 (Knowledge) Requirements
 - On failure: return `preflight_details` (dict) to the pipeline summary.
 - Runtime calls: `scillm.acompletion(..., api_key=CHUTES_API_KEY, custom_llm_provider="openai_like", response_format={"type":"json_object"})`
 
+Simple Wrappers (scillm.paved)
+
+For quick one-off completions without boilerplate, use the simple wrappers:
+
+```python
+from scillm.paved import chat, chat_json, analyze_image, analyze_image_json
+
+# Text completion
+answer = await chat("What is the capital of France?")
+
+# JSON response (returns parsed dict)
+data = await chat_json('Return {"name": "Alice", "age": 25}')
+
+# Image analysis
+desc = await analyze_image("https://example.com/photo.jpg", "Describe this")
+
+# Image + JSON
+data = await analyze_image_json("receipt.jpg", 'Extract {"total": number}')
+```
+
+These wrappers use OpenRouter by default (set `OPENROUTER_API_KEY`). Override with `model=`, `api_base=`, `api_key=` parameters.
+
+For batch processing (many items), use `parallel_acompletions_iter` directly.
+
+Skills for AI Agents
+
+scillm bundles skills that can be installed into projects for use by Claude Code, Codex, Gemini, etc.
+
+```bash
+# List available skills
+python -m scillm.skills list
+
+# Install all skills to .skills/ (agent-agnostic location)
+python -m scillm.skills install --all
+
+# Install to specific location
+python -m scillm.skills install --all --target .claude/skills
+```
+
+Skills are COPIED, not symlinked. Re-run install to update.
+
+Current skills:
+- `certainly-prover`: Lean4 theorem proving via scillm
+- `scillm-completions`: LLM completions (text, JSON, vision, batch)
+
 Allowed Surfaces (CHUTES / OpenAI‑compatible)
 - `scillm.acompletion / scillm.completion`
+- `scillm.paved.chat / chat_json / analyze_image / analyze_image_json` (simple wrappers)
 - `scillm.paved.sanity_preflight / list_models_openai_like / chutes_chat_json / chutes_router_json`
 - `scillm.Router` (lightweight passthrough; do not wrap)
 
@@ -368,6 +464,9 @@ Exceptions
 - None for CHUTES/SciLLM. If a true exception is required, file a short design note and add a temporary allowlist entry to a local `EXCEPTIONS.md` with an expiration date.
 
 Change History
+- 2026‑02‑06: v1.79.0 - Made `chutes.middleware` imports optional with graceful no-op fallback stubs. Removed requirement to manually patch venvs when middleware unavailable.
+- 2026‑01‑11: Added simple wrappers (chat, chat_json, analyze_image, analyze_image_json) and skills system. Skills are agent-agnostic (Claude, Codex, Gemini) and install to .skills/ by default.
+- 2026‑01‑10: Added minimal runnable certainly script (copy-paste-run) with prerequisites. Documented architectural decision: scillm as main caller, certainly_min CLI for debugging only.
 - 2026‑01‑03: Reinforced canonical surfaces, JSON strict guidance, iterator JSON repair parity, and Certainly/Lean4 paved‑path examples.
 - 2025‑11‑09: Initial version. Codified paved helpers and strict “no manual headers / no raw HTTP” policy for DevOps.
 - 2025‑11‑10: Documented bundled middleware + Bearer-only provider so DevOps doesn’t patch venvs manually.

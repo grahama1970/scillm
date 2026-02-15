@@ -106,11 +106,11 @@ demo-pricing:
 
 # Run a one-shot smoke that asserts sc_cost_usd_total increases after one chat call
 smoke-demo-pricing:
-	@python3 scripts/smoke_demo_pricing.py
+	@SMOKE_MODEL=$${SMOKE_MODEL:-local-text} python3 scripts/smoke_demo_pricing.py
 
 # One JSON chat via proxy and assert budget headers present
 smoke-chat-headers:
-	@python3 scripts/smoke_chat_headers.py
+	@SMOKE_MODEL=$${SMOKE_MODEL:-local-text} python3 scripts/smoke_chat_headers.py
 
 # GET /v1/budget and validate minimal contract
 smoke-budget:

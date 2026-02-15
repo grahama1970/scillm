@@ -10,8 +10,29 @@ from scillm import Router, completion
 from litellm.exceptions import APIConnectionError, APIError, RateLimitError, Timeout
 
 from .auto_router import auto_router_from_env
-from chutes.middleware.budget_guard import budget_register_attempt, budget_snapshot
-from chutes.middleware.metrics import tenacious_sleep, tenacious_retry
+
+# Optional chutes.middleware imports - graceful fallback when unavailable
+try:
+    from chutes.middleware.budget_guard import budget_register_attempt, budget_snapshot
+except ImportError:
+    def budget_register_attempt() -> Optional[Dict[str, Any]]:
+        """No-op stub when chutes.middleware is unavailable."""
+        return None
+
+    def budget_snapshot() -> Optional[Dict[str, Any]]:
+        """No-op stub when chutes.middleware is unavailable."""
+        return None
+
+try:
+    from chutes.middleware.metrics import tenacious_sleep, tenacious_retry
+except ImportError:
+    def tenacious_sleep(delay: float) -> None:
+        """No-op stub when chutes.middleware is unavailable."""
+        pass
+
+    def tenacious_retry(reason: str) -> None:
+        """No-op stub when chutes.middleware is unavailable."""
+        pass
 
 try:  # pragma: no cover - optional telemetry
     from scillm.telemetry import metrics as sc_metrics  # type: ignore

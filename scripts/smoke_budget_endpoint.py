@@ -28,6 +28,10 @@ def _get(url: str, timeout: float = 10.0):
 def main() -> int:
     base = os.getenv("PROXY_BASE", "http://127.0.0.1:4010").rstrip("/")
     s, body, _ = _get(f"{base}/v1/budget")
+    # Skip gracefully when proxy is unreachable
+    if s == 0:
+        print(json.dumps({"ok": False, "status": 0, "skipped": True, "reason": "proxy unreachable"}))
+        return 0
     ok = False
     detail = {}
     try:

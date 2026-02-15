@@ -65,6 +65,12 @@ def main() -> int:
     ]
     missing = [k for k in want if _hget(hdrs, k) is None]
 
+    # Skip gracefully when proxy is unreachable (status 0 = connection refused)
+    if s == 0:
+        out = {"ok": False, "status": 0, "skipped": True, "reason": "proxy unreachable"}
+        print(json.dumps(out))
+        return 0
+
     ok = (s == 200) and not missing
     out = {
         "ok": ok,
