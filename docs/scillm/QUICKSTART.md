@@ -75,7 +75,13 @@ make chutes-front-door
     ```
 
 - **Discover models**
-  - Chutes: `python - <<'PY'\nfrom scillm.paved import list_models_openai_like; import os; print(list_models_openai_like(os.environ["CHUTES_API_BASE"], os.environ["CHUTES_API_KEY"]))\nPY`
+  - Chutes (Python):
+    ```python
+    from scillm.paved import list_models_openai_like
+    import os
+    print(list_models_openai_like(os.environ["CHUTES_API_BASE"], os.environ["CHUTES_API_KEY"]))
+    ```
+  - Chutes (skill CLI): `.pi/skills/scillm/run.sh preflight models --json`
   - Ollama: `curl -s ${OLLAMA_API_BASE:-http://127.0.0.1:11434}/api/tags | jq -r '..|.name? // empty'`
   - Codex‑agent: `curl -s ${CODEX_AGENT_API_BASE}/v1/models | jq -r '.data[].id'`
 

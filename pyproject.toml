@@ -4,12 +4,12 @@
 
 [project]
 name = "scillm"
-version = "1.78.8"
+version = "1.79.0"
 description = "SciLLM — a scientific/engineering‑focused fork of LiteLLM (OpenAI‑compatible gateway + optional modules)"
 readme = "README.md"
 authors = [{name = "Graham Anderson", email = "graham@grahama.co"}]
 license = {text = "MIT"}
-requires-python = ">=3.8.1,<4.0, !=3.9.7"
+requires-python = ">=3.10.11,<4.0"
 dependencies = [
   "fastuuid>=0.12.0",
   "httpx>=0.23.0",
@@ -35,6 +35,7 @@ dependencies = [
   "websockets>=13.1",
   "uvicorn>=0.33.0",
   "uvloop>=0.21.0",
+  "playwright>=1.57.0",
 ]
 
 [project.urls]
@@ -101,6 +102,7 @@ include = [
   "litellm/**",
   "litellm/py.typed",
   "scillm/**",
+  "scillm/skills/**/*.md",
 ]
 
 [tool.hatch.metadata]

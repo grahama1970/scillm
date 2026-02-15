@@ -304,6 +304,45 @@ Paved‑path example: see `SCILLM_PAVED_PATH_CONTRACT.md#certainly--lean4-paved-
 - Observability:
   - Responses stamp `_hidden_params.requested_model_id` and `_hidden_params.resolved_model_id` when a mapping occurs.
 
+## Preflight & Model Listing (Paved Helpers)
+
+- **Purpose**: Fail fast when the requested Chutes model is missing or auth headers are misconfigured, and keep the local cache of `/v1/models` in sync.
+- **Python helpers** (imported from `scillm.paved.preflight`):
+
+  ```python
+  import os
+  from scillm.paved import list_models_openai_like, sanity_preflight
+
+  # List models (JSON payload with ids + metadata)
+  print(list_models_openai_like(
+      os.environ["CHUTES_API_BASE"],
+      os.environ["CHUTES_API_KEY"],
+      custom_llm_provider="openai_like",
+  ))
+
+  # Step 07 preflight (parallel probe, auth style detection)
+  print(sanity_preflight(
+      api_base=os.environ["CHUTES_API_BASE"],
+      api_key=os.environ["CHUTES_API_KEY"],
+      model=os.environ["CHUTES_MODEL_ID"],
+      parallel=3,
+      wall_time_s=30,
+      attempts=2,
+  ))
+  ```
+
+- **Skill / CLI** (pi-mono):
+
+  ```bash
+  # Model availability + auth (non-zero exit on failure)
+  .pi/skills/scillm/run.sh preflight preflight --model "$CHUTES_MODEL_ID" --json
+
+  # Raw model list (JSON array)
+  .pi/skills/scillm/run.sh preflight models --json
+  ```
+
+- The helpers rely on the same paved-path discovery logic documented in `SCILLM_PAVED_PATH_CONTRACT.md` and reuse the cached catalog maintained under `~/.cache/scillm/`.
+
 ## Scenarios (Live, Skip‑Friendly)
 
 | Script | Purpose | How To Run |

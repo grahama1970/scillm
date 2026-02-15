@@ -342,13 +342,13 @@ async def certainly_prove_iter(
                         opt["flags"] = eff_flags
                     if max_seconds is not None:
                         opt["max_seconds"] = max_seconds
-                    options = dict(options or {})
+                    merged_options = dict(options or {})
                     if session_id is not None:
-                        options["session_id"] = session_id
+                        merged_options["session_id"] = session_id
                     if track_id is not None:
-                        options["track_id"] = track_id
-                    if options:
-                        opt["options"] = options
+                        merged_options["track_id"] = track_id
+                    if merged_options:
+                        opt["options"] = merged_options
                     if response_format is not None:
                         opt["response_format"] = response_format
                     resp = await _acompletion(

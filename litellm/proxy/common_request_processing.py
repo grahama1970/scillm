@@ -245,7 +245,7 @@ class ProxyBaseLLMRequestProcessing:
             if logging_caching_headers:
                 headers.update(logging_caching_headers)
 
-        # Budget headers (if tracker/preflight available)
+        # Budget headers (if tracker/preflight available, else sensible defaults)
         try:
             snap = budget_snapshot()
             if snap:
@@ -254,6 +254,13 @@ class ProxyBaseLLMRequestProcessing:
                 headers["x-ratelimit-remaining-requests"] = str(snap.get("remaining", ""))
                 if snap.get("limit") is not None:
                     headers["x-ratelimit-limit"] = str(snap.get("limit"))
+            else:
+                # Provide sensible defaults when budget tracker isn't configured
+                from chutes.middleware.budget_guard import _get_daily_limit, _next_reset_at_iso_utc
+                default_limit = _get_daily_limit()
+                headers["x-ratelimit-limit"] = str(default_limit)
+                headers["x-ratelimit-remaining-requests"] = str(default_limit)
+                headers["x-budget-reset-at"] = _next_reset_at_iso_utc()
         except Exception:
             pass
 
