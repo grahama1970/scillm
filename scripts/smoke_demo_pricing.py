@@ -73,7 +73,7 @@ def _sum_cost(metrics_text: str) -> float:
 def main() -> int:
     base = os.getenv("PROXY_BASE", "http://127.0.0.1:4010").rstrip("/")
     master = os.getenv("MASTER_KEY", os.getenv("LITELLM_MASTER_KEY", "sk-dev-proxy-123"))
-    model = os.getenv("SMOKE_MODEL", "gpt-chutes")
+    model = os.getenv("SMOKE_MODEL", "local-text")
 
     # 1) Baseline metrics
     s1, body1, _ = _get(f"{base}/metrics")

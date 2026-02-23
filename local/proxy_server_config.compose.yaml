@@ -1,0 +1,106 @@
+general_settings:
+  master_key: ${LITELLM_MASTER_KEY}
+  environment: ${METRICS_ENV}
+
+model_list:
+  # --- TEXT GROUP (cascade: Chutes → Gemini → DeepSeek → OpenRouter) ---
+  - model_name: text
+    litellm_params:
+      custom_llm_provider: openai_like
+      api_base: ${CHUTES_API_BASE}
+      api_key: null
+      extra_headers:
+        Authorization: "Bearer ${CHUTES_API_KEY}"
+      model: ${CHUTES_TEXT_MODEL}
+      timeout: 45
+    model_info:
+      priority: 1
+
+  - model_name: text
+    litellm_params:
+      model: gemini/gemini-2.5-flash
+      api_key: ${GEMINI_API_KEY}
+      timeout: 45
+    model_info:
+      priority: 2
+
+  - model_name: text
+    litellm_params:
+      model: deepseek/deepseek-chat
+      api_key: ${DEEPSEEK_API}
+      timeout: 45
+    model_info:
+      priority: 3
+
+  - model_name: text
+    litellm_params:
+      model: openrouter/openai/gpt-4o-mini
+      api_key: ${OPENROUTER_API_KEY}
+      timeout: 60
+    model_info:
+      priority: 4
+
+  # --- VLM GROUP (cascade: Chutes → OpenRouter) ---
+  - model_name: vlm
+    litellm_params:
+      custom_llm_provider: openai_like
+      api_base: ${CHUTES_API_BASE}
+      api_key: null
+      extra_headers:
+        Authorization: "Bearer ${CHUTES_API_KEY}"
+      model: ${CHUTES_VLM_MODEL}
+      timeout: 60
+    model_info:
+      priority: 1
+
+  - model_name: vlm
+    litellm_params:
+      model: openrouter/anthropic/claude-sonnet-4-20250514
+      api_key: ${OPENROUTER_API_KEY}
+      timeout: 90
+    model_info:
+      priority: 2
+
+  # Local always-on (via Ollama container)
+  - model_name: local-text
+    litellm_params:
+      model: llama3
+      custom_llm_provider: ollama
+      api_base: http://ollama:11434
+      timeout: 20
+  - model_name: moonshot-text
+    litellm_params:
+      custom_llm_provider: openai_like
+      api_base: ${MOONSHOT_API_BASE}
+      api_key: null
+      extra_headers:
+        Authorization: "Bearer ${MOONSHOT_API_KEY}"
+      model: ${MOONSHOT_MODEL}
+      timeout: 45
+  - model_name: codeworld-bridge
+    litellm_params:
+      model: codeworld/bridge
+      custom_llm_provider: codeworld
+      api_base: http://codeworld-bridge:8887
+      timeout: 45
+  - model_name: certainly-bridge
+    litellm_params:
+      model: certainly/bridge
+      custom_llm_provider: certainly
+      api_base: http://certainly-bridge:8787
+      timeout: 120
+
+router_settings:
+  routing_strategy: simple-shuffle
+  num_retries: 3
+  retry_after: 5
+
+litellm_settings:
+  model_alias_map:
+    gpt-chutes: text
+    text-default: local-text
+    codeworld: codeworld-bridge
+    certainly: certainly-bridge
+
+observability:
+  enabled: true

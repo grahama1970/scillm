@@ -1,0 +1,121 @@
+general_settings:
+  master_key: os.environ/LITELLM_MASTER_KEY
+  environment: os.environ/METRICS_ENV
+  # Keep default auth; master key authorizes dev calls
+
+model_list:
+  # --- TEXT GROUP (cascade: Chutes → Gemini → DeepSeek → OpenRouter) ---
+  - model_name: text
+    litellm_params:
+      custom_llm_provider: openai_like
+      api_base: os.environ/CHUTES_API_BASE
+      api_key: null
+      extra_headers:
+        Authorization: os.environ/CHUTES_BEARER_TOKEN
+      model: os.environ/CHUTES_TEXT_MODEL
+      timeout: 45
+    model_info:
+      priority: 1
+
+  - model_name: text
+    litellm_params:
+      model: gemini/gemini-2.5-flash
+      api_key: os.environ/GEMINI_API_KEY
+      timeout: 45
+    model_info:
+      priority: 2
+
+  - model_name: text
+    litellm_params:
+      model: deepseek/deepseek-chat
+      api_key: os.environ/DEEPSEEK_API
+      timeout: 45
+    model_info:
+      priority: 3
+
+  - model_name: text
+    litellm_params:
+      model: openrouter/openai/gpt-4o-mini
+      api_key: os.environ/OPENROUTER_API_KEY
+      timeout: 60
+    model_info:
+      priority: 4
+
+  # --- VLM GROUP (cascade: Chutes → OpenRouter) ---
+  - model_name: vlm
+    litellm_params:
+      custom_llm_provider: openai_like
+      api_base: os.environ/CHUTES_API_BASE
+      api_key: null
+      extra_headers:
+        Authorization: os.environ/CHUTES_BEARER_TOKEN
+      model: os.environ/CHUTES_VLM_MODEL
+      timeout: 60
+    model_info:
+      priority: 1
+
+  - model_name: vlm
+    litellm_params:
+      model: openrouter/anthropic/claude-sonnet-4-20250514
+      api_key: os.environ/OPENROUTER_API_KEY
+      timeout: 90
+    model_info:
+      priority: 2
+
+  # Local always-on provider for stable 200s (via Ollama)
+  - model_name: local-text
+    litellm_params:
+      model: qwen3:8b
+      custom_llm_provider: ollama
+      api_base: http://127.0.0.1:11434
+      timeout: 20
+  # Bridges (host ports; override with CODEWORLD_HOST_PORT/CERTAINLY_HOST_PORT)
+  - model_name: codeworld-bridge
+    litellm_params:
+      model: codeworld/bridge
+      custom_llm_provider: codeworld
+      api_base: http://127.0.0.1:8887
+      timeout: 45
+  - model_name: certainly-bridge
+    litellm_params:
+      model: certainly/bridge
+      custom_llm_provider: certainly
+      api_base: http://127.0.0.1:8787
+      timeout: 120
+  # Moonshot (OpenAI-compatible)
+  - model_name: moonshot-text
+    litellm_params:
+      custom_llm_provider: openai_like
+      api_base: os.environ/MOONSHOT_API_BASE
+      api_key: null
+      extra_headers:
+        Authorization: os.environ/MOONSHOT_BEARER_TOKEN
+      model: os.environ/MOONSHOT_MODEL
+      timeout: 45
+
+router_settings:
+  routing_strategy: simple-shuffle
+  num_retries: 3
+  retry_after: 5
+
+litellm_settings:
+  model_alias_map:
+    # Any Chutes text model name → text group
+    moonshotai/Kimi-K2-Instruct-0905: text
+    deepseek-ai/DeepSeek-R1-0528: text
+    Qwen/Qwen3-235B-A22B-Instruct-2507: text
+    gpt-chutes: text
+    # VLM model names → vlm group
+    Qwen/Qwen3-VL-235B-A22B-Instruct: vlm
+    Qwen/Qwen2.5-VL-72B-Instruct: vlm
+    openrouter/anthropic/claude-sonnet-4-20250514: vlm
+    # Existing
+    gpt-4o: local-text
+    text-default: local-text
+    codeworld: codeworld-bridge
+    certainly: certainly-bridge
+
+observability:
+  # Prometheus /metrics is already mounted by the proxy
+  # Set METRICS_ENV to dev/staging/prod for labeling
+  enabled: true

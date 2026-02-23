@@ -41,7 +41,7 @@ def _hget(headers: dict, key: str):
 def main() -> int:
     base = os.getenv("PROXY_BASE", "http://127.0.0.1:4010").rstrip("/")
     master = os.getenv("MASTER_KEY", os.getenv("LITELLM_MASTER_KEY", "sk-dev-proxy-123"))
-    model = os.getenv("SMOKE_MODEL", "gpt-chutes")
+    model = os.getenv("SMOKE_MODEL", "local-text")
 
     payload = {
         "model": model,

@@ -230,7 +230,7 @@ make grafana-import
 ```bash
 curl -si -H 'Authorization: Bearer sk-dev-proxy-123' \
   -H 'Content-Type: application/json' \
-  -d '{"model":"gpt-chutes","messages":[{"role":"user","content":"ping"}]}' \
+  -d '{"model":"text","messages":[{"role":"user","content":"ping"}]}' \
   http://127.0.0.1:4010/v1/chat/completions | tee /dev/stderr | jq
 # Expect headers (when gateway handles the call):
 #   x-ratelimit-limit, x-ratelimit-remaining-requests, x-budget-reset-at

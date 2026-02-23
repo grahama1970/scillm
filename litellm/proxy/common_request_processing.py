@@ -362,7 +362,7 @@ class ProxyBaseLLMRequestProcessing:
                 from chutes.middleware.pricing import get_model_pricing  # type: ignore
 
                 # Defaults
-                selected = "chutes-text"
+                selected = "text"
                 pref = (os.getenv("SCILLM_PAYG_VENDOR", "auto").strip().lower())
                 allow_payg = (os.getenv("SCILLM_ALLOW_PAYG", "0").strip().lower() in {"1", "true", "yes"})
                 max_mult = 1.3
@@ -372,7 +372,7 @@ class ProxyBaseLLMRequestProcessing:
                     max_mult = 1.3
 
                 if pref in {"chutes", "moonshot"}:
-                    selected = "moonshot-text" if pref == "moonshot" else "chutes-text"
+                    selected = "moonshot-text" if pref == "moonshot" else "text"
                 else:
                     # auto: if PAYG active and allowed, consider moonshot when price within multiplier
                     ps = payg_snapshot() or {}
@@ -399,9 +399,9 @@ class ProxyBaseLLMRequestProcessing:
                                 selected = "moonshot-text"
                         else:
                             # If we can't resolve both prices, stay on chutes
-                            selected = "chutes-text"
+                            selected = "text"
                     else:
-                        selected = "chutes-text"
+                        selected = "text"
                 self.data["model"] = selected
         except Exception:
             # On any error, keep original model

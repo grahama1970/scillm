@@ -29,7 +29,7 @@ Single page hand‑off for agents working on the SciLLM fork. Captures the state
 - Minimum env for live calls:
   - `CHUTES_API_BASE=https://llm.chutes.ai/v1`
   - `CHUTES_API_KEY=cpk_…`
-  - `CHUTES_MODEL_ID` (text) and `CHUTES_VLM_MODEL` (vision)
+  - `CHUTES_TEXT_MODEL` (text) and `CHUTES_VLM_MODEL` (vision)
 - Offline tests:
   - Use the dummy values embedded in `tests/run_vlm_sanity.sh`; they never leave the machine because every invocation passes `--dry-run`.
 - Optional knobs:

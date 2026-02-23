@@ -1,3 +1,13 @@
+proxy-up:
+	docker compose up -d litellm db
+	@echo "scillm proxy on :4010"
+
+proxy-down:
+	docker compose down
+
+proxy-logs:
+	docker compose logs -f litellm
+
 notebooks-smoke:
 	@echo "Rebuilding viewer notebooks"
 	@uv run -- python scripts/notebooks_build.py
@@ -87,6 +97,7 @@ proxy-run-uv:
 	@if ! command -v uv >/dev/null 2>&1; then echo "uv not installed"; exit 2; fi
 	@if [ ! -f local/proxy_server_config.yaml ]; then echo "missing local/proxy_server_config.yaml"; exit 2; fi
 	LITELLM_MASTER_KEY=$${LITELLM_MASTER_KEY:-sk-dev-proxy-123} METRICS_ENV=$${METRICS_ENV:-dev} \
+	CHUTES_BEARER_TOKEN="Bearer $${CHUTES_API_KEY}" \
 	CHUTES_PRICING_FILE=$${CHUTES_PRICING_FILE:-local/pricing/chutes.prices.json} \
 	uv run litellm --config local/proxy_server_config.yaml --host 0.0.0.0 --port $${PORT:-4010} --log_level warning
 
@@ -195,8 +206,8 @@ budget-lite-smoke:
 	@echo "-- budget meta --"; jq '.additional_kwargs.scillm.budget' /tmp/bl_resp.json || true
 
 proxy-docker-smoke:
-	@echo "Running smoke against proxy :4010 (model gpt-chutes)"
-	@printf '%s' '{"model":"gpt-chutes","messages":[{"role":"user","content":"Return only {\"ok\":true} as JSON."}],"response_format":{"type":"json_object"},"temperature":0,"max_tokens":32}' > /tmp/payload.json
+	@echo "Running smoke against proxy :4010 (model text)"
+	@printf '%s' '{"model":"text","messages":[{"role":"user","content":"Return only {\"ok\":true} as JSON."}],"response_format":{"type":"json_object"},"temperature":0,"max_tokens":32}' > /tmp/payload.json
 	@curl -s -D /tmp/h -H "Authorization: Bearer $${LITELLM_MASTER_KEY:-12345}" -H 'Content-Type: application/json' --data @/tmp/payload.json http://127.0.0.1:4010/v1/chat/completions > /tmp/r.json || true
 	@echo "-- headers --"; rg -n "^x-(ratelimit|budget|estimated)" -i /tmp/h || true
 	@echo "-- budget meta --"; jq '.additional_kwargs.scillm.budget' /tmp/r.json || true
