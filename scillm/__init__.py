@@ -1,3 +1,4 @@
+"""scillm — LLM completions engine with proxy-first routing and multi-provider fallback."""
 # Re-export litellm surface for convenience when installed as 'scillm'.
 from litellm import *  # noqa: F401,F403
 import litellm as _litellm

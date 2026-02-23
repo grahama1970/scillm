@@ -1,4 +1,5 @@
 from __future__ import annotations
+"""Multi-endpoint fallback inference with automatic failover."""
 
 import os
 from typing import Any, Dict, List, Optional, Tuple

@@ -1,4 +1,5 @@
 from __future__ import annotations
+"""Model selection utilities for cost-aware routing."""
 
 import json
 import os

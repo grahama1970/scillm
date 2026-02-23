@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from loguru import logger
 import os
 import datetime as _dt
 import random
@@ -73,7 +74,7 @@ def _bearer_headers() -> Dict[str, str]:
     style = (os.environ.get("CHUTES_AUTH_STYLE") or "bearer").strip().lower()
     if style and style != "bearer":
         try:
-            print(f"[scillm.chutes] WARNING: CHUTES_AUTH_STYLE='{style}' ignored; using Bearer header.")
+            logger.warning(f"CHUTES_AUTH_STYLE='{style}' ignored; using Bearer header.")
         except Exception:  # pragma: no cover
             pass
     return {"Authorization": f"Bearer {key}"}

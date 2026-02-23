@@ -358,8 +358,8 @@ jobs:
 - Strict gate details are defined in `readiness.yml` as `chutes_warmup_strict`, `runpod_warmup_strict`, and `warmups_strict_all`. For a quick manual probe, you can also run:
 
 ```bash
-python scenarios/provider_warmup_probe.py --provider chutes --model "$LITELLM_DEFAULT_MODEL"
-python scenarios/provider_warmup_probe.py --provider runpod --model "$LITELLM_DEFAULT_MODEL"
+python scenarios/provider_warmup_probe.py --provider chutes --model "$CHUTES_TEXT_MODEL"
+python scenarios/provider_warmup_probe.py --provider runpod --model "$CHUTES_TEXT_MODEL"
 ```
 
 If `STRICT_WARMUPS` is not set, warm‑ups remain optional and will not fail the job.
@@ -767,7 +767,7 @@ pip install 'litellm[proxy]'
 ```shell
 $ litellm --model huggingface/bigcode/starcoder
 
-#INFO: Proxy running on http://0.0.0.0:4000
+#INFO: Proxy running on http://0.0.0.0:4010
 ```
 
 ### Step 2: Make ChatCompletions Request to Proxy
@@ -778,7 +778,7 @@ $ litellm --model huggingface/bigcode/starcoder
 
 ```python
 import openai # openai v1.0.0+
-client = openai.OpenAI(api_key="anything",base_url="http://0.0.0.0:4000") # set proxy to base_url
+client = openai.OpenAI(api_key="anything",base_url="http://0.0.0.0:4010") # set proxy to base_url
 # request sent to model set on litellm proxy, `litellm --model`
 response = client.chat.completions.create(model="gpt-3.5-turbo", messages = [
     {
@@ -826,7 +826,7 @@ Set budgets and rate limits across multiple projects
 ### Request
 
 ```shell
-curl 'http://0.0.0.0:4000/key/generate' \
+curl 'http://0.0.0.0:4010/key/generate' \
 --header 'Authorization: Bearer sk-1234' \
 --header 'Content-Type: application/json' \
 --data-raw '{"models": ["gpt-3.5-turbo", "gpt-4", "claude-2"], "duration": "20m","metadata": {"user": "ishaan@berri.ai", "team": "core-infra"}}'

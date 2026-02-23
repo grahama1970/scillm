@@ -38,7 +38,7 @@ JSON validation (strict mode)
 Parallel batch (openai_like / Chutes)
 - Signature (v1.77.4): `parallel_acompletions(requests, *, api_base, api_key, custom_llm_provider='openai_like', concurrency=6, timeout=20, wall_time_s=900, default_max_tokens=None, default_temperature=None, response_format=None, tenacious=True, …)`
 - Each request dict may contain: `model`, `messages`, `max_tokens?`, `temperature?`, `response_format?`, `api_base?`, `api_key?`.
-- Important: unlike `acompletion(...)`, `parallel_acompletions(...)` does **not** accept a top-level `model=` kwarg. Put `model` inside each request dict (or rely on `CHUTES_MODEL_ID`/`CHUTES_TEXT_MODEL` defaults).
+- Important: unlike `acompletion(...)`, `parallel_acompletions(...)` does **not** accept a top-level `model=` kwarg. Put `model` inside each request dict (or rely on `CHUTES_TEXT_MODEL`/`CHUTES_TEXT_MODEL` defaults).
 - Also note: `messages_list=...` is **not** a Python API parameter; it is a CLI convenience used by `scillm-tool parallel` to build the per-item request dicts.
 - Progress: if you need progress logging / as-completed checkpointing, use `parallel_acompletions_iter(...)` (or its alias `batch_acompletions_iter(...)`) instead of waiting on one big `await parallel_acompletions(...)`.
   - Iterator parity: `schema=`, `retry_invalid_json=`, and `repair_invalid_json=` are supported at the iterator level too.
@@ -57,7 +57,7 @@ import os
 
 from scillm import parallel_acompletions
 
-MODEL = os.environ["CHUTES_MODEL_ID"]
+MODEL = os.environ["CHUTES_TEXT_MODEL"]
 
 async def main():
     reqs = [
@@ -104,7 +104,7 @@ import os
 
 from scillm import batch_acompletions_iter
 
-MODEL = os.environ["CHUTES_MODEL_ID"]
+MODEL = os.environ["CHUTES_TEXT_MODEL"]
 
 async def main():
     reqs = [
@@ -150,7 +150,7 @@ resps = await parallel_acompletions(
        "response_format":{"type":"json_object"},
        "max_tokens":64,
        "temperature":0,
-       "model": os.environ["CHUTES_MODEL_ID"]},
+       "model": os.environ["CHUTES_TEXT_MODEL"]},
     ],
     api_base=os.environ["CHUTES_API_BASE"],
     api_key=os.environ["CHUTES_API_KEY"],
@@ -356,7 +356,7 @@ Debugging quick-guide (Chutes)
 - Text sanity (JSON echo):
 ```
 curl -sS -H "Authorization: Bearer $CHUTES_API_KEY" -H 'Content-Type: application/json' \
-  -d '{"model":"'"$CHUTES_MODEL_ID"'","messages":[{"role":"user","content":"Return only {\"ok\":true} as JSON."}],"response_format":{"type":"json_object"},"max_tokens":64,"temperature":0}' \
+  -d '{"model":"'"$CHUTES_TEXT_MODEL"'","messages":[{"role":"user","content":"Return only {\"ok\":true} as JSON."}],"response_format":{"type":"json_object"},"max_tokens":64,"temperature":0}' \
   "$CHUTES_API_BASE/chat/completions"
 ```
 Expect HTTP 200 and body containing `"ok":true`.
@@ -400,7 +400,7 @@ desc = await analyze_image("https://example.com/photo.jpg", "Describe this")
 data = await analyze_image_json("receipt.jpg", 'Extract {"total": number}')
 ```
 
-These wrappers use OpenRouter by default (set `OPENROUTER_API_KEY`). Override with `model=`, `api_base=`, `api_key=` parameters.
+These wrappers use the local proxy by default (`SCILLM_API_BASE=http://localhost:4010`, auth via `SCILLM_PROXY_KEY`). Override with `model=`, `api_base=`, `api_key=` parameters.
 
 For batch processing (many items), use `parallel_acompletions_iter` directly.
 

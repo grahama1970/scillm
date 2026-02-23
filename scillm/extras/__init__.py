@@ -7,6 +7,7 @@ Also sets safe defaults for this stack (drop unsupported params unless strict).
 """
 
 import os
+from loguru import logger
 import litellm  # type: ignore
 
 # Default: drop unsupported params to avoid provider hard-failures.
@@ -15,7 +16,7 @@ if not _strict and not getattr(litellm, "drop_params", False):
     litellm.drop_params = True  # type: ignore[attr-defined]
     if os.getenv("SCILLM_DEBUG"):
         try:
-            print("[scillm][debug] litellm.drop_params=True (default)")
+            logger.debug("litellm.drop_params=True (default)")
         except Exception:
             pass
 

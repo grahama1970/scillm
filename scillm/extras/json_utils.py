@@ -6,7 +6,7 @@ LiteLLM helpers so callers can depend on a stable `scillm.extras.json_utils` pat
 from __future__ import annotations
 
 import json
-import logging
+from loguru import logger
 import os
 import re
 from pathlib import Path
@@ -24,8 +24,6 @@ __all__ = [
     "clean_json_string",
     "load_jsonl"
 ]
-
-logger = logging.getLogger(__name__)
 
 
 class PathEncoder(json.JSONEncoder):

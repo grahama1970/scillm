@@ -1,4 +1,5 @@
 from __future__ import annotations
+"""CLI subprocess runner for scillm skill entry points."""
 
 import asyncio
 import os

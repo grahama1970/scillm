@@ -65,6 +65,19 @@ Central index of key environment variables. Prefer `SCILLM_` prefix; legacy `LIT
 |----------|-------------|
 | `REDIS_HOST`, `REDIS_PORT` | Cache backend host/port; fallback to in‑memory if unset |
 
+## Proxy & Paved Path
+| Variable | Required | Default | Description |
+|---|---|---|---|
+| `SCILLM_PROXY_KEY` | No | `sk-dev-proxy-123` | API key for authenticating with the LiteLLM proxy (must match `LITELLM_MASTER_KEY`) |
+| `SCILLM_API_BASE` | No | `http://localhost:4010` | Base URL for the LiteLLM proxy |
+| `SCILLM_MODEL` | No | `text` | Default model name for text completions via proxy |
+| `SCILLM_VISION_MODEL` | No | `vlm` | Default model name for vision completions via proxy |
+| `CHUTES_TEXT_MODEL` | Yes (for Chutes) | — | Chutes vendor model ID for text (e.g. `deepseek-ai/DeepSeek-R1-0528`) |
+| `CHUTES_VLM_MODEL` | Yes (for VLM) | — | Chutes vendor model ID for vision (e.g. `Qwen/Qwen2.5-VL-72B-Instruct`) |
+| `LITELLM_MASTER_KEY` | No | `sk-dev-proxy-123` | Master key for the LiteLLM proxy server |
+| `GEMINI_API_KEY` | No | — | Google Gemini API key (2nd priority text fallback) |
+| `DEEPSEEK_API` | No | — | DeepSeek API key (3rd priority text fallback) |
+
 ## Security Notes
 - Disable codex sidecar echo (`CODEX_SIDECAR_ECHO=1`) before using real credentials.
 - Treat autogen code/proofs as untrusted until verified.

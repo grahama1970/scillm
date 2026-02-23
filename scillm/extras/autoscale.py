@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 from __future__ import annotations
+"""Auto-scaling helpers for dynamic provider selection based on load."""
 
 import os
 import threading

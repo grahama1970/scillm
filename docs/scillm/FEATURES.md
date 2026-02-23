@@ -324,7 +324,7 @@ Paved‑path example: see `SCILLM_PAVED_PATH_CONTRACT.md#certainly--lean4-paved-
   print(sanity_preflight(
       api_base=os.environ["CHUTES_API_BASE"],
       api_key=os.environ["CHUTES_API_KEY"],
-      model=os.environ["CHUTES_MODEL_ID"],
+      model=os.environ["CHUTES_TEXT_MODEL"],
       parallel=3,
       wall_time_s=30,
       attempts=2,
@@ -335,7 +335,7 @@ Paved‑path example: see `SCILLM_PAVED_PATH_CONTRACT.md#certainly--lean4-paved-
 
   ```bash
   # Model availability + auth (non-zero exit on failure)
-  .pi/skills/scillm/run.sh preflight preflight --model "$CHUTES_MODEL_ID" --json
+  .pi/skills/scillm/run.sh preflight preflight --model "$CHUTES_TEXT_MODEL" --json
 
   # Raw model list (JSON array)
   .pi/skills/scillm/run.sh preflight models --json
@@ -353,7 +353,7 @@ Paved‑path example: see `SCILLM_PAVED_PATH_CONTRACT.md#certainly--lean4-paved-
 | scenarios/mcts_codeworld_demo.py | MCTS demo | `python scenarios/mcts_codeworld_demo.py` |
 | scenarios/lean4_bridge_release.py | Lean4 bridge demo | `python scenarios/lean4_bridge_release.py` |
 | scenarios/codex_agent_router.py | Router→codex‑agent demo | `python scenarios/codex_agent_router.py` |
-| scenarios/provider_warmup_probe.py | One‑off warm‑up probe | `python scenarios/provider_warmup_probe.py --provider chutes|runpod --model "$LITELLM_DEFAULT_MODEL"` |
+| scenarios/provider_warmup_probe.py | One‑off warm‑up probe | `python scenarios/provider_warmup_probe.py --provider chutes|runpod --model "$CHUTES_TEXT_MODEL"` |
 
 ## Contrib Helpers (Batch & Rate)
 
@@ -497,7 +497,7 @@ If you need a quick example for a specific provider or scenario, open the files 
     ```python
     from scillm import completion, os
     out = completion(
-      model=os.environ["CHUTES_MODEL_ID"],
+      model=os.environ["CHUTES_TEXT_MODEL"],
       api_base=os.environ["CHUTES_API_BASE"],
       api_key=os.environ["CHUTES_API_KEY"],  # Bearer
       custom_llm_provider="openai_like",
@@ -508,7 +508,7 @@ If you need a quick example for a specific provider or scenario, open the files 
     ```python
     from scillm import Router, os
     r = Router(model_list=[{"model_name":"chutes","litellm_params":{
-      "model": os.environ["CHUTES_MODEL_ID"],
+      "model": os.environ["CHUTES_TEXT_MODEL"],
       "api_base": os.environ["CHUTES_API_BASE"],
       "api_key": os.environ["CHUTES_API_KEY"],
       "custom_llm_provider": "openai_like"}}])

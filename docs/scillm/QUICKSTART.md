@@ -25,7 +25,7 @@ make chutes-front-door
     ```python
     from scillm import completion
     r = completion(
-        model=os.environ["CHUTES_MODEL_ID"],
+        model=os.environ["CHUTES_TEXT_MODEL"],
         api_base=os.environ["CHUTES_API_BASE"],
         api_key=os.environ["CHUTES_API_KEY"],
         custom_llm_provider="openai_like",
@@ -56,9 +56,9 @@ make chutes-front-door
 
     async def main():
         reqs = [
-            {"model": os.environ["CHUTES_MODEL_ID"], "messages": [{"role": "user", "content": "hi"}], "response_format": {"type": "json_object"}},
-            {"model": os.environ["CHUTES_MODEL_ID"], "messages": [{"role": "user", "content": "hi"}], "response_format": {"type": "json_object"}},
-            {"model": os.environ["CHUTES_MODEL_ID"], "messages": [{"role": "user", "content": "hi"}], "response_format": {"type": "json_object"}},
+            {"model": os.environ["CHUTES_TEXT_MODEL"], "messages": [{"role": "user", "content": "hi"}], "response_format": {"type": "json_object"}},
+            {"model": os.environ["CHUTES_TEXT_MODEL"], "messages": [{"role": "user", "content": "hi"}], "response_format": {"type": "json_object"}},
+            {"model": os.environ["CHUTES_TEXT_MODEL"], "messages": [{"role": "user", "content": "hi"}], "response_format": {"type": "json_object"}},
         ]
         resps = await batch_acompletions(
             reqs,
@@ -86,13 +86,13 @@ make chutes-front-door
   - Codex‑agent: `curl -s ${CODEX_AGENT_API_BASE}/v1/models | jq -r '.data[].id'`
 
 - **Troubleshooting quick hits**
-  - 404 model not found on Chutes → pick a model from `/v1/models` or set `CHUTES_MODEL_ID`.
+  - 404 model not found on Chutes → pick a model from `/v1/models` or set `CHUTES_TEXT_MODEL`.
   - Local model not found → ensure `ollama list` shows the tag and `OLLAMA_API_BASE` points to the host‑reachable port.
   - Bearer vs x-api-key → let paved helpers set headers; don’t add `extra_headers`.
   - Shut down shared clients: `from scillm.paved import shutdown; shutdown()`.
 
 - **Environment defaults (suggested)**
-  - `CHUTES_API_BASE=https://llm.chutes.ai/v1`, `CHUTES_API_KEY=...`, `CHUTES_MODEL_ID=<from /v1/models>`
+  - `CHUTES_API_BASE=https://llm.chutes.ai/v1`, `CHUTES_API_KEY=...`, `CHUTES_TEXT_MODEL=<from /v1/models>`
   - `OLLAMA_API_BASE=http://127.0.0.1:11434`, `OLLAMA_MODEL=qwen3:1.7b`
   - `CODEX_AGENT_API_BASE=http://127.0.0.1:8788`
 
@@ -121,12 +121,12 @@ Use the built-in 5-call sanity script (text + VLM) to verify your tenant/models 
 Before running large batches, run the paved preflight helper (Python or skill CLI) so Step 07 fails fast when the target model is missing. For VLM workloads, the pi-mono skill exposes `--dry-run` and `--inline-remote-images` so you can validate local file paths, HTTPS URLs, and inline conversions before making live calls:
 
 ```bash
-.pi/skills/scillm/run.sh preflight preflight --model "$CHUTES_MODEL_ID" --json
+.pi/skills/scillm/run.sh preflight preflight --model "$CHUTES_TEXT_MODEL" --json
 ```
 
 ```bash
 # Required env: CHUTES_API_BASE, CHUTES_API_KEY
-# Preferred: CHUTES_TEXT_MODEL (or CHUTES_MODEL_ID)
+# Preferred: CHUTES_TEXT_MODEL (or CHUTES_TEXT_MODEL)
 # For VLM prompts: CHUTES_VLM_MODEL
 
 PYTHONPATH=$(pwd) \
@@ -153,7 +153,7 @@ These are the repo‑wide defaults we ship in `.env` for convenience. They are e
 
 ```bash
 # New default models
-export CHUTES_MODEL_ID="${CHUTES_MODEL_ID:-moonshotai/Kimi-K2-Thinking}"      # text (recommended)
+export CHUTES_TEXT_MODEL="${CHUTES_TEXT_MODEL:-moonshotai/Kimi-K2-Thinking}"      # text (recommended)
 export CHUTES_VLM_MODEL="${CHUTES_VLM_MODEL:-Qwen/Qwen3-VL-235B-A22B-Instruct}" # vision
 export CHUTES_TOOLS_MODEL="${CHUTES_TOOLS_MODEL:-moonshotai/Kimi-K2-Instruct-0905}"
 
@@ -350,7 +350,7 @@ Happy Path (shared base)
   ```python
 from scillm import completion, os
 r = completion(
-  model=os.environ["CHUTES_MODEL_ID"],
+  model=os.environ["CHUTES_TEXT_MODEL"],
   api_base=os.environ["CHUTES_API_BASE"],
   api_key=os.environ["CHUTES_API_KEY"],  # becomes Authorization: Bearer
   custom_llm_provider="openai_like",
@@ -413,7 +413,7 @@ print(r.choices[0].message.get("content",""))
   ```python
   from scillm import Router, os
   router = Router(model_list=[{"model_name":"chutes","litellm_params":{
-    "model": os.environ["CHUTES_MODEL_ID"],
+    "model": os.environ["CHUTES_TEXT_MODEL"],
     "api_base": os.environ["CHUTES_API_BASE"],
     "api_key": None,
     "custom_llm_provider": "openai_like",

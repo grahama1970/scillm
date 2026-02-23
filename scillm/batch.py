@@ -1,4 +1,5 @@
 from __future__ import annotations
+"""Parallel async LLM completion engine with concurrency control and retry logic."""
 
 import asyncio as _asyncio
 import json as _json
@@ -12,6 +13,8 @@ except Exception:  # pragma: no cover - optional
 from . import acompletion as _acompletion  # reuse wrapper
 import os as _os
 from .preprocess import expand_requests_io as _expand_requests_io
+
+__all__ = ["parallel_acompletions", "parallel_acompletions_iter", "parallel_acompletions_env", "parallel_acompletions_simple", "parallel_acompletions_simple_env"]
 
 
 async def parallel_acompletions(
@@ -162,7 +165,7 @@ async def parallel_acompletions(
         _rf = req.get("response_format") or response_format
         _mt = req.get("max_tokens", default_max_tokens)
         _temp = req.get("temperature", default_temperature)
-        start = _asyncio.get_event_loop().time()
+        start = _asyncio.get_running_loop().time()
         attempt = 0
         last_err: dict | None = None
         async with sem:
@@ -256,7 +259,7 @@ async def parallel_acompletions(
                         or any(k in msg_low for k in ("timeout", "rate limit", "retry", "capacity", "temporarily", "backoff"))
                     )
                     if retry_5xx_eff and transient and status in {500,502,503,504} and attempt <= max_retries_5xx_eff:
-                        elapsed = _asyncio.get_event_loop().time() - start
+                        elapsed = _asyncio.get_running_loop().time() - start
                         if elapsed >= wall_time_s:
                             results[idx] = last_err
                             return
@@ -269,7 +272,7 @@ async def parallel_acompletions(
                     if not tenacious:
                         results[idx] = last_err
                         return
-                    elapsed = _asyncio.get_event_loop().time() - start
+                    elapsed = _asyncio.get_running_loop().time() - start
                     if elapsed >= wall_time_s:
                         results[idx] = last_err or {"error": "wall_time_exceeded", "status": status}
                         return
@@ -412,7 +415,7 @@ async def parallel_acompletions_iter(
     Each yielded item is {index, request, ok, response|error, status?, attempts, elapsed_s}.
     """
     sem = _asyncio.Semaphore(max(1, int(concurrency)))
-    loop = _asyncio.get_event_loop()
+    loop = _asyncio.get_running_loop()
     q: _asyncio.Queue = _asyncio.Queue()
 
     _router = router
