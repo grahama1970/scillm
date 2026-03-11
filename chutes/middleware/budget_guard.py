@@ -92,10 +92,16 @@ def _env_flag(name: str, default: str = "0") -> bool:
 
 
 def _get_daily_limit() -> int:
+    """Return daily call limit.
+
+    Default is 999999 (effectively unlimited) because Chutes PAYG continues
+    serving past the subscription quota as long as the account has balance.
+    Set CHUTES_DAILY_LIMIT explicitly to enforce a hard cap.
+    """
     try:
-        return int(os.getenv("CHUTES_DAILY_LIMIT", "5000"))
+        return int(os.getenv("CHUTES_DAILY_LIMIT", "999999"))
     except Exception:
-        return 5000
+        return 999999
 
 
 def _next_reset_at_iso_utc() -> str:
@@ -219,7 +225,12 @@ def normalize_ratelimit_to_budget(
     msg = str(getattr(exc, "message", str(exc)) or "Rate limit")
     lower = msg.lower()
 
-    pf = preflight_usage()  # May be None
+    # Use cached preflight data only — never make a blocking HTTP call in the
+    # error path (this runs on the async event loop).
+    cache_key = f"{(os.getenv('CHUTES_API_BASE', '').strip('/'))}:/users/me/usage"
+    cached = _USAGE_CACHE.get(cache_key)
+    pf = cached[1] if cached and cached[0] > _dt.datetime.utcnow().timestamp() else None
+
     exhausted = False
     limit = _get_daily_limit()
     remaining = None
@@ -228,7 +239,7 @@ def normalize_ratelimit_to_budget(
         remaining = int(pf.get("remaining", 0))
         exhausted = remaining <= 0
     else:
-        # Heuristic fallback based on message hints
+        # Heuristic fallback based on message hints (no HTTP call)
         exhausted = any(kw in lower for kw in ("quota", "plan", "budget", "daily"))
 
     reset_at = _next_reset_at_iso_utc()
@@ -262,7 +273,42 @@ __all__ = [
     "budget_snapshot",
     "payg_snapshot",
     "budget_metadata",
+    "BudgetMiddleware",
+    "get_budget_snapshot",
 ]
+
+
+# ── BaseMiddleware integration ────────────────────────────────────────────
+
+from scillm.proxy.middleware import BaseMiddleware as _BaseMiddleware
+
+
+class BudgetMiddleware(_BaseMiddleware):
+    """Track spend per request and expose budget info via response headers.
+
+    Pre-call: registers an attempt with the budget tracker.
+    Post-call: no-op (headers are set by the budget endpoint, not per-response).
+    On-error: observes 429s and classifies as budget_exhausted vs throttling.
+    """
+
+    async def pre_call(self, request: dict) -> dict | None:
+        budget_register_attempt()
+        return request
+
+    async def on_error(self, request: dict, error: Exception) -> None:
+        status = getattr(error, "status_code", None) or getattr(error, "status", None)
+        if status == 429:
+            from loguru import logger
+            info = normalize_ratelimit_to_budget(exc=error)
+            logger.warning("budget_guard: 429 classified as {}", info.get("type"))
+
+
+def get_budget_snapshot() -> Dict[str, Any]:
+    """Return budget snapshot for the /v1/budget endpoint."""
+    meta = budget_metadata()
+    snap = payg_snapshot() or budget_snapshot() or {}
+    meta["status"] = "ok" if snap else "no_data"
+    return meta
 
 
 def budget_register_attempt() -> Optional[Dict[str, Any]]:

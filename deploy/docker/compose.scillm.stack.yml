@@ -7,16 +7,15 @@ services:
     # ports:
     #   - "8529:8529"
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://127.0.0.1:8529/_api/version"]
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:8529/_api/version"]
       interval: 10s
       timeout: 3s
       retries: 10
 
   redis:
     image: redis:7-alpine
-    # Internal only to avoid host port conflicts
-    # ports:
-    #   - "6379:6379"
+    ports:
+      - "6379:6379"
 
   ollama:
     image: ollama/ollama:latest
@@ -30,7 +29,7 @@ services:
     build:
       context: ../..
       dockerfile: deploy/docker/Dockerfile.scillm
-    command: ["sh","-lc","PYTHONPATH=src uvicorn codeworld.bridge.server:app --host 0.0.0.0 --port 8887"]
+    command: ["sh","-lc","PYTHONPATH=/app/src uvicorn codeworld.bridge.server:app --host 0.0.0.0 --port 8887"]
     environment:
       - CODEWORLD_BASE=http://0.0.0.0:8887
       - CODEWORLD_SCORING_NONET=1
@@ -42,7 +41,7 @@ services:
       - redis
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "curl", "-sf", "http://127.0.0.1:8887/healthz"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8887/healthz')"]
       interval: 10s
       timeout: 5s
       retries: 6
@@ -57,17 +56,24 @@ services:
     build:
       context: ../..
       dockerfile: deploy/docker/Dockerfile.scillm
-    command: ["sh","-lc","scillm-proxy start --host 0.0.0.0 --port 4000"]
+    command: ["uvicorn", "scillm.proxy.app:app", "--host", "0.0.0.0", "--port", "4001"]
+    env_file: ["../../.env"]
     environment:
-      - LITELLM_MODE=PRODUCTION
-      - LITELLM_ENABLE_CODEWORLD=1
-      - LITELLM_ENABLE_LEAN4=1
-    ports:
-      - "4000:4000"
-    depends_on:
-      - arangodb
-      - redis
-      - codeworld-bridge
+      PYTHONPATH: /app/src
+      CONFIG_FILE_PATH: /app/config.yaml
+      LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY:-sk-dev-proxy-123}
+      METRICS_ENV: ${METRICS_ENV:-dev}
+      REDIS_HOST: 127.0.0.1
+      REDIS_PORT: "6379"
+    network_mode: host
+    volumes:
+      - "../../local/proxy_server_config.yaml:/app/config.yaml:ro"
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "-H", "Authorization: Bearer $${LITELLM_MASTER_KEY:-sk-dev-proxy-123}", "http://127.0.0.1:4001/health/liveliness"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
 
 volumes:
   ollama_models: {}

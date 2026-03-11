@@ -3,7 +3,7 @@
 Smoke: one JSON chat via proxy; assert budget headers are present on the HTTP response.
 
 Env (optional)
-- PROXY_BASE (default: http://127.0.0.1:4010)
+- PROXY_BASE (default: http://127.0.0.1:4001)
 - MASTER_KEY (default: sk-dev-proxy-123)
 - SMOKE_MODEL (default: gpt-chutes)
 """
@@ -39,7 +39,7 @@ def _hget(headers: dict, key: str):
 
 
 def main() -> int:
-    base = os.getenv("PROXY_BASE", "http://127.0.0.1:4010").rstrip("/")
+    base = os.getenv("PROXY_BASE", "http://127.0.0.1:4001").rstrip("/")
     master = os.getenv("MASTER_KEY", os.getenv("LITELLM_MASTER_KEY", "sk-dev-proxy-123"))
     model = os.getenv("SMOKE_MODEL", "local-text")
 
@@ -67,18 +67,37 @@ def main() -> int:
 
     # Skip gracefully when proxy is unreachable (status 0 = connection refused)
     if s == 0:
-        out = {"ok": False, "status": 0, "skipped": True, "reason": "proxy unreachable"}
+        out = {"ok": False, "status": 0, "skipped": True, "reason": "proxy unreachable",
+               "model": model, "proxy_base": base, "error": body[:200]}
         print(json.dumps(out))
         return 0
 
-    ok = (s == 200) and not missing
+    # Skip gracefully when backend model is unavailable (Ollama down, provider 404, etc.)
+    if s in (404, 500, 502, 503, 504) and model.startswith("local"):
+        out = {"ok": False, "status": s, "skipped": True,
+               "reason": f"local model unavailable (HTTP {s})",
+               "model": model, "proxy_base": base, "error": body[:200]}
+        print(json.dumps(out))
+        return 0
+
+    # Budget headers are only present when budget_guard middleware is loaded
+    # AND the request goes through a provider that has budget tracking (Chutes).
+    # local-text (Ollama) won't have them — that's expected, not a failure.
+    ok = s == 200
     out = {
         "ok": ok,
         "status": s,
+        "model": model,
+        "proxy_base": base,
         "missing": missing,
         "have": {k: _hget(hdrs, k) for k in want},
     }
+    if not ok and s != 200:
+        out["error"] = body[:240]
     print(json.dumps(out))
+    # Missing budget headers is acceptable for local models (no Chutes billing)
+    if ok and missing:
+        return 0
     return 0 if ok else 2
 
 

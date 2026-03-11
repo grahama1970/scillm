@@ -3,9 +3,22 @@ services:
     build:
       context: ../..
       dockerfile: deploy/docker/Dockerfile.scillm
-    command: ["sh","-lc","scillm-proxy start --host 0.0.0.0 --port 4000"]
+    command: ["uvicorn", "scillm.proxy.app:app", "--host", "0.0.0.0", "--port", "4001"]
+    env_file: ["../../.env"]
     environment:
-      - LITELLM_MODE=PRODUCTION
-    ports:
-      - "4000:4000"
-
+      PYTHONPATH: /app/src
+      CONFIG_FILE_PATH: /app/config.yaml
+      LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY:-sk-dev-proxy-123}
+      METRICS_ENV: ${METRICS_ENV:-dev}
+      REDIS_HOST: ${REDIS_HOST:-127.0.0.1}
+      REDIS_PORT: ${REDIS_PORT:-6379}
+    restart: unless-stopped
+    network_mode: host
+    volumes:
+      - "../../local/proxy_server_config.yaml:/app/config.yaml:ro"
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "-H", "Authorization: Bearer $${LITELLM_MASTER_KEY:-sk-dev-proxy-123}", "http://127.0.0.1:4001/health/liveliness"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 30s

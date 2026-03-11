@@ -8,7 +8,7 @@ import httpx
 
 
 def main() -> int:
-    base = os.getenv("PROXY_BASE", "http://127.0.0.1:4010").rstrip("/")
+    base = os.getenv("PROXY_BASE", "http://127.0.0.1:4001").rstrip("/")
     prom = os.getenv("PROM_BASE", "http://127.0.0.1:9090").rstrip("/")
     key = os.getenv("PROXY_KEY", os.getenv("LITELLM_MASTER_KEY", "sk-dev-proxy-123"))
 
