@@ -3,9 +3,13 @@ from __future__ import annotations
 
 import asyncio as _asyncio
 import json as _json
+from pathlib import Path as _Path
 from typing import List, Dict, AsyncIterator, Any, Optional, Callable
 
 import openai as _openai
+from loguru import logger as _logger
+
+from .checkpoint import load_checkpoint as _load_checkpoint, append_checkpoint as _append_checkpoint
 
 try:
     from json_repair import repair_json as _repair_json_lib
@@ -44,11 +48,7 @@ async def _acompletion(*, model: str, messages: list, api_base: str, api_key: st
 
 __all__ = ["parallel_acompletions", "parallel_acompletions_iter", "parallel_acompletions_env", "parallel_acompletions_simple", "parallel_acompletions_simple_env"]
 
-
-# ---------------------------------------------------------------------------
-# Shared helpers (used by both parallel_acompletions and _iter variant)
-# ---------------------------------------------------------------------------
-
+# -- Shared helpers --
 
 def _normalize_messages(messages: Any) -> list:
     """Normalize messages to OpenAI format. Accepts plain string or list of dicts."""
@@ -194,12 +194,22 @@ async def parallel_acompletions(
     source: str | list[str] | None = None,
     grounding_threshold: float = 0.7,
     grounding_retries: int = 2,
+    # Checkpoint / resume
+    checkpoint_path: str | _Path | None = None,
 ) -> list:
     """Batch async chat completions with bounded concurrency and optional tenacity.
 
     Each request item may contain: {model, messages, api_base?, api_key?, max_tokens?, temperature?, response_format?}.
     Returns a list ordered like `requests`. On failure, an item is a dict: {"error": str, "status": int|None}.
+
+    When *checkpoint_path* is set, each completed result is appended as JSONL.
+    If the file already exists, completed indices are resumed (skipped).
     """
+    _ckpt = _Path(checkpoint_path) if checkpoint_path is not None else None
+    _resumed: dict[int, dict] = _load_checkpoint(_ckpt) if _ckpt else {}
+    if _resumed:
+        _logger.info(f"Resumed {len(_resumed)} / {len(requests)} from checkpoint")
+
     sem = _asyncio.Semaphore(max(1, int(concurrency)))
     results: list = [None] * len(requests)
 
@@ -264,7 +274,15 @@ async def parallel_acompletions(
     backoff_base_5xx_eff = float(_os.environ.get("SCILLM_BACKOFF_BASE_5XX", "0.5")) if backoff_base_5xx is None else float(backoff_base_5xx)
     backoff_cap_5xx_eff = float(_os.environ.get("SCILLM_BACKOFF_CAP_5XX", "8")) if backoff_cap_5xx is None else float(backoff_cap_5xx)
 
+    def _set_result(idx: int, value: dict) -> None:
+        results[idx] = value
+        if _ckpt is not None:
+            _append_checkpoint(_ckpt, {"index": idx, **value})
+
     async def _one(idx: int, req: dict):
+        if idx in _resumed:
+            results[idx] = _resumed[idx]
+            return
         model = req.get("model")
         messages = _normalize_messages(req.get("messages"))
         _api_base = req.get("api_base") or api_base
@@ -334,13 +352,13 @@ async def parallel_acompletions(
                                 except Exception:
                                     pass
                                 continue
-                            results[idx] = {
+                            _set_result(idx, {
                                 "error": "invalid_json",
                                 "status": None,
                                 "content": None,
                                 "raw": str(content)[:240],
                                 "repaired": False,
-                            }
+                            })
                             return
                     # Grounding verification (opt-in via source field)
                     _src = _resolve_source(req.get("source")) or _batch_source_text
@@ -364,7 +382,7 @@ async def parallel_acompletions(
                             ]
                             continue
 
-                    results[idx] = {
+                    _set_result(idx, {
                         "error": None,
                         "status": None,
                         "content": content,
@@ -372,7 +390,7 @@ async def parallel_acompletions(
                         "response": resp,
                         "grounding_score": _g_score,
                         "grounding_attempts": _g_attempts,
-                    }
+                    })
                     return
                 except Exception as exc:  # normalize transient/backoff
                     status = getattr(exc, "status", None) or getattr(exc, "status_code", None) or getattr(exc, "http_status", None)
@@ -385,7 +403,7 @@ async def parallel_acompletions(
                     if retry_5xx_eff and transient and status in {500,502,503,504} and attempt <= max_retries_5xx_eff:
                         elapsed = _asyncio.get_running_loop().time() - start
                         if elapsed >= wall_time_s:
-                            results[idx] = last_err
+                            _set_result(idx, last_err)
                             return
                         delay = min(backoff_cap_5xx_eff, backoff_base_5xx_eff * (2 ** max(0, attempt - 1)))
                         try:
@@ -394,11 +412,11 @@ async def parallel_acompletions(
                             pass
                         continue
                     if not tenacious:
-                        results[idx] = last_err
+                        _set_result(idx, last_err)
                         return
                     elapsed = _asyncio.get_running_loop().time() - start
                     if elapsed >= wall_time_s:
-                        results[idx] = last_err or {"error": "wall_time_exceeded", "status": status}
+                        _set_result(idx, last_err or {"error": "wall_time_exceeded", "status": status})
                         return
                     msg = str(exc).lower()
                     transient = (
@@ -406,7 +424,7 @@ async def parallel_acompletions(
                         any(k in msg for k in ("timeout", "rate limit", "retry", "capacity", "temporarily", "backoff"))
                     )
                     if not transient:
-                        results[idx] = last_err
+                        _set_result(idx, last_err)
                         return
                     delay = min(backoff_cap_s, backoff_base * (2 ** max(0, attempt - 1)))
                     try:
@@ -540,11 +558,20 @@ async def parallel_acompletions_iter(
     source: str | list[str] | None = None,
     grounding_threshold: float = 0.7,
     grounding_retries: int = 2,
+    # Checkpoint / resume
+    checkpoint_path: str | _Path | None = None,
 ) -> AsyncIterator[Dict[str, Any]]:
     """Yield results as they complete (as_completed style).
 
     Each yielded item is {index, request, ok, response|error, status?, attempts, elapsed_s}.
+    When *checkpoint_path* is set, completed results are appended as JSONL.
+    If the file already exists, resumed results are yielded first with ``"resumed": True``.
     """
+    _ckpt = _Path(checkpoint_path) if checkpoint_path is not None else None
+    _resumed: dict[int, dict] = _load_checkpoint(_ckpt) if _ckpt else {}
+    if _resumed:
+        _logger.info(f"Resumed {len(_resumed)} / {len(requests)} from checkpoint")
+
     sem = _asyncio.Semaphore(max(1, int(concurrency)))
     loop = _asyncio.get_running_loop()
     q: _asyncio.Queue = _asyncio.Queue()
@@ -577,7 +604,14 @@ async def parallel_acompletions_iter(
             elif text_default:
                 r["model"] = text_default
 
+    async def _emit(result: dict) -> None:
+        if _ckpt is not None:
+            _append_checkpoint(_ckpt, result)
+        await q.put(result)
+
     async def _worker(idx: int, req: dict):
+        if idx in _resumed:
+            return  # already completed — resumed results yielded separately
         model = req.get("model")
         messages = _normalize_messages(req.get("messages"))
         _api_base = req.get("api_base") or api_base
@@ -640,7 +674,7 @@ async def parallel_acompletions_iter(
                                 delay = min(backoff_cap_s, backoff_base * (2 ** max(0, attempt - 1)))
                                 await _asyncio.sleep(delay)
                                 continue
-                            await q.put({
+                            await _emit({
                                 "index": idx,
                                 "request": req,
                                 "ok": False,
@@ -674,7 +708,7 @@ async def parallel_acompletions_iter(
                             ]
                             continue
 
-                    await q.put({
+                    await _emit({
                         "index": idx,
                         "request": req,
                         "ok": True,
@@ -691,7 +725,7 @@ async def parallel_acompletions_iter(
                     status = getattr(exc, "status", None) or getattr(exc, "status_code", None) or getattr(exc, "http_status", None)
                     last_err = {"error": str(exc), "status": status}
                     if not tenacious:
-                        await q.put({
+                        await _emit({
                             "index": idx,
                             "request": req,
                             "ok": False,
@@ -703,7 +737,7 @@ async def parallel_acompletions_iter(
                         })
                         return
                     if (loop.time() - start) >= wall_time_s:
-                        await q.put({
+                        await _emit({
                             "index": idx,
                             "request": req,
                             "ok": False,
@@ -722,7 +756,7 @@ async def parallel_acompletions_iter(
                         any(k in msg for k in ("timeout", "rate limit", "retry", "capacity", "temporarily", "backoff"))
                     )
                     if not transient:
-                        await q.put({
+                        await _emit({
                             "index": idx,
                             "request": req,
                             "ok": False,
@@ -735,6 +769,12 @@ async def parallel_acompletions_iter(
                         return
                     delay = min(backoff_cap_s, backoff_base * (2 ** max(0, attempt - 1)))
                     await _asyncio.sleep(delay)
+
+    # Yield resumed results first (marked so caller can distinguish)
+    for _r_idx in sorted(_resumed):
+        resumed_item = dict(_resumed[_r_idx])
+        resumed_item["resumed"] = True
+        yield resumed_item
 
     tasks = [loop.create_task(_worker(i, r or {})) for i, r in enumerate(requests)]
 

@@ -149,3 +149,48 @@ def estimate_cost_usd(model_id: str, prompt_tokens: Optional[int], completion_to
     if cp is not None:
         cost += (ct / 1000.0) * float(cp)
     return round(cost, 6)
+
+
+# ---------------------------------------------------------------------------
+# Cost header middleware
+# ---------------------------------------------------------------------------
+
+from scillm.proxy.middleware import BaseMiddleware as _BaseMiddleware
+
+
+class CostHeaderMiddleware(_BaseMiddleware):
+    """Inject per-request cost headers into the response.
+
+    Reads the ``usage`` field from the response dict (non-streaming only)
+    and calculates cost using :func:`estimate_cost_usd`.  Stashes headers
+    in ``response["_cost_headers"]`` for the app layer to extract and set
+    on the HTTP response.
+
+    For streaming responses the post_call receives ``{"stream": True}``
+    and is skipped — streaming cost is handled via a final SSE event.
+    """
+
+    async def post_call(self, request: dict, response: Any) -> Any:
+        if not isinstance(response, dict):
+            return response
+        # Skip streaming marker dicts
+        if response.get("stream"):
+            return response
+
+        usage = response.get("usage") or {}
+        prompt_tokens = usage.get("prompt_tokens")
+        completion_tokens = usage.get("completion_tokens")
+        model = response.get("model") or request.get("model") or ""
+
+        cost = estimate_cost_usd(model, prompt_tokens, completion_tokens)
+
+        headers: Dict[str, str] = {}
+        if cost is not None:
+            headers["x-cost-usd"] = f"{cost:.6f}"
+        else:
+            headers["x-cost-usd"] = "unknown"
+        headers["x-cost-input-tokens"] = str(int(prompt_tokens or 0))
+        headers["x-cost-output-tokens"] = str(int(completion_tokens or 0))
+
+        response["_cost_headers"] = headers
+        return response

@@ -12,6 +12,7 @@ import uuid
 from contextlib import asynccontextmanager
 from typing import Any
 
+import httpx
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from loguru import logger
@@ -29,6 +30,9 @@ _config: ProxyConfig | None = None
 _router: Router | None = None
 _middleware_chain: MiddlewareChain | None = None
 _start_time: float = 0.0
+_embedding_client: httpx.AsyncClient | None = None
+
+EMBEDDING_SERVICE_URL = os.environ.get("EMBEDDING_SERVICE_URL", "http://127.0.0.1:8602")
 
 
 # ---------------------------------------------------------------------------
@@ -77,6 +81,14 @@ def _load_middleware(config: ProxyConfig) -> list[BaseMiddleware]:
     except (ImportError, Exception) as exc:
         logger.debug("BudgetMiddleware not loaded: {}", exc)
 
+    # Cost header middleware — injects x-cost-usd headers
+    try:
+        from chutes.middleware.pricing import CostHeaderMiddleware
+        middlewares.append(CostHeaderMiddleware())
+        logger.info("CostHeaderMiddleware loaded")
+    except (ImportError, Exception) as exc:
+        logger.debug("CostHeaderMiddleware not loaded: {}", exc)
+
     return middlewares
 
 
@@ -88,13 +100,14 @@ def _load_middleware(config: ProxyConfig) -> list[BaseMiddleware]:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Load config, init router and middleware on startup."""
-    global _config, _router, _middleware_chain, _start_time
+    global _config, _router, _middleware_chain, _start_time, _embedding_client
 
     config_path = os.environ.get("CONFIG_FILE_PATH", "local/proxy_server_config.yaml")
     logger.info("Loading config from {}", config_path)
     _config = load_config(config_path)
     _router = Router(_config)
     _middleware_chain = MiddlewareChain(_load_middleware(_config))
+    _embedding_client = httpx.AsyncClient(base_url=EMBEDDING_SERVICE_URL, timeout=30.0)
     _start_time = time.monotonic()
 
     logger.info(
@@ -106,6 +119,8 @@ async def lifespan(app: FastAPI):
     yield
     # Graceful shutdown: drain in-flight requests before closing clients
     logger.info("scillm proxy shutting down — draining connections...")
+    if _embedding_client:
+        await _embedding_client.aclose()
     if _router:
         await _router.close()
     logger.info("scillm proxy shut down cleanly")
@@ -202,7 +217,7 @@ async def chat_completions(request: Request):
         result = await _router.complete(model, messages, **kwargs)
 
         if stream:
-            response = await stream_response(result)
+            response = await stream_response(result, model=model)
             # Post-call middleware (observe only for streaming)
             await _middleware_chain.run_post_call(body, {"stream": True})
             return response
@@ -211,12 +226,19 @@ async def chat_completions(request: Request):
             response_dict = result.model_dump()
             response_dict = await _middleware_chain.run_post_call(body, response_dict)
             elapsed = time.monotonic() - start
+
+            # Extract cost headers stashed by CostHeaderMiddleware
+            cost_headers = response_dict.pop("_cost_headers", {})
+
+            resp_headers = {
+                "x-request-id": request_id,
+                "x-latency-ms": str(int(elapsed * 1000)),
+            }
+            resp_headers.update(cost_headers)
+
             return JSONResponse(
                 content=response_dict,
-                headers={
-                    "x-request-id": request_id,
-                    "x-latency-ms": str(int(elapsed * 1000)),
-                },
+                headers=resp_headers,
             )
 
     except (ProxyError, MiddlewareReject):
@@ -290,6 +312,11 @@ async def scillm_models(request: Request):
             "deployments": len(group.deployments),
             "models": [d.model for d in group.deployments],
         }
+    groups["embedding"] = {
+        "deployments": 1,
+        "models": ["all-MiniLM-L6-v2"],
+        "endpoint": EMBEDDING_SERVICE_URL,
+    }
     return {"groups": groups, "aliases": _config.aliases}
 
 
@@ -317,6 +344,13 @@ async def openai_models(request: Request):
             "created": int(_start_time),
             "owned_by": "scillm",
         })
+    # Embedding model (served by local embedding service, not litellm router)
+    models.append({
+        "id": "embedding",
+        "object": "model",
+        "created": int(_start_time),
+        "owned_by": "scillm",
+    })
     return {"object": "list", "data": models}
 
 
@@ -332,6 +366,72 @@ async def budget_snapshot(request: Request):
         return get_budget_snapshot()
     except (ImportError, AttributeError):
         return {"status": "budget_guard_not_loaded"}
+
+
+# ---------------------------------------------------------------------------
+# Embeddings (proxied to local embedding service)
+# ---------------------------------------------------------------------------
+
+
+@app.post("/v1/embeddings")
+async def embeddings(request: Request):
+    """OpenAI-compatible embeddings endpoint.
+
+    Translates to the local embedding service at EMBEDDING_SERVICE_URL
+    and returns results in OpenAI format.
+    """
+    auth_err = _check_auth(request)
+    if auth_err:
+        raise ProxyError(401, auth_err, "authentication_error")
+
+    body = await request.json()
+    raw_input = body.get("input")
+    if raw_input is None:
+        raise ProxyError(400, "input is required", "invalid_request_error")
+
+    # Normalize input to list of strings (OpenAI spec allows string or list)
+    if isinstance(raw_input, str):
+        texts = [raw_input]
+    elif isinstance(raw_input, list):
+        texts = [str(t) for t in raw_input]
+    else:
+        raise ProxyError(400, "input must be a string or list of strings", "invalid_request_error")
+
+    if not texts:
+        raise ProxyError(400, "input must not be empty", "invalid_request_error")
+
+    if _embedding_client is None:
+        raise ProxyError(503, "Proxy not ready — startup incomplete", "service_unavailable")
+
+    try:
+        resp = await _embedding_client.post("/embed/batch", json={"texts": texts})
+        resp.raise_for_status()
+    except httpx.ConnectError:
+        raise ProxyError(502, "Embedding service unreachable", "upstream_error")
+    except httpx.HTTPStatusError as exc:
+        raise ProxyError(
+            502,
+            f"Embedding service returned {exc.response.status_code}",
+            "upstream_error",
+        )
+    except httpx.TimeoutException:
+        raise ProxyError(502, "Embedding service timed out", "upstream_error")
+
+    result = resp.json()
+    vectors = result.get("vectors", [])
+    model_name = result.get("model", "unknown")
+
+    data = [
+        {"object": "embedding", "index": i, "embedding": vec}
+        for i, vec in enumerate(vectors)
+    ]
+
+    return JSONResponse(content={
+        "object": "list",
+        "data": data,
+        "model": model_name,
+        "usage": {"prompt_tokens": 0, "total_tokens": 0},
+    })
 
 
 # ---------------------------------------------------------------------------
