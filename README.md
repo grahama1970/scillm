@@ -19,8 +19,11 @@ Single-tenant, OpenAI-compatible proxy + `/scillm` skill. Originally forked from
 #    Required: CHUTES_API_KEY, CHUTES_API_BASE
 #    Optional: DEEPSEEK_API, GEMINI_API_KEY, OPENROUTER_API_KEY, MOONSHOT_API_KEY
 
-# 2. Build and start
-docker compose -p scillm -f deploy/docker/compose.scillm.core.yml up -d --build
+# 2. Build and start (proxy + Redis)
+docker compose up -d --build
+
+# 2b. Or include local Ollama for offline models
+docker compose --profile local up -d --build
 
 # 3. Verify
 curl -s http://localhost:4001/health/liveliness
@@ -35,7 +38,7 @@ curl http://localhost:4001/v1/chat/completions \
 
 Makefile shortcuts: `make proxy-rebuild` (build+start), `make proxy-up`, `make proxy-down`, `make proxy-logs`
 
-**Container details:** `python:3.12-slim`, `uvicorn` on port 4001, `network_mode: host` (for local Ollama access), config mounted from `local/proxy_server_config.yaml`, health check every 15s.
+**Container details:** `python:3.12-slim`, `uvicorn` on port 4001, `network_mode: host` (for local Ollama access), config mounted from `local/proxy_server_config.yaml`, health check every 15s. Redis included for caching and request logging. Ollama available via `--profile local`.
 
 ## Security
 

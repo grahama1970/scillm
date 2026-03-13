@@ -1,21 +1,21 @@
 # scillm Makefile — proxy operations, smokes, and tooling
-# Production proxy: docker compose -p scillm -f deploy/docker/compose.scillm.core.yml up -d --build
+# Production proxy: docker compose up -d --build
 
 # ── Proxy ─────────────────────────────────────────────────────────────
 .PHONY: proxy-up proxy-down proxy-logs proxy-rebuild
 
 proxy-up:
-	docker compose -p scillm -f deploy/docker/compose.scillm.core.yml up -d
-	@echo "scillm proxy on :4001"
+	docker compose -p scillm up -d
+	@echo "scillm proxy + Redis on :4001"
 
 proxy-down:
-	docker compose -p scillm -f deploy/docker/compose.scillm.core.yml down
+	docker compose -p scillm down
 
 proxy-logs:
-	docker compose -p scillm -f deploy/docker/compose.scillm.core.yml logs -f --tail=200
+	docker compose -p scillm logs -f --tail=200
 
 proxy-rebuild:
-	docker compose -p scillm -f deploy/docker/compose.scillm.core.yml up -d --build
+	docker compose -p scillm up -d --build
 	@echo "scillm proxy rebuilt and running on :4001"
 
 # ── Chutes Endpoint Toggle ────────────────────────────────────────────
@@ -95,52 +95,6 @@ check-root-layout:
 check-no-secrets-logs:
 	@! rg -n "Authorization:\s*Bearer\s+\w" -S . || (echo "Found Authorization token in repo logs/text" && exit 1)
 	@! rg -n "x-api-key:\s*\w" -S . || (echo "Found x-api-key in repo logs/text" && exit 1)
-
-# ── Grafana ───────────────────────────────────────────────────────────
-.PHONY: grafana-import grafana-audit grafana-audit-quick grafana-screens
-
-grafana-import:
-	@if [ -z "$$GRAFANA_URL" ] || [ -z "$$GRAFANA_TOKEN" ]; then \
-	  echo "Usage: GRAFANA_URL=... GRAFANA_TOKEN=... make grafana-import"; \
-	  exit 2; \
-	fi
-	python3 scripts/grafana_import_dashboards.py
-
-grafana-audit:
-	@echo "Running Grafana audit (smoke + panel queries)"
-	@mkdir -p artifacts
-	@ts=$$(date +%Y%m%dT%H%M%S); \
-	  out=artifacts/grafana_audit_$${ts}.json; \
-	  echo "Writing report to $$out"; \
-	  uv run -- python scripts/grafana_audit.py > $$out || true; \
-	  echo "Summary:"; jq -r '{ok, env, window, base} | @json' $$out
-
-grafana-audit-quick:
-	@mkdir -p artifacts
-	@ts=$$(date +%Y%m%dT%H%M%S); out=artifacts/grafana_audit_$${ts}.json; \
-	  uv run -- python scripts/grafana_audit.py > $$out || true; \
-	  echo "Summary:"; jq -r '{ok, env, window, base} | @json' $$out
-
-grafana-screens:
-	@echo "Capturing full-page screenshots for core dashboards"
-	@mkdir -p artifacts
-	@uv run -- python scripts/grafana_screenshot.py
-	@echo "Saved screenshots under artifacts/."
-
-# ── Prometheus ────────────────────────────────────────────────────────
-.PHONY: prom-run-docker
-
-prom-run-docker:
-	@printf '%s\n' \
-	  'global:' \
-	  '  scrape_interval: 15s' \
-	  'scrape_configs:' \
-	  '- job_name: scillm' \
-	  '  static_configs:' \
-	  "  - targets: ['host.docker.internal:4001']" > /tmp/prom.yml
-	@docker rm -f scillm-prom >/dev/null 2>&1 || true
-	docker run -d --name scillm-prom --add-host=host.docker.internal:host-gateway -p 9090:9090 -v /tmp/prom.yml:/etc/prometheus/prometheus.yml prom/prometheus:latest
-	@echo "Prometheus listening on :9090"
 
 # ── Budget Gateway Lite ───────────────────────────────────────────────
 .PHONY: budget-lite-build budget-lite-run budget-lite-smoke

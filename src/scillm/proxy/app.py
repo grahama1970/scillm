@@ -66,6 +66,8 @@ def _load_middleware(config: ProxyConfig) -> list[BaseMiddleware]:
       2. ConcurrencyMiddleware — acquires provider semaphore (pre_call), releases (post_call/on_error)
       3. JsonGuard — validates JSON responses, repairs or raises (post_call)
       4. BudgetMiddleware — tracks spend, exposes via headers (post_call)
+      5. CostHeaderMiddleware — injects x-cost-usd headers (post_call)
+      6. RequestLogMiddleware — logs to Redis/JSONL (post_call, on_error) — MUST be last
     """
     from chutes.middleware.vlm_router import VlmRouter
     from chutes.middleware.concurrency_guard import ConcurrencyMiddleware
@@ -88,6 +90,14 @@ def _load_middleware(config: ProxyConfig) -> list[BaseMiddleware]:
         logger.info("CostHeaderMiddleware loaded")
     except (ImportError, Exception) as exc:
         logger.debug("CostHeaderMiddleware not loaded: {}", exc)
+
+    # Request logging — MUST be last (reads cost headers set by CostHeaderMiddleware)
+    try:
+        from chutes.middleware.request_log import RequestLogMiddleware
+        middlewares.append(RequestLogMiddleware())
+        logger.info("RequestLogMiddleware loaded")
+    except (ImportError, Exception) as exc:
+        logger.debug("RequestLogMiddleware not loaded: {}", exc)
 
     return middlewares
 
@@ -352,6 +362,28 @@ async def openai_models(request: Request):
         "owned_by": "scillm",
     })
     return {"object": "list", "data": models}
+
+
+@app.get("/v1/scillm/logs")
+async def scillm_logs(request: Request, date: str = "", limit: int = 100):
+    """Query request logs. Returns cost summary + recent records.
+
+    Usage: GET /v1/scillm/logs?date=2026-03-13&limit=50
+    Default: today's date, last 100 records.
+    """
+    auth_err = _check_auth(request)
+    if auth_err:
+        raise ProxyError(401, auth_err, "authentication_error")
+
+    from datetime import datetime, timezone
+    if not date:
+        date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+    try:
+        from chutes.middleware.request_log import get_cost_summary
+        return await get_cost_summary(date)
+    except (ImportError, Exception) as exc:
+        return {"error": f"Request logging not available: {exc}"}
 
 
 @app.get("/v1/budget")
