@@ -156,11 +156,11 @@ async def _reject_handler(request: Request, exc: MiddlewareReject):
 # Prometheus metrics (optional)
 # ---------------------------------------------------------------------------
 
+_prom_available = False
 try:
-    from prometheus_client import make_asgi_app as _make_prom_app
+    from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
 
-    _metrics_app = _make_prom_app()
-    app.mount("/metrics", _metrics_app)
+    _prom_available = True
 except ImportError:
     logger.warning("prometheus_client not installed, /metrics disabled")
 
@@ -464,6 +464,21 @@ async def embeddings(request: Request):
         "model": model_name,
         "usage": {"prompt_tokens": 0, "total_tokens": 0},
     })
+
+
+# ---------------------------------------------------------------------------
+# Prometheus /metrics endpoint
+# ---------------------------------------------------------------------------
+
+
+@app.get("/metrics")
+async def metrics():
+    """Prometheus metrics endpoint."""
+    if not _prom_available:
+        raise ProxyError(404, "prometheus_client not installed", "not_found_error")
+    from starlette.responses import Response
+
+    return Response(content=generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
 
 # ---------------------------------------------------------------------------
