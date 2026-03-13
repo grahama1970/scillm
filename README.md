@@ -1,7 +1,7 @@
 <p align="center">
   <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="local/artifacts/logo/SciLLM_balanced.dark.svg" />
-    <img src="local/artifacts/logo/SciLLM_balanced.animated.light.svg" alt="scillm" width="400" />
+    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/logo/SciLLM_balanced.dark.svg" />
+    <img src="docs/assets/logo/SciLLM_balanced.animated.light.svg" alt="scillm" width="400" />
   </picture>
 </p>
 
@@ -15,9 +15,9 @@ Single-tenant, OpenAI-compatible proxy + `/scillm` skill. Originally forked from
 ## Quick Start
 
 ```bash
-# 1. Configure API keys in .env
-#    Required: CHUTES_API_KEY, CHUTES_API_BASE
-#    Optional: DEEPSEEK_API, GEMINI_API_KEY, OPENROUTER_API_KEY, MOONSHOT_API_KEY
+# 1. Configure API keys
+cp .env.example .env
+# Edit .env — set at minimum: CHUTES_API_KEY, CHUTES_API_BASE
 
 # 2. Build and start (proxy + Redis)
 docker compose up -d --build
@@ -157,7 +157,7 @@ Results carry `grounding_score` (float) and `grounding_attempts` (int). Uses `ra
 ## Architecture
 
 <p align="center">
-  <img src="local/artifacts/scillm_architecture.svg" alt="scillm architecture diagram" width="700" />
+  <img src="docs/assets/scillm_architecture.svg" alt="scillm architecture diagram" width="700" />
 </p>
 
 ## Model Groups
@@ -206,10 +206,12 @@ Test files: `tests/test_proxy_e2e.py` (contract tests), `tests/test_proxy_advers
 `/scillm` is a composable building block in a system of 230+ agent skills. Any skill that needs an LLM completion calls `/scillm` — it handles provider selection, retries, and repair. Skills chain together to build pipelines:
 
 <p align="center">
-  <img src="local/artifacts/scillm_composable_skill.png" alt="scillm composable skill diagram" width="700" />
+  <img src="docs/assets/scillm_composable_skill.png" alt="scillm composable skill diagram" width="700" />
 </p>
 
 Adding a provider or changing a model in the proxy config updates every skill in the chain at once. No skill needs to know which provider is behind `model: "text"`.
+
+The `/scillm` skill definition is included in [`skills/scillm/`](skills/scillm/) — see [`SKILL.md`](skills/scillm/SKILL.md) for the full reference with code examples for single calls, batch calls, VLM auto-routing, and source grounding.
 
 ## Ops Endpoints
 
@@ -220,6 +222,7 @@ Adding a provider or changing a model in the proxy config updates every skill in
 | `GET /v1/scillm/models` | Deployed models with group membership |
 | `GET /v1/models` | OpenAI-compatible model list |
 | `GET /v1/budget` | Current daily spend and remaining budget |
+| `GET /v1/scillm/logs` | Cost summary by model for a given date |
 | `GET /metrics` | Prometheus counters (requests, errors, latency by group) |
 
 ## Appendix: Relationship to litellm

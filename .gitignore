@@ -14,8 +14,9 @@ venv/
 
 # Secrets & env
 .env
-.env.*
 *.env
+.env.*
+!.env.example
 
 # IDE
 .idea/
@@ -47,7 +48,7 @@ local/
 /notebooks/
 /adapters/
 /dashboards/
-/docs/
+/docs/my-website/
 /examples/
 /litellm-proxy-extras/
 /patches/
