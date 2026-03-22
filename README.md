@@ -62,6 +62,8 @@ Every provider scillm targets speaks OpenAI-compatible API (`/v1/chat/completion
 - **Source grounding verification** — Pass source text, scillm verifies the response is grounded using fuzzy matching, retries with progressive prompts if not.
 - **Fallback cascade with circuit breaker** — `text` → `text-deepseek` → `text-gemini`. 3 failures trigger a 20-second cooldown per group.
 - **5xx-specific backoff** — Server errors (503) get different retry timing than rate limits (429).
+- **Gemini native file support** — Send PDFs, images, and ZIP archives via `inlineData` parts when targeting Gemini. ZIP files are auto-exploded into individual parts (text as text, binaries as native `inlineData`).
+- **Ollama auto-routing** — Any locally-pulled Ollama model works without a config entry. The proxy auto-detects unknown model names and routes them to the local Ollama instance.
 
 ## How to Call It
 
@@ -167,11 +169,14 @@ Callers say `model: "text"` — the proxy picks the provider. When models change
 | Group | Provider | Model | Fallback chain |
 |-------|----------|-------|----------------|
 | `text` | Chutes | DeepSeek-V3 | → text-deepseek → text-gemini |
+| `text-gemini` | Google | Gemini 2.5 Flash | (none) |
+| `text-gemini-3` | Google | Gemini 3 Flash Preview | (none) |
 | `vlm` | Chutes | Qwen3-VL-235B | → vlm-openrouter |
 | `local-text` | Ollama | qwen2.5:0.5b | (none) |
 | `moonshot-text` | Moonshot | kimi-k2 | (none) |
+| Any Ollama tag | Ollama | (auto-detected) | (none) |
 
-20+ aliases map provider-native names to groups.
+20+ aliases map provider-native names to groups. Any locally-pulled Ollama model (e.g. `qwen2.5:7b`, `qwen3:0.6b`) auto-routes without a config entry.
 
 ## Adding a Provider
 
