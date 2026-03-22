@@ -80,6 +80,7 @@ class ProxyConfig:
     retry_after: int = 2
     allowed_fails: int = 3
     cooldown_time: int = 20
+    ollama_api_base: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -215,6 +216,19 @@ def load_config(path: str | Path) -> ProxyConfig:
     callbacks = litellm_settings.get("success_callback", [])
     post_call_rules = litellm_settings.get("post_call_rules")
 
+    # Auto-detect Ollama base URL: explicit config > env var > sniff from local-text group
+    ollama_base = resolved.get("ollama_api_base") or os.environ.get("OLLAMA_API_BASE")
+    if not ollama_base and "local-text" in model_groups:
+        for dep in model_groups["local-text"].deployments:
+            if dep.api_base and "11434" in dep.api_base:
+                ollama_base = dep.api_base
+                break
+    if ollama_base:
+        # Ensure /v1 suffix — the openai SDK needs it for correct path construction
+        if not ollama_base.rstrip("/").endswith("/v1"):
+            ollama_base = ollama_base.rstrip("/") + "/v1"
+        logger.info("Ollama auto-routing enabled (base={})", ollama_base)
+
     return ProxyConfig(
         general=general,
         model_groups=model_groups,
@@ -228,4 +242,5 @@ def load_config(path: str | Path) -> ProxyConfig:
         retry_after=int(router.get("retry_after", 2)),
         allowed_fails=int(router.get("allowed_fails", 3)),
         cooldown_time=int(router.get("cooldown_time", 20)),
+        ollama_api_base=ollama_base,
     )

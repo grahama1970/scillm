@@ -16,6 +16,12 @@ import random
 import time
 from typing import Any
 
+import base64
+import io
+import mimetypes
+import zipfile
+
+import httpx
 import openai
 from loguru import logger
 
@@ -126,6 +132,9 @@ def _max_retries_for(exc: Exception, policy: RetryPolicy) -> int:
     for exc_type, attr in _STATUS_MAP.items():
         if isinstance(exc, exc_type):
             return getattr(policy, attr)
+    # 404 = model not found — never retry
+    if isinstance(exc, openai.NotFoundError):
+        return 0
     # Unknown openai API errors get the internal_server_error budget
     if isinstance(exc, openai.APIStatusError):
         return policy.internal_server_error
@@ -202,6 +211,183 @@ class Router:
         return client
 
     # ------------------------------------------------------------------
+    # Gemini native API (for file/inlineData content)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _has_inline_data(messages: list[dict[str, Any]]) -> bool:
+        """Check if any message contains inlineData parts (ZIP, PDF, etc.)."""
+        for msg in messages:
+            content = msg.get("content")
+            if isinstance(content, list):
+                for part in content:
+                    if isinstance(part, dict) and "inlineData" in part:
+                        return True
+        return False
+
+    @staticmethod
+    def _is_gemini(dep: Deployment) -> bool:
+        """Check if a deployment targets Gemini."""
+        return bool(
+            dep.api_base
+            and "generativelanguage.googleapis.com" in dep.api_base
+        )
+
+    @staticmethod
+    def _to_gemini_contents(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Translate OpenAI messages to Gemini generateContent format."""
+        contents: list[dict[str, Any]] = []
+        for msg in messages:
+            role = "model" if msg.get("role") == "assistant" else "user"
+            content = msg.get("content", "")
+            parts: list[dict[str, Any]] = []
+
+            if isinstance(content, str):
+                parts.append({"text": content})
+            elif isinstance(content, list):
+                for part in content:
+                    if not isinstance(part, dict):
+                        continue
+                    if part.get("type") == "text":
+                        parts.append({"text": part["text"]})
+                    elif "inlineData" in part:
+                        inline = part["inlineData"]
+                        mime = inline.get("mimeType", "")
+                        if mime == "application/zip":
+                            # Explode ZIP: unpack and send each file as its own part
+                            zip_bytes = base64.b64decode(inline["data"])
+                            with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
+                                for name in zf.namelist():
+                                    if name.endswith("/"):
+                                        continue  # skip directories
+                                    file_bytes = zf.read(name)
+                                    file_mime = mimetypes.guess_type(name)[0] or "text/plain"
+                                    # Text files: send as text parts with filename header
+                                    if file_mime.startswith("text/") or file_mime in (
+                                        "application/json", "application/javascript",
+                                        "application/xml", "application/typescript",
+                                    ):
+                                        try:
+                                            text_content = file_bytes.decode("utf-8")
+                                        except UnicodeDecodeError:
+                                            text_content = file_bytes.decode("latin-1")
+                                        parts.append({"text": f"=== {name} ===\n{text_content}"})
+                                    else:
+                                        # Binary files (images, PDFs): send as inlineData
+                                        file_b64 = base64.b64encode(file_bytes).decode()
+                                        parts.append({"inlineData": {"mimeType": file_mime, "data": file_b64}})
+                                logger.info("ZIP exploded: {} files from archive", len(zf.namelist()))
+                        else:
+                            parts.append({"inlineData": inline})
+                    elif part.get("type") == "image_url":
+                        url = part.get("image_url", {}).get("url", "")
+                        if url.startswith("data:"):
+                            # data:image/png;base64,xxxxx
+                            header, data = url.split(",", 1)
+                            mime = header.split(":")[1].split(";")[0]
+                            parts.append({"inlineData": {"mimeType": mime, "data": data}})
+                        else:
+                            parts.append({"text": f"[image: {url}]"})
+
+            if parts:
+                contents.append({"role": role, "parts": parts})
+        return contents
+
+    async def _gemini_native_call(
+        self,
+        dep: Deployment,
+        messages: list[dict[str, Any]],
+        **kwargs: Any,
+    ) -> Any:
+        """Call Gemini's native generateContent API for file/inlineData content.
+
+        Translates OpenAI messages to Gemini format, calls the REST API directly,
+        and wraps the response back into OpenAI ChatCompletion format.
+        """
+        contents = self._to_gemini_contents(messages)
+
+        # Build Gemini API URL: extract base and construct generateContent endpoint
+        # Config api_base is like: https://generativelanguage.googleapis.com/v1beta/openai
+        # Native API needs: https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent
+        base = dep.api_base or ""
+        base = base.replace("/openai", "").rstrip("/")
+        url = f"{base}/models/{dep.model}:generateContent"
+
+        body: dict[str, Any] = {"contents": contents}
+
+        # Map OpenAI params to Gemini generationConfig
+        gen_config: dict[str, Any] = {}
+        if "max_tokens" in kwargs:
+            gen_config["maxOutputTokens"] = kwargs["max_tokens"]
+        if "temperature" in kwargs:
+            gen_config["temperature"] = kwargs["temperature"]
+        if "top_p" in kwargs:
+            gen_config["topP"] = kwargs["top_p"]
+        if "stop" in kwargs:
+            gen_config["stopSequences"] = kwargs["stop"] if isinstance(kwargs["stop"], list) else [kwargs["stop"]]
+        if gen_config:
+            body["generationConfig"] = gen_config
+
+        logger.info("Gemini native call: model={}, {} content parts, url={}",
+                     dep.model, sum(len(c.get("parts", [])) for c in contents), url)
+
+        async with httpx.AsyncClient(timeout=float(dep.timeout)) as client:
+            resp = await client.post(
+                url,
+                json=body,
+                headers={"Content-Type": "application/json"},
+                params={"key": dep.api_key},
+            )
+
+        if resp.status_code != 200:
+            error_body = resp.text
+            logger.warning("Gemini native API error {}: {}", resp.status_code, error_body[:500])
+            raise openai.APIStatusError(
+                message=f"Gemini native API error: {error_body[:500]}",
+                response=resp,  # type: ignore[arg-type]
+                body=error_body,
+            )
+
+        data = resp.json()
+
+        # Extract text from Gemini response
+        candidates = data.get("candidates", [])
+        text = ""
+        finish_reason = "stop"
+        if candidates:
+            parts = candidates[0].get("content", {}).get("parts", [])
+            text = "".join(p.get("text", "") for p in parts)
+            fr = candidates[0].get("finishReason", "STOP")
+            finish_reason = "length" if fr == "MAX_TOKENS" else "stop"
+
+        # Extract usage
+        usage_meta = data.get("usageMetadata", {})
+
+        # Wrap in OpenAI ChatCompletion format
+        import uuid as _uuid
+        return openai.types.chat.ChatCompletion(
+            id=f"chatcmpl-gemini-{_uuid.uuid4().hex[:8]}",
+            choices=[
+                openai.types.chat.chat_completion.Choice(
+                    finish_reason=finish_reason,
+                    index=0,
+                    message=openai.types.chat.ChatCompletionMessage(
+                        content=text,
+                        role="assistant",
+                    ),
+                )
+            ],
+            created=int(time.time()),
+            model=dep.model,
+            object="chat.completion",
+            usage=openai.types.CompletionUsage(
+                completion_tokens=usage_meta.get("candidatesTokenCount", 0),
+                prompt_tokens=usage_meta.get("promptTokenCount", 0),
+                total_tokens=usage_meta.get("totalTokenCount", 0),
+            ),
+        )
+
+    # ------------------------------------------------------------------
     # Alias / group resolution
     # ------------------------------------------------------------------
 
@@ -210,7 +396,28 @@ class Router:
         return self._config.aliases.get(model, model)
 
     def _get_group(self, name: str) -> ModelGroup | None:
-        return self._config.model_groups.get(name)
+        group = self._config.model_groups.get(name)
+        if group is not None:
+            return group
+
+        # Auto-create Ollama group for unknown model names that look like
+        # Ollama tags (e.g. "qwen2.5:7b", "llama3:8b").  This lets callers
+        # use any locally-pulled Ollama model without an explicit config entry.
+        ollama_base = self._config.ollama_api_base
+        if ollama_base and (":" in name or "/" not in name):
+            dep = Deployment(
+                model=name,
+                api_base=ollama_base,
+                api_key="ollama",
+                timeout=120,
+            )
+            group = ModelGroup(name=name, deployments=[dep])
+            # Cache it so subsequent requests skip this path
+            self._config.model_groups[name] = group
+            logger.info("Auto-created Ollama group for model {!r}", name)
+            return group
+
+        return None
 
     def _fallback_chain(self, group_name: str) -> list[str]:
         """Return the ordered list of groups to try (primary + fallbacks)."""
@@ -237,6 +444,19 @@ class Router:
         policy = self._config.retry_policy
         base_delay = self._config.retry_after
         last_exc: Exception | None = None
+
+        # Ollama doesn't support OpenAI's response_format parameter —
+        # strip it to avoid silent failures or 400 errors.
+        is_ollama = dep.api_base and ("11434" in dep.api_base or "ollama" in dep.api_base.lower())
+        if is_ollama and "response_format" in kwargs:
+            logger.debug("Stripping response_format for Ollama deployment {}", dep.model)
+            kwargs = {k: v for k, v in kwargs.items() if k != "response_format"}
+
+        # Gemini native API path: when messages contain inlineData parts
+        # (ZIP, PDF, etc.), bypass the openai SDK and call Gemini directly.
+        if self._is_gemini(dep) and self._has_inline_data(messages):
+            logger.info("Using Gemini native API for inlineData content → {}", dep.model)
+            return await self._gemini_native_call(dep, messages, **kwargs)
 
         # We do one initial attempt + up to max_retries retries.
         # max_retries is only known after the first failure, so we loop

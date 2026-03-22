@@ -321,6 +321,117 @@ async def hedged_call(client, prompt, primary="text", backup="text-gemini"):
 
 ---
 
+## Sending Multiple Files / Documents
+
+Two approaches depending on file types and target provider.
+
+### Option A: Concatenated Text (all providers)
+
+Extract text client-side and concatenate into one prompt. Works with every model alias and the full fallback cascade:
+
+```python
+texts = []
+for path in file_paths:
+    texts.append(f"=== {path.name} ===\n{path.read_text()}")
+combined = "\n\n".join(texts)
+
+resp = httpx.post(
+    "http://localhost:4001/v1/chat/completions",
+    headers={"Authorization": "Bearer sk-dev-proxy-123"},
+    json={
+        "model": "text",  # works with any provider in the cascade
+        "messages": [{"role": "user", "content": f"{combined}\n\nYour question here"}],
+        "max_tokens": 4096,
+    },
+    timeout=120.0,
+)
+```
+
+Gemini Flash has 1M context — 26 documents as plain text will fit unless they're each book-length.
+
+### Option B: Binary files via inlineData (Gemini only)
+
+Send PDFs, images, audio, and video directly to Gemini without client-side extraction. The proxy auto-detects `inlineData` parts and calls Gemini's native API instead of the OpenAI-compat layer. Gemini reads the binary format itself.
+
+```python
+import base64, httpx
+
+with open("document.pdf", "rb") as f:
+    pdf_b64 = base64.b64encode(f.read()).decode()
+
+resp = httpx.post(
+    "http://localhost:4001/v1/chat/completions",
+    headers={"Authorization": "Bearer sk-dev-proxy-123"},
+    json={
+        "model": "text-gemini",  # MUST target Gemini directly
+        "messages": [{"role": "user", "content": [
+            {"type": "text", "text": "Summarize this document"},
+            {"inlineData": {"mimeType": "application/pdf", "data": pdf_b64}},
+        ]}],
+        "max_tokens": 4096,
+    },
+    timeout=120.0,
+)
+```
+
+Multiple files — just add more `inlineData` parts:
+
+```python
+parts = [{"type": "text", "text": "Compare these documents"}]
+for path in pdf_paths:
+    with open(path, "rb") as f:
+        parts.append({"inlineData": {
+            "mimeType": "application/pdf",
+            "data": base64.b64encode(f.read()).decode(),
+        }})
+
+resp = httpx.post(
+    "http://localhost:4001/v1/chat/completions",
+    headers={"Authorization": "Bearer sk-dev-proxy-123"},
+    json={
+        "model": "text-gemini",
+        "messages": [{"role": "user", "content": parts}],
+        "max_tokens": 4096,
+    },
+    timeout=120.0,
+)
+```
+
+**Supported MIME types** (Gemini native): `application/pdf`, `image/png`, `image/jpeg`, `image/webp`, `image/gif`, `audio/*`, `video/*`, `text/plain`, `text/csv`, `text/html`.
+
+**ZIP files**: Supported! The proxy auto-explodes ZIP archives — unpacks each file and sends it as its own part (text files as text, images/PDFs as `inlineData`). Just send `mimeType: "application/zip"` and the proxy handles the rest. Tested: 64KB ZIP with 8 files (code, markdown, PNG) → 2.78s, 14K tokens.
+
+**WARNING**: `inlineData` only works with `model: "text-gemini"` (direct). Using `model: "text"` will fail on Chutes/DeepSeek before reaching Gemini. The proxy only switches to the native Gemini API when the deployment targets `generativelanguage.googleapis.com`.
+
+### Decision Table
+
+| Situation | Use | Model |
+|-----------|-----|-------|
+| Text files, any provider | Concatenated text | `text` (cascade) |
+| Binary files (PDF/images), Gemini | `inlineData` parts | `text-gemini` (direct) |
+| Mixed text+binary, need cascade | Extract text client-side, concatenate | `text` (cascade) |
+| Mixed text+binary, Gemini OK | `inlineData` per file | `text-gemini` (direct) |
+
+---
+
+## Ollama Auto-Routing
+
+Any locally-pulled Ollama model works through the proxy without a config entry. Just use the Ollama model:tag name directly:
+
+```python
+resp = httpx.post(
+    "http://localhost:4001/v1/chat/completions",
+    headers={"Authorization": "Bearer sk-dev-proxy-123"},
+    json={"model": "qwen2.5:7b", "messages": [{"role": "user", "content": "hi"}]},
+)
+```
+
+The proxy auto-detects unknown model names and routes them to the local Ollama instance. `response_format` is automatically stripped for Ollama models (Ollama doesn't support it).
+
+Available Ollama models: anything you've pulled with `ollama pull`. Check with `ollama list`.
+
+---
+
 ## Middleware Stack
 
 The proxy runs these middleware components on every request:

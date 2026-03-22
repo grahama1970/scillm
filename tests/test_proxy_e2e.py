@@ -169,13 +169,16 @@ class TestRouting:
             assert len(r.text) > 0, "Empty error response"
 
     def test_exhausted_cascade_reports_chain(self, client: httpx.Client):
-        """When all fallbacks fail, error must mention the cascade chain."""
+        """When all fallbacks fail, error must mention the cascade chain or detect thinking exhaustion."""
         # Use text-gemini directly (no further fallbacks) — if backend is down,
-        # the error should mention the model/group
+        # the error should mention the model/group. If the model is a thinking model
+        # with low max_tokens, the proxy detects thinking-budget exhaustion instead.
         r = _chat(client, "text-gemini", "Reply: OK")
         if r.status_code >= 400:
             body = r.text
-            assert "text-gemini" in body, "Error should reference the failed model group"
+            assert (
+                "text-gemini" in body or "thinking_budget_exhausted" in body
+            ), "Error should reference the failed model group or detect thinking exhaustion"
 
 
 # ===================================================================
@@ -295,8 +298,10 @@ class TestStreaming:
                     saw_done = True
                     break
                 data = json.loads(payload)
+                # Skip non-chunk events (e.g. cost summary emitted before [DONE])
+                if "choices" not in data:
+                    continue
                 chunks.append(data)
-                assert "choices" in data
             assert saw_done, "Stream must end with [DONE]"
             # At least one content chunk expected for a longer response
             assert len(chunks) >= 1, "Stream should produce at least one chunk"

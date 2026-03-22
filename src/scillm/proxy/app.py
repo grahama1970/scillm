@@ -234,6 +234,28 @@ async def chat_completions(request: Request):
         else:
             # Non-streaming: result is a ChatCompletion object
             response_dict = result.model_dump()
+
+            # Detect thinking-model token exhaustion:
+            # content=null + completion_tokens=0 + finish_reason="length"
+            # means internal reasoning consumed the entire max_tokens budget.
+            choices = response_dict.get("choices", [])
+            usage = response_dict.get("usage") or {}
+            if (
+                choices
+                and choices[0].get("finish_reason") == "length"
+                and usage.get("completion_tokens", -1) == 0
+                and choices[0].get("message", {}).get("content") is None
+            ):
+                req_max = body.get("max_tokens", "unset")
+                total = usage.get("total_tokens", "?")
+                raise ProxyError(
+                    502,
+                    f"Thinking model exhausted token budget — 0 visible tokens "
+                    f"produced (max_tokens={req_max}, total_tokens={total}). "
+                    f"Increase max_tokens or use a non-thinking model.",
+                    "thinking_budget_exhausted",
+                )
+
             response_dict = await _middleware_chain.run_post_call(body, response_dict)
             elapsed = time.monotonic() - start
 
