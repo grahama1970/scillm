@@ -64,12 +64,20 @@ concurrency limits, budget tracking, and optional Redis caching.
 | Any `Org/Model` | Chutes | Auto-routed to Chutes API | (none) |
 | Any `model:tag` | Ollama | Auto-routed to local Ollama | (none) |
 
-Callers say `model: "text"` — the proxy picks the provider. Auto-routing handles any model name:
-- `claude-*` → Anthropic API via Claude Code Max OAuth (`~/.claude/.credentials.json`)
-- `gpt-*`/`codex-*` → OpenAI Codex via ChatGPT OAuth (`~/.codex/auth.json`)
-- `gemini-*` → Google Gemini API via API key
-- `Org/Model` (contains `/`) → Chutes API
-- `model:tag` or unknown → local Ollama
+**Use the model name directly** — no aliases needed. The proxy auto-routes based on the name:
+
+| Pattern | Provider | Auth | Example |
+|---------|----------|------|---------|
+| `claude-*` | Anthropic | Claude Code Max OAuth | `claude-sonnet-4-6` |
+| `gpt-*` / `codex-*` | OpenAI Codex | ChatGPT OAuth | `gpt-5.3-codex` |
+| `gemini-*` | Google | API key | `gemini-2.5-flash` |
+| `glm-*` (via `text-glm`) | Z.AI GLM | API key | `text-glm` → glm-5.1 |
+| `Org/Model` | Chutes | API key | `Qwen/Qwen3-30B-A3B` |
+| `model:tag` | Ollama (local) | none | `qwen2.5:7b` |
+
+Cascade aliases still work: `text` (Chutes → DeepSeek → Gemini), `vlm` (Chutes → OpenRouter).
+
+**Discover all available models:** `GET /v1/scillm/providers` returns every provider, its auto-routing pattern, available models, and auth status.
 
 ---
 
@@ -554,7 +562,8 @@ Redis caching is auto-enabled when `REDIS_HOST` or `REDIS_URL` is set:
 | `/health/liveliness` | GET | Is the proxy alive? |
 | `/v1/scillm/health` | GET | Router health + fallback config + concurrency status |
 | `/v1/scillm/models` | GET | Model groups, deployments, aliases |
-| `/v1/models` | GET | OpenAI-compatible model list |
+| `/v1/scillm/providers` | GET | **All available providers, auto-routing patterns, and examples** |
+| `/v1/models` | GET | OpenAI-compatible model list (includes auto-routable models) |
 | `/v1/budget` | GET | Current daily spend and remaining budget |
 | `/metrics` | GET | Prometheus counters (requests, errors, latency by group) |
 

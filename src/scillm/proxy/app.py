@@ -383,7 +383,91 @@ async def openai_models(request: Request):
         "created": int(_start_time),
         "owned_by": "scillm",
     })
+
+    # Auto-routable providers — these don't need config entries
+    from scillm.proxy.providers.auth import is_anthropic_available, is_codex_available
+    auto_models = []
+    if is_anthropic_available():
+        for m in ["claude-sonnet-4-6", "claude-opus-4-6", "claude-haiku-4-5"]:
+            auto_models.append({"id": m, "object": "model", "created": int(_start_time), "owned_by": "anthropic-oauth"})
+    if is_codex_available():
+        for m in ["gpt-5.3-codex", "gpt-5.2-codex"]:
+            auto_models.append({"id": m, "object": "model", "created": int(_start_time), "owned_by": "codex-oauth"})
+    if _config.gemini_api_base:
+        for m in ["gemini-2.5-flash", "gemini-2.5-pro", "gemini-3-flash-preview", "gemini-3.1-pro-preview", "gemini-2.5-flash-lite"]:
+            auto_models.append({"id": m, "object": "model", "created": int(_start_time), "owned_by": "gemini"})
+    if _config.ollama_api_base:
+        auto_models.append({"id": "ollama:*", "object": "model", "created": int(_start_time), "owned_by": "ollama-auto"})
+    if _config.chutes_api_base:
+        auto_models.append({"id": "chutes:Org/Model", "object": "model", "created": int(_start_time), "owned_by": "chutes-auto"})
+
+    # Deduplicate (auto models might overlap with configured ones)
+    existing_ids = {m["id"] for m in models}
+    for m in auto_models:
+        if m["id"] not in existing_ids:
+            models.append(m)
+
     return {"object": "list", "data": models}
+
+
+@app.get("/v1/scillm/providers")
+async def scillm_providers(request: Request):
+    """List all available providers and how to call them."""
+    auth_err = _check_auth(request)
+    if auth_err:
+        raise ProxyError(401, auth_err, "authentication_error")
+    if _config is None:
+        raise ProxyError(503, "Proxy not ready", "service_unavailable")
+
+    from scillm.proxy.providers.auth import is_anthropic_available, is_codex_available
+
+    providers = {
+        "configured": {
+            name: {
+                "models": [d.model for d in group.deployments],
+                "api_base": group.deployments[0].api_base if group.deployments else None,
+            }
+            for name, group in _config.model_groups.items()
+        },
+        "auto_routing": {
+            "claude": {
+                "available": is_anthropic_available(),
+                "pattern": "claude-*",
+                "examples": ["claude-sonnet-4-6", "claude-opus-4-6", "claude-haiku-4-5"],
+                "auth": "OAuth via ~/.claude/.credentials.json",
+                "note": "System prompt locked to Claude Code prefix",
+            },
+            "codex": {
+                "available": is_codex_available(),
+                "pattern": "gpt-* | codex-*",
+                "examples": ["gpt-5.3-codex", "gpt-5.2-codex"],
+                "auth": "OAuth via ~/.codex/auth.json",
+                "note": "temperature/max_tokens not supported",
+            },
+            "gemini": {
+                "available": bool(_config.gemini_api_base),
+                "pattern": "gemini-*",
+                "examples": ["gemini-2.5-flash", "gemini-3-flash-preview", "gemini-3.1-pro-preview"],
+                "auth": "API key",
+                "note": "Supports inlineData for PDFs/images/ZIP",
+            },
+            "chutes": {
+                "available": bool(_config.chutes_api_base),
+                "pattern": "Org/Model (contains /)",
+                "examples": ["Qwen/Qwen3-30B-A3B", "deepseek-ai/DeepSeek-V3"],
+                "auth": "API key",
+            },
+            "ollama": {
+                "available": bool(_config.ollama_api_base),
+                "pattern": "model:tag or unknown names",
+                "examples": ["qwen2.5:7b", "qwen3:0.6b", "llama3:8b"],
+                "auth": "none (local)",
+                "note": "response_format auto-stripped",
+            },
+        },
+        "fallback_chains": _config.fallbacks,
+    }
+    return providers
 
 
 @app.get("/v1/scillm/logs")
