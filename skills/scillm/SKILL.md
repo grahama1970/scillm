@@ -53,8 +53,23 @@ concurrency limits, budget tracking, and optional Redis caching.
 | `vlm` | Chutes Qwen3-VL-235B | Image/figure/table description | → vlm-openrouter |
 | `local-text` | Ollama qwen2.5:0.5b (local) | Smoke tests, always-on fallback | (none) |
 | `moonshot-text` | Moonshot Kimi K2 | Alternative text provider | (none) |
+| `text-gemini` | Google Gemini 2.5 Flash | Fast, 1M context | (none) |
+| `text-gemini-3` | Google Gemini 3 Flash Preview | Thinking model, 1M context | (none) |
+| `claude-sonnet-4-6` | Anthropic Claude Sonnet (OAuth) | Max subscription via ~/.claude | (none) |
+| `claude-haiku-4-5` | Anthropic Claude Haiku (OAuth) | Fast, cheap via Max subscription | (none) |
+| `gpt-5.3-codex` | OpenAI Codex (OAuth) | High-reasoning via ~/.codex | (none) |
+| Any `gemini-*` | Google | Auto-routed to Gemini API | (none) |
+| Any `claude-*` | Anthropic | Auto-routed via Claude Code OAuth | (none) |
+| Any `gpt-*`/`codex-*` | OpenAI | Auto-routed via Codex CLI OAuth | (none) |
+| Any `Org/Model` | Chutes | Auto-routed to Chutes API | (none) |
+| Any `model:tag` | Ollama | Auto-routed to local Ollama | (none) |
 
-Callers say `model: "text"` — the proxy picks the provider. 20+ aliases map provider-native names to groups.
+Callers say `model: "text"` — the proxy picks the provider. Auto-routing handles any model name:
+- `claude-*` → Anthropic API via Claude Code Max OAuth (`~/.claude/.credentials.json`)
+- `gpt-*`/`codex-*` → OpenAI Codex via ChatGPT OAuth (`~/.codex/auth.json`)
+- `gemini-*` → Google Gemini API via API key
+- `Org/Model` (contains `/`) → Chutes API
+- `model:tag` or unknown → local Ollama
 
 ---
 
@@ -429,6 +444,55 @@ resp = httpx.post(
 The proxy auto-detects unknown model names and routes them to the local Ollama instance. `response_format` is automatically stripped for Ollama models (Ollama doesn't support it).
 
 Available Ollama models: anything you've pulled with `ollama pull`. Check with `ollama list`.
+
+---
+
+## Claude OAuth (Anthropic Max Subscription)
+
+Call Claude models through the proxy using your Max subscription — no API key needed. The proxy reads OAuth tokens from `~/.claude/.credentials.json` (managed by Claude Code).
+
+```python
+resp = httpx.post(
+    "http://localhost:4001/v1/chat/completions",
+    headers={"Authorization": "Bearer sk-dev-proxy-123"},
+    json={
+        "model": "claude-sonnet-4-6",
+        "messages": [{"role": "user", "content": "Explain quicksort"}],
+        "max_tokens": 1024,
+    },
+    timeout=60.0,
+)
+```
+
+Model name mapping: `claude-sonnet-4-6` → `claude-sonnet-4-20250514`, `claude-haiku-4-5` → `claude-haiku-4-5-20251001`. Full Anthropic model IDs also work directly.
+
+**Known limitation:** Claude Code OAuth scope locks the system prompt. Custom system prompts are injected as user messages — they work but may not be followed as strictly as a true system prompt.
+
+**Credential priority:** `~/.claude/.credentials.json` (Claude Code, always fresh) > `~/.pi/agent/auth.json` (Pi CLI, may expire).
+
+---
+
+## Codex OAuth (OpenAI ChatGPT Subscription)
+
+Call Codex/GPT models through the proxy using your ChatGPT Plus/Pro subscription. The proxy reads OAuth tokens from `~/.codex/auth.json` (managed by Codex CLI).
+
+```python
+resp = httpx.post(
+    "http://localhost:4001/v1/chat/completions",
+    headers={"Authorization": "Bearer sk-dev-proxy-123"},
+    json={
+        "model": "gpt-5.3-codex",
+        "messages": [{"role": "user", "content": "Explain quicksort"}],
+    },
+    timeout=120.0,
+)
+```
+
+**Supported models:** `gpt-5.2-codex`, `gpt-5.3-codex`. Standard GPT models (gpt-4o, etc.) are NOT supported via ChatGPT OAuth — they require a platform API key.
+
+**Note:** `max_tokens` is ignored for Codex (the ChatGPT backend doesn't support it). The proxy streams the response internally and returns it as a single completion.
+
+**Credential priority:** `~/.codex/auth.json` (Codex CLI) > `~/.pi/agent/auth.json` (Pi CLI).
 
 ---
 

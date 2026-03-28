@@ -26,6 +26,9 @@ import openai
 from loguru import logger
 
 from scillm.proxy.config import Deployment, ModelGroup, ProxyConfig, RetryPolicy
+from scillm.proxy.providers.auth import is_anthropic_available, is_codex_available
+from scillm.proxy.providers.claude import claude_completion
+from scillm.proxy.providers.codex import codex_completion
 
 
 # ---------------------------------------------------------------------------
@@ -400,6 +403,71 @@ class Router:
         if group is not None:
             return group
 
+        # Auto-create Claude group for model names starting with "claude"
+        # (e.g. "claude-sonnet-4-6", "claude-opus-4-6", "claude-haiku-4-5").
+        # Uses OAuth token from ~/.pi/agent/auth.json.
+        if name.lower().startswith("claude") and is_anthropic_available():
+            dep = Deployment(
+                model=name,
+                api_base="https://api.anthropic.com",
+                api_key="oauth",
+                timeout=90,
+                custom_llm_provider="anthropic-oauth",
+            )
+            group = ModelGroup(name=name, deployments=[dep])
+            self._config.model_groups[name] = group
+            logger.info("Auto-created Claude OAuth group for model {!r}", name)
+            return group
+
+        # Auto-create Codex group for model names starting with "codex" or "gpt"
+        # or "o3"/"o4" (OpenAI reasoning models).
+        # Uses OAuth token from ~/.pi/agent/auth.json.
+        _codex_prefixes = ("codex", "gpt", "o1", "o3", "o4")
+        if any(name.lower().startswith(p) for p in _codex_prefixes) and is_codex_available():
+            dep = Deployment(
+                model=name,
+                api_base="https://api.openai.com",
+                api_key="oauth",
+                timeout=120,
+                custom_llm_provider="codex-oauth",
+            )
+            group = ModelGroup(name=name, deployments=[dep])
+            self._config.model_groups[name] = group
+            logger.info("Auto-created Codex OAuth group for model {!r}", name)
+            return group
+
+        # Auto-create Gemini group for model names starting with "gemini"
+        # (e.g. "gemini-2.5-flash", "gemini-3-flash-preview", "gemini-3.1-pro-preview").
+        gemini_base = self._config.gemini_api_base
+        gemini_key = self._config.gemini_api_key
+        if gemini_base and gemini_key and name.lower().startswith("gemini"):
+            dep = Deployment(
+                model=name,
+                api_base=gemini_base,
+                api_key=gemini_key,
+                timeout=90,
+            )
+            group = ModelGroup(name=name, deployments=[dep])
+            self._config.model_groups[name] = group
+            logger.info("Auto-created Gemini group for model {!r}", name)
+            return group
+
+        # Auto-create Chutes group for model names containing "/"
+        # (e.g. "Qwen/Qwen3-30B-A3B", "deepseek-ai/DeepSeek-V3").
+        chutes_base = self._config.chutes_api_base
+        chutes_key = self._config.chutes_api_key
+        if chutes_base and chutes_key and "/" in name:
+            dep = Deployment(
+                model=name,
+                api_base=chutes_base,
+                api_key=chutes_key,
+                timeout=60,
+            )
+            group = ModelGroup(name=name, deployments=[dep])
+            self._config.model_groups[name] = group
+            logger.info("Auto-created Chutes group for model {!r}", name)
+            return group
+
         # Auto-create Ollama group for unknown model names that look like
         # Ollama tags (e.g. "qwen2.5:7b", "llama3:8b").  This lets callers
         # use any locally-pulled Ollama model without an explicit config entry.
@@ -412,7 +480,6 @@ class Router:
                 timeout=120,
             )
             group = ModelGroup(name=name, deployments=[dep])
-            # Cache it so subsequent requests skip this path
             self._config.model_groups[name] = group
             logger.info("Auto-created Ollama group for model {!r}", name)
             return group
@@ -457,6 +524,14 @@ class Router:
         if self._is_gemini(dep) and self._has_inline_data(messages):
             logger.info("Using Gemini native API for inlineData content → {}", dep.model)
             return await self._gemini_native_call(dep, messages, **kwargs)
+
+        # Claude OAuth path: uses Anthropic Messages API with format translation.
+        if dep.custom_llm_provider == "anthropic-oauth":
+            return await claude_completion(dep.model, messages, timeout=dep.timeout, **kwargs)
+
+        # Codex OAuth path: uses OpenAI Responses API with SSE streaming.
+        if dep.custom_llm_provider == "codex-oauth":
+            return await codex_completion(dep.model, messages, timeout=dep.timeout, **kwargs)
 
         # We do one initial attempt + up to max_retries retries.
         # max_retries is only known after the first failure, so we loop

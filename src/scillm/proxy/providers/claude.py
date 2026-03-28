@@ -1,0 +1,198 @@
+"""Claude (Anthropic) provider via OAuth subscription tokens.
+
+Translates OpenAI chat completion format to Anthropic Messages API format.
+Uses OAuth tokens from ~/.pi/agent/auth.json (shared with Pi CLI).
+"""
+
+from __future__ import annotations
+
+import time
+import uuid
+from typing import Any
+
+import httpx
+import openai
+from loguru import logger
+
+from scillm.proxy.providers.auth import get_anthropic_token
+
+ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages"
+ANTHROPIC_VERSION = "2023-06-01"
+ANTHROPIC_BETA = (
+    "claude-code-20250219,"
+    "oauth-2025-04-20,"
+    "fine-grained-tool-streaming-2025-05-14,"
+    "interleaved-thinking-2025-05-14"
+)
+# OAuth tokens with claude-code scope require this system prompt prefix
+CLAUDE_CODE_SYSTEM_PREFIX = "You are Claude Code, Anthropic's official CLI for Claude."
+
+# Map friendly model names to Anthropic API model IDs
+CLAUDE_MODEL_MAP = {
+    "claude-sonnet-4-6": "claude-sonnet-4-20250514",
+    "claude-opus-4-6": "claude-opus-4-20250514",
+    "claude-haiku-4-5": "claude-haiku-4-5-20251001",
+    "claude-sonnet-4-5": "claude-sonnet-4-5-20250514",
+}
+
+
+def _openai_to_anthropic_messages(
+    messages: list[dict[str, Any]],
+) -> tuple[str | None, list[dict[str, Any]]]:
+    """Convert OpenAI messages to Anthropic format.
+
+    Returns (system_prompt, anthropic_messages).
+    """
+    system_prompt: str | None = None
+    anthropic_msgs: list[dict[str, Any]] = []
+
+    for msg in messages:
+        role = msg.get("role", "user")
+        content = msg.get("content", "")
+
+        if role == "system":
+            # Anthropic takes system as a top-level field, not in messages
+            if isinstance(content, str):
+                system_prompt = content
+            continue
+
+        # Map OpenAI roles to Anthropic roles
+        if role == "assistant":
+            a_role = "assistant"
+        else:
+            a_role = "user"
+
+        # Handle content types
+        if isinstance(content, str):
+            anthropic_msgs.append({"role": a_role, "content": content})
+        elif isinstance(content, list):
+            # Convert OpenAI content parts to Anthropic format
+            a_parts: list[dict[str, Any]] = []
+            for part in content:
+                if not isinstance(part, dict):
+                    continue
+                if part.get("type") == "text":
+                    a_parts.append({"type": "text", "text": part["text"]})
+                elif part.get("type") == "image_url":
+                    url = part.get("image_url", {}).get("url", "")
+                    if url.startswith("data:"):
+                        # data:image/png;base64,xxxxx
+                        header, data = url.split(",", 1)
+                        media_type = header.split(":")[1].split(";")[0]
+                        a_parts.append({
+                            "type": "image",
+                            "source": {
+                                "type": "base64",
+                                "media_type": media_type,
+                                "data": data,
+                            },
+                        })
+            if a_parts:
+                anthropic_msgs.append({"role": a_role, "content": a_parts})
+
+    return system_prompt, anthropic_msgs
+
+
+def _anthropic_to_openai_response(
+    data: dict[str, Any],
+    model: str,
+) -> openai.types.chat.ChatCompletion:
+    """Wrap Anthropic Messages response in OpenAI ChatCompletion format."""
+    # Extract text content
+    content_blocks = data.get("content", [])
+    text_parts = [b.get("text", "") for b in content_blocks if b.get("type") == "text"]
+    text = "".join(text_parts)
+
+    # Map stop reason
+    stop_reason = data.get("stop_reason", "end_turn")
+    finish_reason = "length" if stop_reason == "max_tokens" else "stop"
+
+    # Usage
+    usage = data.get("usage", {})
+
+    return openai.types.chat.ChatCompletion(
+        id=f"chatcmpl-claude-{uuid.uuid4().hex[:8]}",
+        choices=[
+            openai.types.chat.chat_completion.Choice(
+                finish_reason=finish_reason,
+                index=0,
+                message=openai.types.chat.ChatCompletionMessage(
+                    content=text,
+                    role="assistant",
+                ),
+            )
+        ],
+        created=int(time.time()),
+        model=data.get("model", model),
+        object="chat.completion",
+        usage=openai.types.CompletionUsage(
+            completion_tokens=usage.get("output_tokens", 0),
+            prompt_tokens=usage.get("input_tokens", 0),
+            total_tokens=usage.get("input_tokens", 0) + usage.get("output_tokens", 0),
+        ),
+    )
+
+
+async def claude_completion(
+    model: str,
+    messages: list[dict[str, Any]],
+    **kwargs: Any,
+) -> openai.types.chat.ChatCompletion:
+    """Call Claude via Anthropic Messages API using OAuth token.
+
+    Translates OpenAI format → Anthropic format → call → translate back.
+    """
+    token = get_anthropic_token()
+    if not token:
+        raise Exception("No Anthropic OAuth token available. Run Pi CLI /login first.")
+
+    # Map friendly names to API model IDs
+    api_model = CLAUDE_MODEL_MAP.get(model, model)
+
+    system_prompt, anthropic_msgs = _openai_to_anthropic_messages(messages)
+
+    # Build request body
+    # OAuth scope requires exactly this system prompt — no modifications allowed.
+    # Custom system prompts are prepended as a user message instead.
+    if system_prompt:
+        anthropic_msgs.insert(0, {"role": "user", "content": f"[System instruction]: {system_prompt}"})
+        anthropic_msgs.insert(1, {"role": "assistant", "content": "Understood. I will follow that instruction."})
+
+    body: dict[str, Any] = {
+        "model": api_model,
+        "messages": anthropic_msgs,
+        "max_tokens": kwargs.get("max_tokens", 4096),
+        "system": CLAUDE_CODE_SYSTEM_PREFIX,
+    }
+    if "temperature" in kwargs:
+        body["temperature"] = kwargs["temperature"]
+    if "top_p" in kwargs:
+        body["top_p"] = kwargs["top_p"]
+    if "stop" in kwargs:
+        stop = kwargs["stop"]
+        body["stop_sequences"] = stop if isinstance(stop, list) else [stop]
+
+    # OAuth tokens use Authorization: Bearer, NOT x-api-key
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "anthropic-version": ANTHROPIC_VERSION,
+        "anthropic-beta": ANTHROPIC_BETA,
+        "user-agent": "claude-cli/2.1.75",
+        "x-app": "cli",
+        "content-type": "application/json",
+    }
+
+    logger.info("Claude OAuth call: model={}, {} messages", model, len(anthropic_msgs))
+
+    timeout = kwargs.get("timeout", 90)
+    async with httpx.AsyncClient(timeout=float(timeout)) as client:
+        resp = await client.post(ANTHROPIC_API_URL, json=body, headers=headers)
+
+    if resp.status_code != 200:
+        error_body = resp.text
+        logger.warning("Claude API error {}: {}", resp.status_code, error_body[:500])
+        # Raise a plain Exception — the router catches it and wraps appropriately
+        raise Exception(f"Claude API {resp.status_code}: {error_body[:500]}")
+
+    data = resp.json()
+    return _anthropic_to_openai_response(data, model)

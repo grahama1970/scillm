@@ -81,6 +81,10 @@ class ProxyConfig:
     allowed_fails: int = 3
     cooldown_time: int = 20
     ollama_api_base: str | None = None
+    chutes_api_base: str | None = None
+    chutes_api_key: str | None = None
+    gemini_api_base: str | None = None
+    gemini_api_key: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -229,6 +233,33 @@ def load_config(path: str | Path) -> ProxyConfig:
             ollama_base = ollama_base.rstrip("/") + "/v1"
         logger.info("Ollama auto-routing enabled (base={})", ollama_base)
 
+    # Auto-detect Chutes base URL and API key from env or sniff from text group
+    chutes_base = os.environ.get("CHUTES_API_BASE")
+    chutes_key = os.environ.get("CHUTES_API_KEY")
+    if not chutes_base and "text" in model_groups:
+        for dep in model_groups["text"].deployments:
+            if dep.api_base and "chutes" in dep.api_base.lower():
+                chutes_base = dep.api_base
+                chutes_key = chutes_key or dep.api_key
+                break
+    if chutes_base:
+        # Ensure /v1 suffix
+        if not chutes_base.rstrip("/").endswith("/v1"):
+            chutes_base = chutes_base.rstrip("/") + "/v1"
+        logger.info("Chutes auto-routing enabled (base={})", chutes_base)
+
+    # Auto-detect Gemini base URL and API key from env or sniff from text-gemini group
+    gemini_base = os.environ.get("GEMINI_API_BASE")
+    gemini_key = os.environ.get("GEMINI_API_KEY")
+    if not gemini_base and "text-gemini" in model_groups:
+        for dep in model_groups["text-gemini"].deployments:
+            if dep.api_base and "generativelanguage.googleapis.com" in dep.api_base:
+                gemini_base = dep.api_base
+                gemini_key = gemini_key or dep.api_key
+                break
+    if gemini_base:
+        logger.info("Gemini auto-routing enabled (base={})", gemini_base)
+
     return ProxyConfig(
         general=general,
         model_groups=model_groups,
@@ -243,4 +274,8 @@ def load_config(path: str | Path) -> ProxyConfig:
         allowed_fails=int(router.get("allowed_fails", 3)),
         cooldown_time=int(router.get("cooldown_time", 20)),
         ollama_api_base=ollama_base,
+        chutes_api_base=chutes_base,
+        chutes_api_key=chutes_key,
+        gemini_api_base=gemini_base,
+        gemini_api_key=gemini_key,
     )

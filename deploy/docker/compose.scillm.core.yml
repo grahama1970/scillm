@@ -16,6 +16,9 @@ services:
     network_mode: host
     volumes:
       - "../../local/proxy_server_config.yaml:/app/config.yaml:ro"
+      - "${HOME}/.pi/agent/auth.json:/root/.pi/agent/auth.json:ro"
+      - "${HOME}/.claude/.credentials.json:/root/.claude/.credentials.json:ro"
+      - "${HOME}/.codex/auth.json:/root/.codex/auth.json:ro"
     healthcheck:
       test: ["CMD", "curl", "-sf", "-H", "Authorization: Bearer $${LITELLM_MASTER_KEY:-sk-dev-proxy-123}", "http://127.0.0.1:4001/health/liveliness"]
       interval: 15s
