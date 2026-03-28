@@ -136,9 +136,7 @@ async def codex_completion(
         "stream": True,
         "store": False,
     }
-    # Note: max_output_tokens is NOT supported by the ChatGPT Codex backend
-    if "temperature" in kwargs:
-        body["temperature"] = kwargs["temperature"]
+    # ChatGPT Codex backend does NOT support: temperature, max_output_tokens, top_p
 
     headers = {
         "Authorization": f"Bearer {access_token}",
