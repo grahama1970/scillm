@@ -10,7 +10,7 @@
 
 ---
 
-Single-tenant LLM proxy that unifies your **Max subscriptions** (Claude, Codex) and **API keys** (Gemini, Chutes, DeepSeek, GLM) behind one OpenAI-compatible endpoint. No provider-specific code — just `httpx.post("http://localhost:4001/v1/chat/completions", json={"model": "claude-sonnet-4-6", ...})` and scillm handles OAuth token refresh, format translation, retries, and failover automatically. Works with any model name: `claude-*`, `gpt-*`, `gemini-*`, `Org/Model`, or `model:tag`.
+Single-tenant LLM proxy that unifies your **Max subscriptions** (Claude, Codex) and **API keys** (Gemini, Chutes, DeepSeek, GLM) behind one OpenAI-compatible endpoint. No provider-specific code — just `httpx.post("http://localhost:4001/v1/chat/completions", json={"model": "claude-sonnet-4-6", ...})` and scillm handles OAuth token refresh, format translation, SSE streaming, retries, and failover automatically. Works with any model name: `claude-*`, `gpt-*`, `gemini-*`, `Org/Model`, or `model:tag`.
 
 ## Quick Start
 
@@ -91,6 +91,38 @@ Every provider scillm targets speaks OpenAI-compatible API (`/v1/chat/completion
 - **5xx-specific backoff** — Server errors (503) get different retry timing than rate limits (429).
 - **Gemini native file support** — Send PDFs, images, and ZIP archives via `inlineData` parts when targeting Gemini. ZIP files are auto-exploded into individual parts (text as text, binaries as native `inlineData`).
 - **Ollama auto-routing** — Any locally-pulled Ollama model works without a config entry. The proxy auto-detects unknown model names and routes them to the local Ollama instance.
+- **SSE streaming for all providers** — `"stream": true` works everywhere, including Claude and Codex OAuth. The proxy translates provider-specific SSE formats into OpenAI-compatible delta chunks. Same `data: {"choices":[{"delta":{"content":"..."}}]}` format regardless of backend.
+
+## Why scillm
+
+If you already have Claude Max and Codex Pro subscriptions plus a few API keys, scillm turns them into one endpoint with zero glue code. Here's what you'd need without it:
+
+| Capability | Without scillm | With scillm |
+|------------|---------------|-------------|
+| **Call Claude** | Anthropic SDK, manage OAuth tokens, translate message format, handle `system` prompt constraints | `model: "claude-sonnet-4-6"` — done |
+| **Call Codex** | Custom SSE parser for chatgpt.com backend, `chatgpt-account-id` header, strip unsupported params | `model: "gpt-5.3-codex"` — done |
+| **Call Gemini with files** | Gemini REST API, `inlineData` parts, ZIP explosion logic, MIME detection | Attach files in messages — auto-routed |
+| **Call any Ollama model** | Configure each model, manage base URL | Pull and call — auto-detected |
+| **Streaming** | Different SSE format per provider, custom parsers for each | `"stream": true` — same format for all |
+| **Failover** | Client-side retry logic per provider, circuit breaker state per process | Proxy handles cascade + circuit breaker |
+| **Concurrency** | Per-process semaphores, risk of 429 penalties | Proxy queues globally — one semaphore |
+| **JSON repair** | Retry the whole call on broken JSON | Proxy repairs and returns — no wasted call |
+| **Provider switch** | Change code in every caller | Change YAML config — callers unchanged |
+| **OAuth refresh** | Each process manages token lifecycle | Proxy mounts credentials — one refresh |
+
+**Compared to multi-provider proxies** (LiteLLM, Portkey, Helicone):
+
+| | scillm | Multi-provider SaaS proxies |
+|---|---|---|
+| **Subscription bridging** | Uses your Claude Max + Codex Pro subscriptions directly (OAuth) | API keys only — can't use Max/Pro subscriptions |
+| **Tenant model** | Single-user, runs locally | Multi-tenant SaaS, data leaves your machine |
+| **File handling** | ZIP explosion, Gemini native `inlineData`, VLM auto-routing | Pass-through only |
+| **JSON repair** | Built-in repair loop with `json_repair` | None — failed JSON = failed call |
+| **Cost** | Free (your subscriptions + API keys) | Free tier + paid for volume |
+| **Dependency** | Self-hosted Docker container | External service dependency |
+| **Customization** | Full source, add middleware in Python | Configuration only |
+
+scillm is not a general-purpose proxy platform. It's a single-user tool for engineers who already pay for Claude Max and Codex Pro and want one `httpx.post()` call that works with everything.
 
 ## How to Call It
 

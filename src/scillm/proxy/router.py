@@ -27,8 +27,8 @@ from loguru import logger
 
 from scillm.proxy.config import Deployment, ModelGroup, ProxyConfig, RetryPolicy
 from scillm.proxy.providers.auth import is_anthropic_available, is_codex_available
-from scillm.proxy.providers.claude import claude_completion
-from scillm.proxy.providers.codex import codex_completion
+from scillm.proxy.providers.claude import claude_completion, claude_completion_stream
+from scillm.proxy.providers.codex import codex_completion, codex_completion_stream
 
 
 # ---------------------------------------------------------------------------
@@ -527,10 +527,16 @@ class Router:
 
         # Claude OAuth path: uses Anthropic Messages API with format translation.
         if dep.custom_llm_provider == "anthropic-oauth":
+            if kwargs.get("stream", False):
+                stream_kwargs = {k: v for k, v in kwargs.items() if k != "stream"}
+                return claude_completion_stream(dep.model, messages, timeout=dep.timeout, **stream_kwargs)
             return await claude_completion(dep.model, messages, timeout=dep.timeout, **kwargs)
 
         # Codex OAuth path: uses OpenAI Responses API with SSE streaming.
         if dep.custom_llm_provider == "codex-oauth":
+            if kwargs.get("stream", False):
+                stream_kwargs = {k: v for k, v in kwargs.items() if k != "stream"}
+                return codex_completion_stream(dep.model, messages, timeout=dep.timeout, **stream_kwargs)
             return await codex_completion(dep.model, messages, timeout=dep.timeout, **kwargs)
 
         # We do one initial attempt + up to max_retries retries.

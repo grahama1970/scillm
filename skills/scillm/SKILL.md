@@ -528,7 +528,7 @@ content = resp.json()["choices"][0]["message"]["content"]
 | `system` role in messages | PARTIAL | Injected as user message (OAuth locks system prompt) |
 | `response_format` | NO | Claude doesn't support json_object — ask for JSON in the prompt |
 | `tools` / `tool_choice` | NO | Not forwarded through OAuth path |
-| `stream` | NO | Proxy collects full response, returns as single completion |
+| `stream` | YES | SSE streaming with OpenAI delta format (`data: {"choices":[{"delta":{"content":"..."}}]}`) |
 
 ### Common mistakes that cause 500s
 
@@ -582,7 +582,9 @@ resp = httpx.post(
 
 **Supported models:** `gpt-5.2-codex`, `gpt-5.3-codex`. Standard GPT models (gpt-4o, etc.) are NOT supported via ChatGPT OAuth — they require a platform API key.
 
-**Note:** `max_tokens` is ignored for Codex (the ChatGPT backend doesn't support it). The proxy streams the response internally and returns it as a single completion.
+**Streaming:** Both Claude and Codex support `"stream": true`. The proxy translates provider-specific SSE events into OpenAI-compatible delta chunks (`data: {"choices":[{"delta":{"content":"..."}}]}`). Works with any SSE client including `httpx.stream()` and the OpenAI SDK.
+
+**Note:** `max_tokens` is ignored for Codex (the ChatGPT backend doesn't support it).
 
 **Credential priority:** `~/.codex/auth.json` (Codex CLI) > `~/.pi/agent/auth.json` (Pi CLI).
 

@@ -9,12 +9,13 @@ from __future__ import annotations
 import json
 import time
 import uuid
-from typing import Any
+from typing import Any, AsyncIterator
 
 import httpx
 import openai
 from loguru import logger
 
+from scillm.proxy.providers import make_chunk_id, sse_chunk, sse_done, sse_format
 from scillm.proxy.providers.auth import get_codex_credentials
 
 CODEX_API_URL = "https://chatgpt.com/backend-api/codex/responses"
@@ -175,3 +176,98 @@ async def codex_completion(
                                 pass
 
     return _parse_codex_response(events, model)
+
+
+async def codex_completion_stream(
+    model: str,
+    messages: list[dict[str, Any]],
+    **kwargs: Any,
+) -> AsyncIterator[bytes]:
+    """Stream Codex via Responses API, yielding OpenAI SSE bytes.
+
+    Translates Codex SSE events (response.output_text.delta,
+    response.completed) into OpenAI-compatible ``chat.completion.chunk`` format.
+    """
+    creds = get_codex_credentials()
+    if not creds:
+        raise Exception("No Codex OAuth token available.")
+
+    access_token, account_id = creds
+    instructions, input_items = _openai_messages_to_codex_input(messages)
+
+    body: dict[str, Any] = {
+        "model": model,
+        "input": input_items,
+        "instructions": instructions or "You are a helpful assistant.",
+        "stream": True,
+        "store": False,
+    }
+
+    headers = {
+        "Authorization": f"Bearer {access_token}",
+        "Content-Type": "application/json",
+        "Accept": "text/event-stream",
+        "chatgpt-account-id": account_id,
+    }
+
+    logger.info("Codex OAuth stream: model={}, {} input items", model, len(input_items))
+    chunk_id = make_chunk_id()
+    timeout = kwargs.get("timeout", 120)
+
+    try:
+        async with httpx.AsyncClient(timeout=float(timeout)) as client:
+            async with client.stream("POST", CODEX_API_URL, json=body, headers=headers) as resp:
+                if resp.status_code != 200:
+                    error_body = await resp.aread()
+                    error_text = error_body.decode("utf-8", errors="replace")
+                    logger.warning("Codex stream error {}: {}", resp.status_code, error_text[:500])
+                    err = sse_format({"error": {"message": f"Codex API {resp.status_code}: {error_text[:300]}", "type": "provider_error"}})
+                    yield err.encode()
+                    yield sse_done().encode()
+                    return
+
+                buffer = ""
+                async for text_chunk in resp.aiter_text():
+                    buffer += text_chunk
+                    while "\n\n" in buffer:
+                        event_str, buffer = buffer.split("\n\n", 1)
+                        for line in event_str.split("\n"):
+                            if not line.startswith("data: "):
+                                continue
+                            data_str = line[6:]
+                            if data_str.strip() == "[DONE]":
+                                yield sse_done().encode()
+                                return
+
+                            try:
+                                event = json.loads(data_str)
+                            except json.JSONDecodeError:
+                                continue
+
+                            event_type = event.get("type", "")
+
+                            if event_type == "response.output_text.delta":
+                                delta = event.get("delta", "")
+                                if delta:
+                                    chunk = sse_chunk(chunk_id, model, content_delta=delta)
+                                    yield sse_format(chunk).encode()
+
+                            elif event_type == "response.completed":
+                                resp_data = event.get("response", {})
+                                actual_model = resp_data.get("model", model)
+                                resp_usage = resp_data.get("usage", {})
+                                usage = {
+                                    "prompt_tokens": resp_usage.get("input_tokens", 0),
+                                    "completion_tokens": resp_usage.get("output_tokens", 0),
+                                    "total_tokens": resp_usage.get("input_tokens", 0) + resp_usage.get("output_tokens", 0),
+                                }
+                                chunk = sse_chunk(chunk_id, actual_model, finish_reason="stop", usage=usage)
+                                yield sse_format(chunk).encode()
+                                yield sse_done().encode()
+                                return
+
+    except Exception as exc:
+        logger.error("Codex stream interrupted: {}", exc)
+        err = sse_format({"error": {"message": f"stream_interrupted: {exc}", "type": "stream_error"}})
+        yield err.encode()
+        yield sse_done().encode()

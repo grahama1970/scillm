@@ -21,7 +21,8 @@ from scillm.proxy.config import ProxyConfig, load_config
 from scillm.proxy.errors import ProxyError, proxy_error_handler
 from scillm.proxy.middleware import BaseMiddleware, MiddlewareChain, MiddlewareReject
 from scillm.proxy.router import Router
-from scillm.proxy.streaming import collect_response, stream_response
+from scillm.proxy.streaming import SSE_HEADERS, collect_response, stream_response
+from starlette.responses import StreamingResponse
 
 # ---------------------------------------------------------------------------
 # Globals (populated during lifespan)
@@ -227,7 +228,18 @@ async def chat_completions(request: Request):
         result = await _router.complete(model, messages, **kwargs)
 
         if stream:
-            response = await stream_response(result, model=model)
+            # OAuth providers return AsyncIterator[bytes] (already SSE-formatted).
+            # The openai SDK returns its own async stream type.
+            if hasattr(result, "__aiter__") and not hasattr(result, "response"):
+                # Raw byte stream from OAuth providers — pipe directly
+                response = StreamingResponse(
+                    result,
+                    media_type="text/event-stream",
+                    headers=SSE_HEADERS,
+                )
+            else:
+                # OpenAI SDK async stream — use existing SSE wrapper
+                response = await stream_response(result, model=model)
             # Post-call middleware (observe only for streaming)
             await _middleware_chain.run_post_call(body, {"stream": True})
             return response

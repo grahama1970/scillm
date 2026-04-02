@@ -160,6 +160,49 @@ class TestClaudeOAuth:
             assert isinstance(data["usage"]["completion_tokens"], int)
 
 
+    @pytest.mark.skipif(not _PROXY_OK, reason="Proxy not reachable")
+    @pytest.mark.skipif(not _anthropic_token_valid(), reason="No valid Anthropic OAuth token")
+    def test_claude_streaming(self):
+        """Claude streaming should return SSE data lines with OpenAI delta format."""
+        with httpx.Client() as client:
+            with client.stream(
+                "POST",
+                f"{PROXY_BASE}/v1/chat/completions",
+                headers={**AUTH_HEADERS, "Content-Type": "application/json"},
+                json={
+                    "model": "claude-sonnet-4-6",
+                    "messages": [{"role": "user", "content": "Count to 3"}],
+                    "stream": True,
+                    "max_tokens": 32,
+                },
+                timeout=30.0,
+            ) as resp:
+                assert resp.status_code == 200, f"Expected 200, got {resp.status_code}"
+                assert "text/event-stream" in resp.headers.get("content-type", "")
+
+                lines = []
+                for line in resp.iter_lines():
+                    if line:
+                        lines.append(line)
+
+                # Must have at least one data chunk and [DONE]
+                data_lines = [l for l in lines if l.startswith("data: ")]
+                assert len(data_lines) >= 2, f"Expected >=2 data lines, got {len(data_lines)}"
+
+                # Verify first content chunk is OpenAI delta format
+                first_data = json.loads(data_lines[0][6:])
+                assert first_data["object"] == "chat.completion.chunk"
+                assert "delta" in first_data["choices"][0]
+
+                # Verify finish_reason in penultimate chunk
+                pre_done = [l for l in data_lines if l != "data: [DONE]"]
+                last_chunk = json.loads(pre_done[-1][6:])
+                assert last_chunk["choices"][0]["finish_reason"] is not None
+
+                # Verify [DONE] sentinel
+                assert data_lines[-1] == "data: [DONE]"
+
+
 class TestCodexOAuth:
     """Test Codex/GPT models via OpenAI OAuth."""
 
@@ -174,6 +217,47 @@ class TestCodexOAuth:
             assert "choices" in data
             content = data["choices"][0]["message"]["content"]
             assert "4" in content
+
+    @pytest.mark.skipif(not _PROXY_OK, reason="Proxy not reachable")
+    @pytest.mark.skipif(not _codex_token_valid(), reason="No valid Codex OAuth token")
+    def test_codex_streaming(self):
+        """Codex streaming should return SSE data lines with OpenAI delta format."""
+        with httpx.Client() as client:
+            with client.stream(
+                "POST",
+                f"{PROXY_BASE}/v1/chat/completions",
+                headers={**AUTH_HEADERS, "Content-Type": "application/json"},
+                json={
+                    "model": "gpt-5.3-codex",
+                    "messages": [{"role": "user", "content": "Say hello"}],
+                    "stream": True,
+                    "max_tokens": 32,
+                },
+                timeout=60.0,
+            ) as resp:
+                assert resp.status_code == 200, f"Expected 200, got {resp.status_code}"
+                assert "text/event-stream" in resp.headers.get("content-type", "")
+
+                lines = []
+                for line in resp.iter_lines():
+                    if line:
+                        lines.append(line)
+
+                data_lines = [l for l in lines if l.startswith("data: ")]
+                assert len(data_lines) >= 2, f"Expected >=2 data lines, got {len(data_lines)}"
+
+                # Verify delta format
+                first_data = json.loads(data_lines[0][6:])
+                assert first_data["object"] == "chat.completion.chunk"
+                assert "delta" in first_data["choices"][0]
+
+                # Verify finish_reason before [DONE]
+                pre_done = [l for l in data_lines if l != "data: [DONE]"]
+                last_chunk = json.loads(pre_done[-1][6:])
+                assert last_chunk["choices"][0]["finish_reason"] is not None
+
+                # Verify [DONE] sentinel
+                assert data_lines[-1] == "data: [DONE]"
 
     @pytest.mark.skipif(not _PROXY_OK, reason="Proxy not reachable")
     @pytest.mark.skipif(not _codex_token_valid(), reason="No valid Codex OAuth token")

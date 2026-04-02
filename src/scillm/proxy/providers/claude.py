@@ -6,14 +6,16 @@ Uses OAuth tokens from ~/.pi/agent/auth.json (shared with Pi CLI).
 
 from __future__ import annotations
 
+import json
 import time
 import uuid
-from typing import Any
+from typing import Any, AsyncIterator
 
 import httpx
 import openai
 from loguru import logger
 
+from scillm.proxy.providers import make_chunk_id, sse_chunk, sse_done, sse_format
 from scillm.proxy.providers.auth import get_anthropic_token
 
 ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages"
@@ -196,3 +198,117 @@ async def claude_completion(
 
     data = resp.json()
     return _anthropic_to_openai_response(data, model)
+
+
+async def claude_completion_stream(
+    model: str,
+    messages: list[dict[str, Any]],
+    **kwargs: Any,
+) -> AsyncIterator[bytes]:
+    """Stream Claude via Anthropic Messages API, yielding OpenAI SSE bytes.
+
+    Translates Anthropic SSE events (content_block_delta, message_delta,
+    message_stop) into OpenAI-compatible ``chat.completion.chunk`` format.
+    """
+    token = get_anthropic_token()
+    if not token:
+        raise Exception("No Anthropic OAuth token available.")
+
+    api_model = CLAUDE_MODEL_MAP.get(model, model)
+    system_prompt, anthropic_msgs = _openai_to_anthropic_messages(messages)
+
+    if system_prompt:
+        anthropic_msgs.insert(0, {"role": "user", "content": f"[System instruction]: {system_prompt}"})
+        anthropic_msgs.insert(1, {"role": "assistant", "content": "Understood. I will follow that instruction."})
+
+    body: dict[str, Any] = {
+        "model": api_model,
+        "messages": anthropic_msgs,
+        "max_tokens": kwargs.get("max_tokens", 4096),
+        "system": CLAUDE_CODE_SYSTEM_PREFIX,
+        "stream": True,
+    }
+    if "temperature" in kwargs:
+        body["temperature"] = kwargs["temperature"]
+    if "top_p" in kwargs:
+        body["top_p"] = kwargs["top_p"]
+    if "stop" in kwargs:
+        stop = kwargs["stop"]
+        body["stop_sequences"] = stop if isinstance(stop, list) else [stop]
+
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "anthropic-version": ANTHROPIC_VERSION,
+        "anthropic-beta": ANTHROPIC_BETA,
+        "user-agent": "claude-cli/2.1.75",
+        "x-app": "cli",
+        "content-type": "application/json",
+    }
+
+    logger.info("Claude OAuth stream: model={}, {} messages", model, len(anthropic_msgs))
+    chunk_id = make_chunk_id()
+    timeout = kwargs.get("timeout", 90)
+
+    try:
+        async with httpx.AsyncClient(timeout=float(timeout)) as client:
+            async with client.stream("POST", ANTHROPIC_API_URL, json=body, headers=headers) as resp:
+                if resp.status_code != 200:
+                    error_body = await resp.aread()
+                    error_text = error_body.decode("utf-8", errors="replace")
+                    logger.warning("Claude stream error {}: {}", resp.status_code, error_text[:500])
+                    err = sse_format({"error": {"message": f"Claude API {resp.status_code}: {error_text[:300]}", "type": "provider_error"}})
+                    yield err.encode()
+                    yield sse_done().encode()
+                    return
+
+                buffer = ""
+                async for text_chunk in resp.aiter_text():
+                    buffer += text_chunk
+                    while "\n\n" in buffer:
+                        event_str, buffer = buffer.split("\n\n", 1)
+                        # Parse SSE event
+                        event_type = ""
+                        event_data = ""
+                        for line in event_str.split("\n"):
+                            if line.startswith("event: "):
+                                event_type = line[7:].strip()
+                            elif line.startswith("data: "):
+                                event_data = line[6:]
+
+                        if not event_data:
+                            continue
+                        try:
+                            data = json.loads(event_data)
+                        except json.JSONDecodeError:
+                            continue
+
+                        if event_type == "content_block_delta":
+                            delta = data.get("delta", {})
+                            if delta.get("type") == "text_delta":
+                                chunk = sse_chunk(chunk_id, model, content_delta=delta.get("text", ""))
+                                yield sse_format(chunk).encode()
+
+                        elif event_type == "message_delta":
+                            delta = data.get("delta", {})
+                            stop_reason = delta.get("stop_reason", "end_turn")
+                            finish = "length" if stop_reason == "max_tokens" else "stop"
+                            usage_data = data.get("usage", {})
+                            usage = None
+                            if usage_data:
+                                usage = {
+                                    "prompt_tokens": usage_data.get("input_tokens", 0),
+                                    "completion_tokens": usage_data.get("output_tokens", 0),
+                                    "total_tokens": usage_data.get("input_tokens", 0) + usage_data.get("output_tokens", 0),
+                                }
+                            chunk = sse_chunk(chunk_id, model, finish_reason=finish, usage=usage)
+                            yield sse_format(chunk).encode()
+
+                        elif event_type == "message_stop":
+                            yield sse_done().encode()
+                            return
+
+    except Exception as exc:
+        logger.error("Claude stream interrupted: {}", exc)
+        err = sse_format({"error": {"message": f"stream_interrupted: {exc}", "type": "stream_error"}})
+        yield err.encode()
+        yield sse_done().encode()

@@ -1,0 +1,297 @@
+version: 1
+kind: orchestrate-plan
+
+metadata:
+  title: "SSE Streaming for Claude and Codex OAuth Providers"
+  goal: "Add streaming support so callers receive incremental tokens via text/event-stream for Claude and Codex OAuth paths"
+  plan_type: code
+  created: "2026-04-02"
+  primary_persona:
+    name: "Project Agent"
+    role: "Any skill or agent calling /scillm with stream=true"
+    source: "skills/scillm/SKILL.md"
+
+execution:
+  max_concurrency: 2
+
+capability_overlap:
+  - "/memory recall 'SSE streaming scillm' — no prior streaming work found in memory"
+  - "Skills manifest scan: searched 230+ skills for 'SSE', 'streaming', 'event-stream' — no match. /scillm, /codex, /subagent-service handle LLM calls but none do SSE format translation"
+  - "CALL: streaming.py _sse_generator() + stream_response() (existing SSE infrastructure for openai SDK)"
+  - "EXTEND: codex.py SSE parser (already parses SSE internally — change from collect to yield)"
+  - "EXTEND: claude.py httpx client (add stream=true to Anthropic Messages API call)"
+  - "CREATE: SSE delta format helpers in providers/__init__.py — justified: no existing skill translates between Anthropic/Codex SSE and OpenAI delta format"
+
+questions_blockers:
+  - "None — Anthropic streaming format is well-documented, Codex already streams internally"
+
+lanes:
+  - id: "0"
+    label: "Wave 0: Shared streaming infrastructure"
+  - id: "1"
+    label: "Wave 1: Claude streaming"
+  - id: "2"
+    label: "Wave 2: Codex streaming"
+  - id: "3"
+    label: "Wave 3: Router + app wiring"
+  - id: "4"
+    label: "Wave 4: Tests + verification"
+
+tasks:
+  # ======================================================================
+  # Wave 0: Shared streaming infrastructure
+  # ======================================================================
+  - id: "1"
+    title: "Add OpenAI SSE delta helper to providers/__init__.py"
+    lane: "0"
+    runner: "code-runner"
+    backend: "sonnet"
+    mode: "iterative"
+    depends_on: []
+    implementation:
+      - "Create async generator helper: openai_sse_delta(chunk_id, model, content_delta, finish_reason, usage)"
+      - "Yields dict in exact OpenAI streaming format: {id, object: 'chat.completion.chunk', choices: [{delta: {content}, index, finish_reason}]}"
+      - "Separate function for the [DONE] sentinel"
+      - "Separate function for SSE wire format: 'data: {json}\\n\\n'"
+      - "Must match the format that stream_response() in streaming.py produces from the openai SDK"
+    allowlist:
+      - "src/scillm/proxy/providers/__init__.py"
+    read_context:
+      - "src/scillm/proxy/streaming.py"
+    tests:
+      - "test-lab/run.sh verify-task 1 src/scillm/proxy/providers/ --domain python"
+    definition_of_done:
+      command: "python3 -c \"from scillm.proxy.providers import sse_chunk, sse_done; c = sse_chunk('id', 'model', 'hello'); assert c['object'] == 'chat.completion.chunk'; assert c['choices'][0]['delta']['content'] == 'hello'; print('OK')\""
+      assertion: "sse_chunk returns dict with object=chat.completion.chunk and delta content"
+
+  # ======================================================================
+  # Wave 1: Claude streaming
+  # ======================================================================
+  - id: "2"
+    title: "Add claude_completion_stream() async generator"
+    lane: "1"
+    runner: "code-runner"
+    backend: "codex"
+    mode: "iterative"
+    depends_on: ["1"]
+    implementation:
+      - "Add claude_completion_stream() to claude.py that returns AsyncIterator[bytes]"
+      - "Uses httpx.AsyncClient.stream() with POST to Anthropic Messages API"
+      - "Set stream=true in Anthropic request body"
+      - "Anthropic SSE events: message_start, content_block_start, content_block_delta, content_block_stop, message_delta, message_stop"
+      - "Translate each content_block_delta (type=text_delta) → OpenAI delta chunk via sse_chunk()"
+      - "On message_delta (stop_reason + usage) → emit final chunk with finish_reason + usage"
+      - "On message_stop → emit [DONE] via sse_done()"
+      - "Handle errors mid-stream: yield SSE error event, then [DONE]"
+      - "Keep existing claude_completion() unchanged for non-streaming callers"
+      - "Same OAuth headers, system prompt prefix, and model name mapping as claude_completion()"
+    allowlist:
+      - "src/scillm/proxy/providers/claude.py"
+    read_context:
+      - "src/scillm/proxy/providers/__init__.py"
+      - "src/scillm/proxy/streaming.py"
+    tests:
+      - "test-lab/run.sh verify-task 2 src/scillm/proxy/providers/ --domain python"
+    definition_of_done:
+      command: "python3 -c \"import inspect; from scillm.proxy.providers.claude import claude_completion_stream; assert inspect.isasyncgenfunction(claude_completion_stream), 'Must be async generator'; print('OK')\""
+      assertion: "claude_completion_stream is an async generator function"
+
+  # ======================================================================
+  # Wave 2: Codex streaming
+  # ======================================================================
+  - id: "3"
+    title: "Add codex_completion_stream() async generator"
+    lane: "2"
+    runner: "code-runner"
+    backend: "codex"
+    mode: "iterative"
+    depends_on: ["1"]
+    implementation:
+      - "Add codex_completion_stream() to codex.py that returns AsyncIterator[bytes]"
+      - "Reuses the existing httpx.AsyncClient.stream() SSE parsing logic"
+      - "Instead of collecting events into a list, yield each event as it arrives"
+      - "Translate Codex SSE events to OpenAI delta format:"
+      - "  response.output_text.delta → sse_chunk(content_delta=event['delta'])"
+      - "  response.completed → sse_chunk(finish_reason='stop', usage=...) then sse_done()"
+      - "Handle errors mid-stream: yield SSE error event, then [DONE]"
+      - "Keep existing codex_completion() unchanged for non-streaming callers"
+      - "Same OAuth headers and request body as codex_completion()"
+    allowlist:
+      - "src/scillm/proxy/providers/codex.py"
+    read_context:
+      - "src/scillm/proxy/providers/__init__.py"
+      - "src/scillm/proxy/streaming.py"
+    tests:
+      - "test-lab/run.sh verify-task 3 src/scillm/proxy/providers/ --domain python"
+    definition_of_done:
+      command: "python3 -c \"import inspect; from scillm.proxy.providers.codex import codex_completion_stream; assert inspect.isasyncgenfunction(codex_completion_stream), 'Must be async generator'; print('OK')\""
+      assertion: "codex_completion_stream is an async generator function"
+
+  # ======================================================================
+  # Wave 3: Router + app wiring
+  # ======================================================================
+  - id: "4"
+    title: "Wire streaming through router._try_deployment()"
+    lane: "3"
+    runner: "code-runner"
+    backend: "sonnet"
+    mode: "iterative"
+    depends_on: ["2", "3"]
+    implementation:
+      - "In router.py _try_deployment(), check kwargs.get('stream', False) for OAuth providers"
+      - "If stream=True and anthropic-oauth: return claude_completion_stream() async generator"
+      - "If stream=True and codex-oauth: return codex_completion_stream() async generator"
+      - "If stream=False: keep existing claude_completion() / codex_completion() path"
+      - "The returned async generator must be compatible with streaming.stream_response()"
+      - "Import both stream functions at top of router.py"
+    allowlist:
+      - "src/scillm/proxy/router.py"
+    read_context:
+      - "src/scillm/proxy/providers/claude.py"
+      - "src/scillm/proxy/providers/codex.py"
+      - "src/scillm/proxy/streaming.py"
+      - "src/scillm/proxy/app.py"
+    tests:
+      - "test-lab/run.sh verify-task 4 src/scillm/proxy/ --domain python"
+    definition_of_done:
+      command: "python3 -c \"from scillm.proxy.router import Router; from scillm.proxy.providers.claude import claude_completion_stream; from scillm.proxy.providers.codex import codex_completion_stream; print('OK')\""
+      assertion: "Router and both stream functions import cleanly"
+
+  - id: "5"
+    title: "Update app.py stream detection for OAuth providers"
+    lane: "3"
+    runner: "code-runner"
+    backend: "sonnet"
+    mode: "iterative"
+    depends_on: ["4"]
+    implementation:
+      - "In app.py chat_completions(), the stream path already works for openai SDK responses"
+      - "The OAuth stream functions return AsyncIterator[bytes] (raw SSE bytes)"
+      - "Need to detect when result is an async iterator (not an openai stream object)"
+      - "If result is AsyncIterator[bytes]: wrap in StreamingResponse directly with SSE_HEADERS"
+      - "If result is openai async stream: use existing stream_response() path"
+      - "Both paths return StreamingResponse with text/event-stream"
+      - "Key: stream_response() calls _sse_generator() which wraps openai SDK chunks"
+      - "OAuth streams are already in SSE wire format — just pipe bytes to StreamingResponse"
+    allowlist:
+      - "src/scillm/proxy/app.py"
+    read_context:
+      - "src/scillm/proxy/streaming.py"
+      - "src/scillm/proxy/router.py"
+    tests:
+      - "test-lab/run.sh verify-task 5 src/scillm/proxy/ --domain python"
+    definition_of_done:
+      command: "python3 -c \"from scillm.proxy.app import app; assert any(r.path == '/v1/chat/completions' for r in app.routes); print('OK')\""
+      assertion: "App loads with chat completions endpoint"
+
+  # ======================================================================
+  # Wave 4: Tests + verification
+  # ======================================================================
+  - id: "6"
+    title: "Add streaming tests for Claude OAuth"
+    lane: "4"
+    runner: "code-runner"
+    backend: "sonnet"
+    mode: "iterative"
+    depends_on: ["5"]
+    implementation:
+      - "Add test_claude_streaming() to tests/test_oauth_providers.py"
+      - "Uses httpx.AsyncClient.stream() to POST with stream=true"
+      - "Verifies SSE format: each line starts with 'data: ' or is empty"
+      - "Verifies at least one delta chunk has content"
+      - "Verifies last data line before [DONE] has finish_reason"
+      - "Verifies [DONE] sentinel is present"
+      - "Skip if no valid Claude token (same pattern as existing tests)"
+    allowlist:
+      - "tests/test_oauth_providers.py"
+    read_context:
+      - "src/scillm/proxy/providers/claude.py"
+    definition_of_done:
+      command: "python3 -m pytest tests/test_oauth_providers.py::TestClaudeOAuth::test_claude_streaming -v --timeout=30"
+      assertion: "Test passes or skips (if no token)"
+
+  - id: "7"
+    title: "Add streaming tests for Codex OAuth"
+    lane: "4"
+    runner: "code-runner"
+    backend: "sonnet"
+    mode: "iterative"
+    depends_on: ["5"]
+    implementation:
+      - "Add test_codex_streaming() to tests/test_oauth_providers.py"
+      - "Same SSE verification pattern as Claude test"
+      - "Verify response.output_text.delta events translate to OpenAI delta chunks"
+      - "Skip if no valid Codex token"
+    allowlist:
+      - "tests/test_oauth_providers.py"
+    read_context:
+      - "src/scillm/proxy/providers/codex.py"
+    definition_of_done:
+      command: "python3 -m pytest tests/test_oauth_providers.py::TestCodexOAuth::test_codex_streaming -v --timeout=60"
+      assertion: "Test passes or skips (if no token)"
+
+  - id: "8"
+    title: "Docker rebuild + live smoke test"
+    lane: "4"
+    runner: "local"
+    backend: ""
+    mode: ""
+    depends_on: ["6", "7"]
+    command: |
+      docker compose -p scillm -f deploy/docker/compose.scillm.core.yml up -d --build && \
+      sleep 5 && \
+      curl -sN -X POST http://localhost:4001/v1/chat/completions \
+        -H "Authorization: Bearer sk-dev-proxy-123" \
+        -H "Content-Type: application/json" \
+        -d '{"model":"claude-sonnet-4-6","messages":[{"role":"user","content":"Count to 5"}],"stream":true,"max_tokens":64}' \
+        | head -20
+    definition_of_done:
+      command: "curl -sN -m 15 -X POST http://localhost:4001/v1/chat/completions -H 'Authorization: Bearer sk-dev-proxy-123' -H 'Content-Type: application/json' -d '{\"model\":\"claude-sonnet-4-6\",\"messages\":[{\"role\":\"user\",\"content\":\"Say hi\"}],\"stream\":true,\"max_tokens\":32}' | grep -q 'data:'"
+      assertion: "SSE data: lines appear in response"
+
+  - id: "9"
+    title: "Update SKILL.md streaming docs"
+    lane: "4"
+    runner: "code-runner"
+    backend: "sonnet"
+    mode: "one_shot"
+    depends_on: ["8"]
+    implementation:
+      - "Update Claude OAuth section: remove 'stream: NO' from parameter table, mark as YES"
+      - "Update Codex OAuth section: note streaming now works"
+      - "Add streaming example to both sections showing httpx stream usage"
+      - "Update known limitations section"
+    allowlist:
+      - "skills/scillm/SKILL.md"
+    read_context:
+      - "src/scillm/proxy/providers/claude.py"
+      - "src/scillm/proxy/providers/codex.py"
+    definition_of_done:
+      command: "grep -q 'stream.*YES' skills/scillm/SKILL.md"
+      assertion: "Streaming marked as supported in SKILL.md"
+
+  - id: "10"
+    title: "Git commit and push"
+    lane: "4"
+    runner: "local"
+    backend: ""
+    mode: ""
+    depends_on: ["9"]
+    command: |
+      cp skills/scillm/SKILL.md ~/.pi/skills/scillm/SKILL.md && \
+      git add -A && \
+      git commit -m "Add SSE streaming for Claude and Codex OAuth providers
+
+      - Claude: Anthropic Messages API stream=true → OpenAI delta chunks
+      - Codex: Pass-through SSE from ChatGPT backend → OpenAI delta format
+      - Shared SSE helpers in providers/__init__.py
+      - Router detects stream=True for OAuth providers, returns async generator
+      - App wraps generator in StreamingResponse with text/event-stream
+      - Tests: streaming SSE format verification for both providers
+      - SKILL.md updated: streaming now supported for Claude and Codex
+
+      Co-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>" && \
+      git push origin main
+    definition_of_done:
+      command: "git log --oneline -1 | grep -q streaming"
+      assertion: "Commit exists with streaming in message"
