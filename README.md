@@ -55,18 +55,6 @@ Makefile shortcuts: `make proxy-rebuild` (build+start), `make proxy-up`, `make p
 
 **Container details:** `python:3.12-slim`, `uvicorn` on port 4001, `network_mode: host` (for local Ollama access), config mounted from `local/proxy_server_config.yaml`, health check every 15s. Redis included for caching and request logging. Ollama available via `--profile local`.
 
-## Why Docker, Not `pip install`
-
-scillm runs as a **persistent proxy service**, not a library you import. This is deliberate:
-
-- **One process, many callers.** Every project agent, skill, and script on the machine hits the same `localhost:4001` endpoint. A pip package would mean each caller imports scillm, manages its own connections, and duplicates retry/circuit-breaker state. The proxy centralizes all of that.
-- **OAuth token sharing.** Claude and Codex OAuth credentials live in `~/.claude/` and `~/.codex/`. The Docker container mounts these read-only — one token refresh serves every caller. A library would need each process to handle token management independently.
-- **Provider isolation.** If Chutes goes down, the circuit breaker opens *once* in the proxy and all callers immediately cascade to DeepSeek. With a library, each process discovers the failure independently and wastes retries.
-- **Config changes without restarts.** Update `proxy_server_config.yaml`, rebuild the container, done. Every caller sees the new model list immediately. No code changes, no redeployments, no version bumps.
-- **No dependency conflicts.** The proxy's dependencies (httpx, openai SDK, json_repair) live inside the container. Callers only need `httpx` — they don't inherit scillm's dependency tree.
-
-The `src/scillm/batch.py` and `src/scillm/paved/chat.py` modules are also importable as a library for advanced use cases (parallel batch iteration, source grounding) that need tighter integration than HTTP. But the standard path is `httpx.post("http://localhost:4001/v1/chat/completions")`.
-
 ## Security
 
 scillm is designed for **local development and trusted networks**. The default configuration uses:
@@ -92,6 +80,18 @@ Every provider scillm targets speaks OpenAI-compatible API (`/v1/chat/completion
 - **Gemini native file support** — Send PDFs, images, and ZIP archives via `inlineData` parts when targeting Gemini. ZIP files are auto-exploded into individual parts (text as text, binaries as native `inlineData`).
 - **Ollama auto-routing** — Any locally-pulled Ollama model works without a config entry. The proxy auto-detects unknown model names and routes them to the local Ollama instance.
 - **SSE streaming for all providers** — `"stream": true` works everywhere, including Claude and Codex OAuth. The proxy translates provider-specific SSE formats into OpenAI-compatible delta chunks. Same `data: {"choices":[{"delta":{"content":"..."}}]}` format regardless of backend.
+
+## Why Docker, Not `pip install`
+
+scillm runs as a **persistent proxy service**, not a library you import. This is deliberate:
+
+- **One process, many callers.** Every project agent, skill, and script on the machine hits the same `localhost:4001` endpoint. A pip package would mean each caller imports scillm, manages its own connections, and duplicates retry/circuit-breaker state. The proxy centralizes all of that.
+- **OAuth token sharing.** Claude and Codex OAuth credentials live in `~/.claude/` and `~/.codex/`. The Docker container mounts these read-only — one token refresh serves every caller. A library would need each process to handle token management independently.
+- **Provider isolation.** If Chutes goes down, the circuit breaker opens *once* in the proxy and all callers immediately cascade to DeepSeek. With a library, each process discovers the failure independently and wastes retries.
+- **Config changes without restarts.** Update `proxy_server_config.yaml`, rebuild the container, done. Every caller sees the new model list immediately. No code changes, no redeployments, no version bumps.
+- **No dependency conflicts.** The proxy's dependencies (httpx, openai SDK, json_repair) live inside the container. Callers only need `httpx` — they don't inherit scillm's dependency tree.
+
+The `src/scillm/batch.py` and `src/scillm/paved/chat.py` modules are also importable as a library for advanced use cases (parallel batch iteration, source grounding) that need tighter integration than HTTP. But the standard path is `httpx.post("http://localhost:4001/v1/chat/completions")`.
 
 ## Why scillm
 
@@ -249,23 +249,9 @@ Auto-routing handles most model names without config entries. Claude and Codex u
 
 ## Adding Your Own Models
 
-There are two ways to add a model, depending on whether the provider needs configuration or not.
+Most providers are auto-routed by model name — see the Provider Setup table above. No config entry needed for Claude, Codex, Gemini, Chutes `Org/Model`, or Ollama `model:tag`.
 
-### Auto-routed (zero config)
-
-These providers work by model name alone — no config entry needed:
-
-| Model name | Where it goes |
-|------------|---------------|
-| `claude-sonnet-4-6` | Anthropic (reads OAuth from `~/.claude/`) |
-| `gpt-5.3-codex` | OpenAI Codex (reads OAuth from `~/.codex/`) |
-| `gemini-2.5-flash` | Google Gemini (reads `GEMINI_API_KEY` from `.env`) |
-| `Org/Model` (e.g. `meta-llama/Llama-4-Scout`) | Chutes (reads `CHUTES_API_KEY` from `.env`) |
-| `qwen2.5:7b` (any `model:tag`) | Ollama (local, no auth) |
-
-Just call them: `{"model": "gemini-2.5-flash", "messages": [...]}`. The proxy auto-detects the provider from the name pattern.
-
-### Config-based (5 lines of YAML)
+For providers that need a custom API base or key, add 5 lines of YAML:
 
 For providers that need a custom API base or key, add an entry to `local/proxy_server_config.yaml`:
 
