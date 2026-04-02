@@ -243,22 +243,55 @@ Callers say `model: "text"` — the proxy picks the provider. When models change
 
 Auto-routing handles most model names without config entries. Claude and Codex use OAuth from `~/.claude/` and `~/.codex/` respectively.
 
-## Adding a Provider
+## Adding Your Own Models
 
-5 lines of YAML. Zero code changes.
+There are two ways to add a model, depending on whether the provider needs configuration or not.
+
+### Auto-routed (zero config)
+
+These providers work by model name alone — no config entry needed:
+
+| Model name | Where it goes |
+|------------|---------------|
+| `claude-sonnet-4-6` | Anthropic (reads OAuth from `~/.claude/`) |
+| `gpt-5.3-codex` | OpenAI Codex (reads OAuth from `~/.codex/`) |
+| `gemini-2.5-flash` | Google Gemini (reads `GEMINI_API_KEY` from `.env`) |
+| `Org/Model` (e.g. `meta-llama/Llama-4-Scout`) | Chutes (reads `CHUTES_API_KEY` from `.env`) |
+| `qwen2.5:7b` (any `model:tag`) | Ollama (local, no auth) |
+
+Just call them: `{"model": "gemini-2.5-flash", "messages": [...]}`. The proxy auto-detects the provider from the name pattern.
+
+### Config-based (5 lines of YAML)
+
+For providers that need a custom API base or key, add an entry to `local/proxy_server_config.yaml`:
 
 ```yaml
-- model_name: new-provider
-  params:
-    model: provider-native/model-name
-    api_base: https://api.newprovider.com/v1
-    api_key: os.environ/NEW_PROVIDER_KEY
+# Example: add Together.ai
+- model_name: together-llama
+  scillm_params:
+    model: meta-llama/Llama-4-Scout-17B-16E-Instruct
+    api_base: https://api.together.xyz/v1
+    api_key: os.environ/TOGETHER_API_KEY
     timeout: 45
 ```
 
-Optionally add to fallback cascade, then `make proxy-rebuild`.
+Then add `TOGETHER_API_KEY=...` to `.env` and rebuild:
 
-**Constraint:** Provider must speak `/v1/chat/completions`. Most do.
+```bash
+make proxy-rebuild  # or: docker compose -p scillm -f deploy/docker/compose.scillm.core.yml up -d --build
+```
+
+Now `{"model": "together-llama", "messages": [...]}` works. Callers don't know or care which provider serves it.
+
+**Add to fallback cascade** (optional): if Together goes down, fall back to Chutes:
+
+```yaml
+scillm_settings:
+  fallbacks:
+    - together-llama: [text]  # fall back to the "text" group (Chutes DeepSeek-V3)
+```
+
+**Constraint:** The provider must speak OpenAI's `/v1/chat/completions` format. Most do (Together, Groq, Fireworks, Perplexity, Mistral, etc.).
 
 ## Testing
 
