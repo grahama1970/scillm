@@ -36,7 +36,7 @@ def _get_client(api_base: str, api_key: str) -> _openai.AsyncOpenAI:
 
 async def _acompletion(*, model: str, messages: list, api_base: str, api_key: str,
                        timeout: float = 30.0, **kwargs) -> Any:
-    """Native openai.AsyncOpenAI chat completion (replaces litellm wrapper)."""
+    """Native openai.AsyncOpenAI chat completion."""
     # Strip kwargs that openai SDK doesn't accept
     kwargs.pop("custom_llm_provider", None)
     kwargs.pop("retry_on_empty", None)

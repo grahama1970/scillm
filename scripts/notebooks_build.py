@@ -85,7 +85,7 @@ def nb_router_parallel():
 import os, asyncio
 import nest_asyncio; nest_asyncio.apply()
 from scillm import Router
-router = Router(default_litellm_params={
+router = Router(default_scillm_params={
   'api_base': os.environ['CHUTES_API_BASE'],
   'api_key': os.environ['CHUTES_API_KEY'],
   'custom_llm_provider': 'openai_like',
@@ -115,8 +115,8 @@ import os
 from scillm import completion
 base=os.environ['CHUTES_API_BASE']; key=os.environ['CHUTES_API_KEY']; model=os.environ['CHUTES_MODEL']
 model_list=[
-  {'model_name':'m1','litellm_params':{'model':model,'api_base':base,'api_key':key,'custom_llm_provider':'openai_like'}},
-  {'model_name':'m2','litellm_params':{'model':model,'api_base':base,'api_key':key,'custom_llm_provider':'openai_like'}},
+  {'model_name':'m1','scillm_params':{'model':model,'api_base':base,'api_key':key,'custom_llm_provider':'openai_like'}},
+  {'model_name':'m2','scillm_params':{'model':model,'api_base':base,'api_key':key,'custom_llm_provider':'openai_like'}},
 ]
 resp = completion(model='m1', model_list=model_list, messages=[{'role':'user','content':'Say OK'}], max_tokens=8, temperature=0)
 print(resp.choices[0].message.get('content',''))
@@ -307,7 +307,7 @@ if not key:
 else:
   router = scillm.Router(model_list=[{
     'model_name': 'ppx',
-    'litellm_params': {
+    'scillm_params': {
       'custom_llm_provider': 'perplexity',
       'model': model,
       'api_key': key,
@@ -368,18 +368,16 @@ def nb_anthropic_provider():
         (default `claude-3-haiku-20240307`).
         """.strip()),
         new_code_cell("""
-import os, litellm
+import os, httpx
 key = os.environ.get('ANTHROPIC_API_KEY','')
-model = os.environ.get('ANTHROPIC_MODEL','claude-3-haiku-20240307')
+model = os.environ.get('ANTHROPIC_MODEL','claude-sonnet-4-6')
 if not key:
-  print('ANTHROPIC_API_KEY not set — skipping live call')
-else:
-  resp = litellm.completion(
-    model=model,
-    custom_llm_provider='anthropic',
-    api_key=key,
-    messages=[{'role':'user','content':'In one word, say OK'}],
-    max_tokens=8,
+  print('No API key — using scillm proxy with OAuth instead')
+resp = httpx.post(
+    'http://localhost:4001/v1/chat/completions',
+    headers={'Authorization': 'Bearer sk-dev-proxy-123'},
+    json={'model': model, 'messages': [{'role':'user','content':'In one word, say OK'}],
+    'max_tokens': 8,
     temperature=0,
   )
   print(resp.choices[0].message.get('content',''))

@@ -134,7 +134,7 @@ Each yielded `result` carries:
 
 ### Section A: SDK Path (For Code Inside scillm’s Venv)
 
-This document defines rules for how code in `experiments/litellm/` (and
+This document defines rules for how code in `experiments/scillm/` (and
 `experiments/devops/**`) must call SciLLM and Chutes via the pip package.
 It exists to prevent regressions back to bespoke wrappers or manual headers.
 

@@ -1,6 +1,6 @@
 """Response caching middleware using Redis or in-memory fallback.
 
-No litellm dependency. Uses redis.asyncio directly for Redis caching
+Uses redis.asyncio directly for Redis caching
 and a simple dict with TTL for in-memory fallback.
 
 Migrated from CustomLogger to BaseMiddleware interface.

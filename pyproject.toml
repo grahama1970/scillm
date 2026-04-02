@@ -39,8 +39,7 @@ dependencies = [
 [project.urls]
 Homepage = "https://github.com/grahama1970/scillm"
 Repository = "https://github.com/grahama1970/scillm"
-Upstream = "https://github.com/BerriAI/litellm"
-Documentation = "https://docs.litellm.ai"
+Documentation = "https://github.com/grahama1970/scillm#readme"
 
 [project.optional-dependencies]
 proxy = [

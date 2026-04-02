@@ -1,7 +1,7 @@
 """scillm — thin OpenAI-compatible proxy with multi-provider fallback.
 
-Public API exports the proxy's own modules. Zero litellm imports.
-All provider calls go through openai.AsyncOpenAI in the router.
+Public API exports the proxy's own modules.
+All provider calls go through openai.AsyncOpenAI, httpx, or custom OAuth adapters.
 """
 
 from scillm.proxy.config import ProxyConfig, load_config
