@@ -19,11 +19,8 @@ Single-tenant, OpenAI-compatible proxy + `/scillm` skill. One endpoint for every
 cp .env.example .env
 # Edit .env — set at minimum: CHUTES_API_KEY, CHUTES_API_BASE
 
-# 2. Build and start (proxy + Redis)
-docker compose up -d --build
-
-# 2b. Or include local Ollama for offline models
-docker compose --profile local up -d --build
+# 2. Build and start
+docker compose -p scillm -f deploy/docker/compose.scillm.core.yml up -d --build
 
 # 3. Verify
 curl -s http://localhost:4001/health/liveliness
@@ -35,6 +32,24 @@ curl http://localhost:4001/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{"model":"text","messages":[{"role":"user","content":"hi"}],"max_tokens":16}'
 ```
+
+## Provider Setup
+
+Most providers need zero code — just credentials on disk or in `.env`.
+
+| Provider | What to do | Model names |
+|----------|-----------|-------------|
+| **Claude** | Nothing (if using Claude Code — token is already in `~/.claude/.credentials.json`) | `claude-sonnet-4-6`, `claude-haiku-4-5` |
+| **Codex** | One-time: `npm install -g @openai/codex && codex login` | `gpt-5.3-codex` |
+| **Gemini** | Add `GEMINI_API_KEY=...` to `.env` ([get key](https://aistudio.google.com/apikey)) | `gemini-2.5-flash`, `gemini-3-flash-preview` |
+| **GLM** | Add `GLM_API_Key=...` to `.env` ([z.ai](https://z.ai)) | `text-glm` (glm-5.1) |
+| **Chutes** | Add `CHUTES_API_KEY` + `CHUTES_API_BASE` to `.env` | `text` (DeepSeek-V3), or any `Org/Model` |
+| **DeepSeek** | Add `DEEPSEEK_API=...` to `.env` | `text-deepseek` |
+| **Ollama** | `ollama pull model:tag` (local, no auth) | Any `model:tag` |
+
+After adding credentials, rebuild: `docker compose -p scillm -f deploy/docker/compose.scillm.core.yml up -d --build`
+
+**Check what's working:** `curl http://localhost:4001/v1/scillm/auth -H "Authorization: Bearer sk-dev-proxy-123"`
 
 Makefile shortcuts: `make proxy-rebuild` (build+start), `make proxy-up`, `make proxy-down`, `make proxy-logs`
 
