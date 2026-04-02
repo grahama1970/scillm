@@ -110,19 +110,21 @@ If you already have Claude Max and Codex Pro subscriptions plus a few API keys, 
 | **Provider switch** | Change code in every caller | Change YAML config — callers unchanged |
 | **OAuth refresh** | Each process manages token lifecycle | Proxy mounts credentials — one refresh |
 
-**Compared to multi-provider proxies** (LiteLLM, Portkey, Helicone):
+**Compared to multi-provider proxies** (LiteLLM, Portkey, Helicone, OpenRouter):
 
-| | scillm | Multi-provider SaaS proxies |
+| | scillm | Multi-provider proxies |
 |---|---|---|
 | **Subscription bridging** | Uses your Claude Max + Codex Pro subscriptions directly (OAuth) | API keys only — can't use Max/Pro subscriptions |
-| **Tenant model** | Single-user, runs locally | Multi-tenant SaaS, data leaves your machine |
-| **File handling** | ZIP explosion, Gemini native `inlineData`, VLM auto-routing | Pass-through only |
-| **JSON repair** | Built-in repair loop with `json_repair` | None — failed JSON = failed call |
+| **Tenant model** | Single-user, runs locally, data stays on your machine | Multi-tenant SaaS or complex self-host |
+| **File handling** | ZIP explosion, Gemini native `inlineData`, VLM auto-routing | Pass-through only (OpenRouter has a PDF plugin) |
+| **JSON repair** | Multi-stage repair loop (`json_repair` + brace trim + prose rejection) | OpenRouter has response-healing; others reject |
+| **Provider count** | ~8 built-in + any OpenAI-compatible via YAML | 100–1,600 integrations |
+| **Observability** | Prometheus metrics + budget headers | Full tracing dashboards, cost forecasting |
+| **Performance overhead** | ~20ms (Python) — irrelevant when LLM calls take 2–30s | 0.01–8ms (Go/Rust) — matters at 5K+ RPS, not single-user |
 | **Cost** | Free (your subscriptions + API keys) | Free tier + paid for volume |
-| **Dependency** | Self-hosted Docker container | External service dependency |
 | **Customization** | Full source, add middleware in Python | Configuration only |
 
-scillm is not a general-purpose proxy platform. It's a single-user tool for engineers who already pay for Claude Max and Codex Pro and want one `httpx.post()` call that works with everything.
+**What scillm is not:** A general-purpose proxy platform. It has 8 providers, not 1,600. No SSO, no RBAC, no dashboards. It's a single-user tool for engineers who already pay for Claude Max and Codex Pro and want one `httpx.post()` call that works with everything — including the parts (OAuth bridging, JSON repair, file handling, VLM routing) that no multi-provider proxy offers.
 
 ## How to Call It
 
