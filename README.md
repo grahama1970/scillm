@@ -10,7 +10,7 @@
 
 ---
 
-Single-tenant LLM proxy that unifies your **Max subscriptions** (Claude, Codex) and **API keys** (Gemini, Chutes, DeepSeek, GLM) behind one OpenAI-compatible endpoint. No provider-specific code — just `httpx.post("http://localhost:4001/v1/chat/completions", json={"model": "claude-sonnet-4-6", ...})` and scillm handles OAuth token refresh, format translation, SSE streaming, retries, and failover automatically. Works with any model name: `claude-*`, `gpt-*`, `gemini-*`, `Org/Model`, or `model:tag`.
+Single-tenant LLM proxy that unifies your **paid subscriptions** (Claude Max, Codex Pro) and **API keys** (Gemini, Chutes, DeepSeek, GLM) behind one OpenAI-compatible endpoint. No provider-specific code — just `httpx.post("http://localhost:4001/v1/chat/completions", json={"model": "claude-sonnet-4-6", ...})` and scillm handles OAuth token refresh, format translation, SSE streaming, retries, and failover automatically. Works with any model name: `claude-*`, `gpt-*`, `gemini-*`, `Org/Model`, or `model:tag`.
 
 ## Quick Start
 
@@ -43,7 +43,7 @@ Most providers need zero code — just credentials on disk or in `.env`.
 | **Codex** | One-time: `npm install -g @openai/codex && codex login` | `gpt-5.3-codex` |
 | **Gemini** | Add `GEMINI_API_KEY=...` to `.env` ([get key](https://aistudio.google.com/apikey)) | `gemini-2.5-flash`, `gemini-3-flash-preview` |
 | **GLM** | Add `GLM_API_Key=...` to `.env` ([z.ai](https://z.ai)) | `text-glm` (glm-5.1) |
-| **Chutes** | Add `CHUTES_API_KEY` + `CHUTES_API_BASE` to `.env` | `text` (DeepSeek-V3), or any `Org/Model` |
+| **Chutes** | Add `CHUTES_API_KEY` + `CHUTES_API_BASE` to `.env` | `text` (default), or any `Org/Model` from Chutes catalog |
 | **DeepSeek** | Add `DEEPSEEK_API=...` to `.env` | `text-deepseek` |
 | **Ollama** | `ollama pull model:tag` (local, no auth) | Any `model:tag` |
 
@@ -65,7 +65,7 @@ scillm runs as a **persistent proxy service**, not a library you import. This is
 - **Config changes without restarts.** Update `proxy_server_config.yaml`, rebuild the container, done. Every caller sees the new model list immediately. No code changes, no redeployments, no version bumps.
 - **No dependency conflicts.** The proxy's dependencies (httpx, openai SDK, json_repair) live inside the container. Callers only need `httpx` — they don't inherit scillm's dependency tree.
 
-The `src/scillm/batch.py` and `src/scillm/paved/chat.py` modules *are* importable for advanced use (parallel batch iteration, source grounding), but the standard path is `httpx.post("http://localhost:4001/v1/chat/completions")`.
+The `src/scillm/batch.py` and `src/scillm/paved/chat.py` modules are also importable as a library for advanced use cases (parallel batch iteration, source grounding) that need tighter integration than HTTP. But the standard path is `httpx.post("http://localhost:4001/v1/chat/completions")`.
 
 ## Security
 
@@ -79,11 +79,11 @@ scillm does not implement multi-tenant auth, key rotation, or per-client access 
 
 ## What You Get
 
-Every provider scillm targets speaks OpenAI-compatible API (`/v1/chat/completions`). Provider-specific handler code is unnecessary for this use case. Adding a provider is 5 lines of YAML. The new code is ~4,300 lines total.
+Every provider scillm targets speaks OpenAI-compatible API (`/v1/chat/completions`). Provider-specific handler code is unnecessary for this use case. Adding a provider is 5 lines of YAML.
 
 - **Wall-time retry budget** — Providers with hot/cold cycling return 503 now but may be back in 20 seconds. Fixed retry counts fail here. scillm retries on a clock — keep trying for 90 seconds, not 3 attempts.
 - **Batch iterator with request-response pairing** — Fire 200 parallel requests, results arrive out of order. scillm's `as_completed` iterator pairs every response with its original request.
-- **JSON repair inside retry loop** — Trailing commas, missing braces, markdown fences wrapping JSON. scillm repairs it instead of wasting the call.
+- **JSON repair inside retry loop** — LLM responses with trailing commas, missing braces, or markdown fences wrapping JSON are repaired automatically instead of wasting the call.
 - **Auto multimodal routing** — Pass an image and scillm figures it out. No model selection needed — the proxy detects images in messages and reroutes to a vision model automatically.
 - **Bounded concurrency queue** — Chutes.ai has a 5-connection limit. Exceed it and you get a 429 with a 90-second penalty. scillm queues overflow instead of rejecting it.
 - **Source grounding verification** — Pass source text, scillm verifies the response is grounded using fuzzy matching, retries with progressive prompts if not.
@@ -135,7 +135,7 @@ Agents and humans invoke `/scillm` the same way — no API calls, no key managem
 /scillm "Analyze results/chart.png and explain the trends"
 ```
 
-Reference file paths inline and scillm handles the rest — reads the file, base64-encodes it, picks a vision model, routes the request. Works across Claude Code, Codex, Gemini, KiloCode, Kimi, and any agent that supports slash commands.
+Reference file paths inline and scillm handles the rest — reads the file, base64-encodes it, picks a vision model, routes the request. Works across any IDE or agent that supports slash commands.
 
 ### OpenAI SDK
 
@@ -273,7 +273,7 @@ Test files: `tests/test_proxy_e2e.py` (contract tests), `tests/test_proxy_advers
 
 ## The `/scillm` Skill
 
-`/scillm` is a composable skill in a system of 230+ agent skills. Any skill that needs an LLM completion calls `/scillm` — one endpoint, any provider.
+`/scillm` is also available as a slash command (skill) in AI coding agents. Any agent skill that needs an LLM completion calls `/scillm` — one endpoint, any provider.
 
 **Auto-routing by model name** — no config entries needed for most providers:
 
