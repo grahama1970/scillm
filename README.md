@@ -10,7 +10,7 @@
 
 ---
 
-Single-tenant, OpenAI-compatible proxy + `/scillm` skill. One endpoint for every LLM provider: Chutes, DeepSeek, Gemini, Claude (OAuth), Codex (OAuth), GLM, Ollama. Auto-routes by model name — no config entries needed. Point any OpenAI SDK at `localhost:4001` and get routing, failover, wall-time retries, JSON repair, batch pairing, ZIP explosion, and auto multimodal handling — without provider-specific glue code.
+Single-tenant LLM proxy that unifies your **Max subscriptions** (Claude, Codex) and **API keys** (Gemini, Chutes, DeepSeek, GLM) behind one OpenAI-compatible endpoint. No provider-specific code — just `httpx.post("http://localhost:4001/v1/chat/completions", json={"model": "claude-sonnet-4-6", ...})` and scillm handles OAuth token refresh, format translation, retries, and failover automatically. Works with any model name: `claude-*`, `gpt-*`, `gemini-*`, `Org/Model`, or `model:tag`.
 
 ## Quick Start
 
