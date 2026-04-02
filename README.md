@@ -44,7 +44,7 @@ Makefile shortcuts: `make proxy-rebuild` (build+start), `make proxy-up`, `make p
 
 scillm is designed for **local development and trusted networks**. The default configuration uses:
 
-- A static bearer token (`sk-dev-proxy-123`) — set `LITELLM_MASTER_KEY` in `.env` to override.
+- A static bearer token (`sk-dev-proxy-123`) — set `SCILLM_MASTER_KEY` in `.env` to override.
 - `network_mode: host` — required for local Ollama access. In production, switch to port mapping (`-p 4001:4001`) behind a reverse proxy with TLS.
 - API keys in `.env` — acceptable for dev. In production, use Docker Secrets, Vault, or your cloud's secrets manager.
 
@@ -174,9 +174,15 @@ Callers say `model: "text"` — the proxy picks the provider. When models change
 | `vlm` | Chutes | Qwen3-VL-235B | → vlm-openrouter |
 | `local-text` | Ollama | qwen2.5:0.5b | (none) |
 | `moonshot-text` | Moonshot | kimi-k2 | (none) |
-| Any Ollama tag | Ollama | (auto-detected) | (none) |
+| `text-glm` | Z.AI GLM | glm-5.1 | (none) |
+| `claude-sonnet-4-6` | Anthropic (OAuth) | Claude Sonnet | (none) |
+| `gpt-5.3-codex` | OpenAI (OAuth) | Codex | (none) |
+| Any `claude-*` | Anthropic | (auto-routed) | (none) |
+| Any `gemini-*` | Google | (auto-routed) | (none) |
+| Any `Org/Model` | Chutes | (auto-routed) | (none) |
+| Any Ollama tag | Ollama | (auto-routed) | (none) |
 
-20+ aliases map provider-native names to groups. Any locally-pulled Ollama model (e.g. `qwen2.5:7b`, `qwen3:0.6b`) auto-routes without a config entry.
+Auto-routing handles most model names without config entries. Claude and Codex use OAuth from `~/.claude/` and `~/.codex/` respectively.
 
 ## Adding a Provider
 
@@ -206,17 +212,25 @@ make test-adversarial   # 44 adversarial tests (auth, streaming, grounding, edge
 
 Test files: `tests/test_proxy_e2e.py` (contract tests), `tests/test_proxy_adversarial.py` (edge cases), `tests/test_grounding.py` (unit tests for grounding helpers).
 
-## Composable Skill
+## The `/scillm` Skill
 
-`/scillm` is a composable building block in a system of 230+ agent skills. Any skill that needs an LLM completion calls `/scillm` — it handles provider selection, retries, and repair. Skills chain together to build pipelines:
+`/scillm` is a composable skill in a system of 230+ agent skills. Any skill that needs an LLM completion calls `/scillm` — one endpoint, any provider.
 
-<p align="center">
-  <img src="docs/assets/scillm_composable_skill.png" alt="scillm composable skill diagram" width="700" />
-</p>
+**Auto-routing by model name** — no config entries needed for most providers:
 
-Adding a provider or changing a model in the proxy config updates every skill in the chain at once. No skill needs to know which provider is behind `model: "text"`.
+| Pattern | Provider | Auth |
+|---------|----------|------|
+| `claude-*` | Anthropic | Claude Code Max OAuth |
+| `gpt-*` / `codex-*` | OpenAI Codex | ChatGPT OAuth |
+| `gemini-*` | Google Gemini | API key |
+| `Org/Model` | Chutes | API key |
+| `model:tag` | Ollama (local) | none |
 
-The `/scillm` skill definition is included in [`skills/scillm/`](skills/scillm/) — see [`SKILL.md`](skills/scillm/SKILL.md) for the full reference with code examples for single calls, batch calls, VLM auto-routing, and source grounding.
+**Discover available models:** `GET /v1/scillm/providers`
+
+**Composes with:** `/task-monitor`, `/create-evidence-case`, `/analytics`, `/create-figure`, `/llm-eval-lab`
+
+**Full reference:** [`skills/scillm/SKILL.md`](skills/scillm/SKILL.md) — code examples for single calls, batch calls, Claude/Codex OAuth, ZIP/PDF file sending, VLM auto-routing, and source grounding.
 
 ## Ops Endpoints
 
