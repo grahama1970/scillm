@@ -523,6 +523,27 @@ content = resp.json()["choices"][0]["message"]["content"]
 
 The proxy reads OAuth tokens from `~/.claude/.credentials.json` (managed by Claude Code, always fresh). Falls back to `~/.pi/agent/auth.json` (Pi CLI). No API key or manual token management needed — if Claude Code is running, Claude calls work.
 
+### Verify OAuth before calling
+
+Check token health before making calls — avoids 500 errors from expired tokens:
+
+```python
+auth = httpx.get(
+    "http://localhost:4001/v1/scillm/auth",
+    headers={"Authorization": "Bearer sk-dev-proxy-123"},
+).json()
+
+# Check Claude
+if auth["claude"]["status"] == "valid":
+    print(f"Claude OK — expires in {auth['claude']['expires_in_s']}s, tier: {auth['claude']['rate_tier']}")
+else:
+    print(f"Claude {auth['claude']['status']} — re-login needed")
+
+# Check Codex
+if auth["codex"]["status"] == "configured":
+    print("Codex OK")
+```
+
 ---
 
 ## Codex OAuth (OpenAI ChatGPT Subscription)
@@ -608,6 +629,7 @@ Redis caching is auto-enabled when `REDIS_HOST` or `REDIS_URL` is set:
 | `/v1/scillm/health` | GET | Router health + fallback config + concurrency status |
 | `/v1/scillm/models` | GET | Model groups, deployments, aliases |
 | `/v1/scillm/providers` | GET | **All available providers, auto-routing patterns, and examples** |
+| `/v1/scillm/auth` | GET | **OAuth token health** — Claude/Codex token status, expiry, subscription tier |
 | `/v1/models` | GET | OpenAI-compatible model list (includes auto-routable models) |
 | `/v1/budget` | GET | Current daily spend and remaining budget |
 | `/metrics` | GET | Prometheus counters (requests, errors, latency by group) |
