@@ -40,6 +40,24 @@ taxonomy:
 
 # scillm — One Endpoint for All LLM Calls
 
+## Setup (one-time per provider)
+
+Most providers need zero setup — scillm reads existing credentials automatically.
+
+| Provider | Setup | How it works |
+|----------|-------|--------------|
+| **Claude** | None (if using Claude Code) | Reads `~/.claude/.credentials.json` automatically. Already there if you're in Claude Code. |
+| **Codex** | `npm install -g @openai/codex && codex login` | Creates `~/.codex/auth.json`. One-time login, scillm reads it. |
+| **Gemini** | Add `GEMINI_API_KEY=your-key` to `.env` | Get key from [aistudio.google.com](https://aistudio.google.com/apikey) |
+| **GLM** | Add `GLM_API_Key=your-key` to `.env` | Get key from [z.ai](https://z.ai) (Coding Lite plan or higher) |
+| **Chutes** | Add `CHUTES_API_KEY` and `CHUTES_API_BASE` to `.env` | PAYG or subscription at [chutes.ai](https://chutes.ai) |
+| **DeepSeek** | Add `DEEPSEEK_API` to `.env` | Get key from [platform.deepseek.com](https://platform.deepseek.com) |
+| **Ollama** | `ollama pull model:tag` | Local models, no auth needed |
+
+After setup, rebuild the proxy: `docker compose -p scillm -f deploy/docker/compose.scillm.core.yml up -d --build`
+
+**Verify auth status:** `curl http://localhost:4001/v1/scillm/auth -H "Authorization: Bearer sk-dev-proxy-123"`
+
 ## How to Call
 
 **POST `http://localhost:4001/v1/chat/completions`** — standard OpenAI format.
