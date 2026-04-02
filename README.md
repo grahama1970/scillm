@@ -79,7 +79,7 @@ scillm does not implement multi-tenant auth, key rotation, or per-client access 
 
 ## What You Get
 
-Every provider scillm targets speaks OpenAI-compatible API (`/v1/chat/completions`). Provider-specific handler code is unnecessary for this use case. Adding a provider is 5 lines of YAML.
+Every provider scillm targets speaks OpenAI-compatible API (`/v1/chat/completions`). Provider-specific handler code is unnecessary for this use case. Adding a provider is 5 lines of YAML. The entire proxy is ~4,700 lines of Python — not a framework, just the code that does the work.
 
 - **Wall-time retry budget** — Providers with hot/cold cycling return 503 now but may be back in 20 seconds. Fixed retry counts fail here. scillm retries on a clock — keep trying for 90 seconds, not 3 attempts.
 - **Batch iterator with request-response pairing** — Fire 200 parallel requests, results arrive out of order. scillm's `as_completed` iterator pairs every response with its original request.
