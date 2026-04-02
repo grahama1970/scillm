@@ -1,7 +1,7 @@
 """FastAPI application for the scillm proxy.
 
 Thin OpenAI-compatible proxy that routes through middleware chain → router → streaming.
-Replaces litellm's proxy_server.py (9,532 lines) with ~350 lines.
+FastAPI application for the scillm proxy (~350 lines).
 """
 
 from __future__ import annotations
@@ -376,7 +376,7 @@ async def openai_models(request: Request):
             "created": int(_start_time),
             "owned_by": "scillm",
         })
-    # Embedding model (served by local embedding service, not litellm router)
+    # Embedding model (served by local embedding service)
     models.append({
         "id": "embedding",
         "object": "model",

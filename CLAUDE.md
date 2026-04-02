@@ -5,7 +5,7 @@
 - check for inter-agent messages: `agent-inbox check`
 
 ## Project Context
-**Purpose:** Thin OpenAI-compatible proxy for scientists and engineers. Ground-up rewrite — zero litellm imports, all providers called via openai SDK.
+**Purpose:** Thin OpenAI-compatible proxy for scientists and engineers. All providers called via openai SDK + custom OAuth providers (Claude, Codex).
 **Type:** Core Infrastructure
 **Status:** Active — Docker proxy running on port 4001
 **Note:** Project registered as "scillm" in agent-inbox

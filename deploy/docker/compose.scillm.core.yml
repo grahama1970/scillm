@@ -8,7 +8,7 @@ services:
     environment:
       PYTHONPATH: /app/src
       CONFIG_FILE_PATH: /app/config.yaml
-      LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY:-sk-dev-proxy-123}
+      SCILLM_MASTER_KEY: ${SCILLM_MASTER_KEY:-sk-dev-proxy-123}
       METRICS_ENV: ${METRICS_ENV:-dev}
       REDIS_HOST: ${REDIS_HOST:-127.0.0.1}
       REDIS_PORT: ${REDIS_PORT:-6379}
@@ -20,7 +20,7 @@ services:
       - "${HOME}/.claude/.credentials.json:/root/.claude/.credentials.json:ro"
       - "${HOME}/.codex/auth.json:/root/.codex/auth.json:ro"
     healthcheck:
-      test: ["CMD", "curl", "-sf", "-H", "Authorization: Bearer $${LITELLM_MASTER_KEY:-sk-dev-proxy-123}", "http://127.0.0.1:4001/health/liveliness"]
+      test: ["CMD", "curl", "-sf", "-H", "Authorization: Bearer $${SCILLM_MASTER_KEY:-sk-dev-proxy-123}", "http://127.0.0.1:4001/health/liveliness"]
       interval: 15s
       timeout: 10s
       retries: 5

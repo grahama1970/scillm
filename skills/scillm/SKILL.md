@@ -1,11 +1,10 @@
 ---
 name: scillm
 description: >
-  LLM completions (text and VLM) via the scillm Docker proxy on localhost:4001.
-  One endpoint: POST /v1/chat/completions (standard OpenAI-compatible).
-  Models: text, vlm, local-text.
-  Built on litellm by BerriAI — single-tenant fork with wall-time retries,
-  JSON repair, source grounding, and batch request-response pairing.
+  Universal LLM proxy on localhost:4001. One endpoint for all providers:
+  Chutes, DeepSeek, Gemini, Ollama, Claude (OAuth), Codex (OAuth), GLM.
+  Auto-routes by model name. POST /v1/chat/completions (OpenAI-compatible).
+  ZIP explosion, PDF inlineData, fallback cascades, JSON repair.
 allowed-tools: Bash, Read
 triggers:
   - batch LLM calls
@@ -22,11 +21,17 @@ triggers:
   - source grounding
   - grounding verification
   - verify grounded
+  - call claude
+  - call codex
+  - call gemini
+  - call glm
+  - send zip to LLM
+  - send PDF to LLM
 metadata:
-  short-description: scillm (proxy-first LLM completions via /v1/chat/completions)
+  short-description: scillm (universal LLM proxy — Chutes, Gemini, Claude, Codex, GLM, Ollama)
 provides:
   - llm-completion
-composes: [task-monitor, create-evidence-case, analytics, create-figure]
+composes: [task-monitor, create-evidence-case, analytics, create-figure, llm-eval-lab]
 
 taxonomy:
   - inference
@@ -457,26 +462,66 @@ Available Ollama models: anything you've pulled with `ollama pull`. Check with `
 
 ## Claude OAuth (Anthropic Max Subscription)
 
-Call Claude models through the proxy using your Max subscription — no API key needed. The proxy reads OAuth tokens from `~/.claude/.credentials.json` (managed by Claude Code).
+Call Claude models through the proxy using your Max subscription — no API key needed.
+
+### Exact model names (COPY THESE EXACTLY)
+
+| Use this | NOT this | Maps to |
+|----------|----------|---------|
+| `claude-sonnet-4-6` | ~~text-claude-sonnet~~ | claude-sonnet-4-20250514 |
+| `claude-opus-4-6` | ~~text-claude-opus~~ | claude-opus-4-20250514 |
+| `claude-haiku-4-5` | ~~text-claude-haiku~~ | claude-haiku-4-5-20251001 |
+| `claude-sonnet-4-5` | ~~claude-sonnet~~ | claude-sonnet-4-5-20250514 |
+
+**The model name MUST start with `claude-`**. Names like `text-claude-sonnet`, `anthropic-sonnet`, or `sonnet-4-6` will NOT route to Claude — they will 500.
+
+### Copy-paste example
 
 ```python
+import httpx
+
 resp = httpx.post(
     "http://localhost:4001/v1/chat/completions",
-    headers={"Authorization": "Bearer sk-dev-proxy-123"},
+    headers={
+        "Authorization": "Bearer sk-dev-proxy-123",
+        "Content-Type": "application/json",
+    },
     json={
-        "model": "claude-sonnet-4-6",
-        "messages": [{"role": "user", "content": "Explain quicksort"}],
-        "max_tokens": 1024,
+        "model": "claude-sonnet-4-6",   # EXACTLY this string
+        "messages": [
+            {"role": "user", "content": "Your prompt here"}
+        ],
+        "max_tokens": 4096,
     },
     timeout=60.0,
 )
+content = resp.json()["choices"][0]["message"]["content"]
 ```
 
-Model name mapping: `claude-sonnet-4-6` → `claude-sonnet-4-20250514`, `claude-haiku-4-5` → `claude-haiku-4-5-20251001`. Full Anthropic model IDs also work directly.
+### What works and what doesn't
 
-**Known limitation:** Claude Code OAuth scope locks the system prompt. Custom system prompts are injected as user messages — they work but may not be followed as strictly as a true system prompt.
+| Parameter | Supported? | Notes |
+|-----------|-----------|-------|
+| `messages` | YES | Standard OpenAI format |
+| `max_tokens` | YES | Required — Claude needs this |
+| `temperature` | YES | 0.0-1.0 |
+| `top_p` | YES | |
+| `stop` | YES | String or list |
+| `system` role in messages | PARTIAL | Injected as user message (OAuth locks system prompt) |
+| `response_format` | NO | Claude doesn't support json_object — ask for JSON in the prompt |
+| `tools` / `tool_choice` | NO | Not forwarded through OAuth path |
+| `stream` | NO | Proxy collects full response, returns as single completion |
 
-**Credential priority:** `~/.claude/.credentials.json` (Claude Code, always fresh) > `~/.pi/agent/auth.json` (Pi CLI, may expire).
+### Common mistakes that cause 500s
+
+1. **Wrong model name**: `text-claude-sonnet` → use `claude-sonnet-4-6`
+2. **Missing `max_tokens`**: defaults to 4096 but include it explicitly
+3. **Sending `response_format: {"type": "json_object"}`**: Claude rejects this — instead say "Return valid JSON" in the prompt
+4. **Timeout too short**: Claude can take 10-30s for complex prompts — use `timeout=60.0`
+
+### Auth (automatic — no setup needed)
+
+The proxy reads OAuth tokens from `~/.claude/.credentials.json` (managed by Claude Code, always fresh). Falls back to `~/.pi/agent/auth.json` (Pi CLI). No API key or manual token management needed — if Claude Code is running, Claude calls work.
 
 ---
 

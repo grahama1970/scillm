@@ -1,6 +1,6 @@
 """YAML config loader for scillm proxy.
 
-Parses litellm-format proxy_server_config.yaml into typed dataclasses.
+Parses proxy_server_config.yaml into typed dataclasses.
 Resolves ``os.environ/VAR_NAME`` syntax for environment variable injection.
 Supports CHUTES_RESEARCH toggle for research/standard endpoint switching.
 """
@@ -126,7 +126,7 @@ def _resolve_dict(d: dict[str, Any]) -> dict[str, Any]:
 
 
 def _parse_deployment(params: dict[str, Any]) -> Deployment:
-    """Parse a litellm_params block into a Deployment."""
+    """Parse a scillm_params block into a Deployment."""
     return Deployment(
         model=params.get("model", ""),
         api_base=params.get("api_base"),
@@ -141,7 +141,7 @@ def _parse_model_groups(model_list: list[dict[str, Any]]) -> dict[str, ModelGrou
     groups: dict[str, list[Deployment]] = {}
     for entry in model_list:
         name = entry.get("model_name", "")
-        params = entry.get("litellm_params", {})
+        params = entry.get("scillm_params", entry.get("litellm_params", entry.get("params", {})))
         dep = _parse_deployment(params)
         groups.setdefault(name, []).append(dep)
     return {name: ModelGroup(name=name, deployments=deps) for name, deps in groups.items()}
@@ -215,10 +215,10 @@ def load_config(path: str | Path) -> ProxyConfig:
     fallbacks = _parse_fallbacks(router.get("fallbacks"))
     retry_policy = _parse_retry_policy(router.get("retry_policy"))
 
-    litellm_settings = resolved.get("litellm_settings", {})
-    aliases = litellm_settings.get("model_alias_map", {})
-    callbacks = litellm_settings.get("success_callback", [])
-    post_call_rules = litellm_settings.get("post_call_rules")
+    settings = resolved.get("scillm_settings", resolved.get("litellm_settings", {}))
+    aliases = settings.get("model_alias_map", {})
+    callbacks = settings.get("success_callback", [])
+    post_call_rules = settings.get("post_call_rules")
 
     # Auto-detect Ollama base URL: explicit config > env var > sniff from local-text group
     ollama_base = resolved.get("ollama_api_base") or os.environ.get("OLLAMA_API_BASE")

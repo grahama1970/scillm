@@ -10,7 +10,7 @@
 
 ---
 
-Single-tenant, OpenAI-compatible proxy + `/scillm` skill. Originally forked from [litellm](https://github.com/BerriAI/litellm) by BerriAI, then rewritten from scratch — the proxy, router, batch iterator, and middleware are all new code (~4,300 lines) that calls providers directly via the OpenAI SDK. No litellm code runs. Point any OpenAI SDK at `localhost:4001` and get routing, failover, wall-time retries, JSON repair, batch pairing, and auto multimodal handling — without provider-specific glue code.
+Single-tenant, OpenAI-compatible proxy + `/scillm` skill. One endpoint for every LLM provider: Chutes, DeepSeek, Gemini, Claude (OAuth), Codex (OAuth), GLM, Ollama. Auto-routes by model name — no config entries needed. Point any OpenAI SDK at `localhost:4001` and get routing, failover, wall-time retries, JSON repair, batch pairing, ZIP explosion, and auto multimodal handling — without provider-specific glue code.
 
 ## Quick Start
 
@@ -230,35 +230,6 @@ The `/scillm` skill definition is included in [`skills/scillm/`](skills/scillm/)
 | `GET /v1/scillm/logs` | Cost summary by model for a given date |
 | `GET /metrics` | Prometheus counters (requests, errors, latency by group) |
 
-## Appendix: Relationship to litellm
-
-scillm is not a replacement for litellm. litellm solves provider heterogeneity — normalizing 100+ APIs with different auth, streaming formats, and tokenizers into one interface. scillm doesn't need that because it only targets providers that already speak OpenAI. Different problems, different scope.
-
-scillm started as a fork of [litellm](https://github.com/BerriAI/litellm) by BerriAI. The active codebase is a rewrite — the proxy, router, batch iterator, and middleware are all new code (~4,300 lines) that calls providers directly via the OpenAI SDK. No litellm code runs. The original litellm provider handlers, UI, docs, and tests (~290,000 lines) are archived in `.archive/`.
-
-### What scillm learned from litellm
-
-The routing concepts — fallback cascade, circuit breaker, model groups, YAML config — are informed by litellm's design. The implementation is new:
-
-| Concept | litellm approach | scillm approach |
-|---------|-----------------|-----------------|
-| **Provider dispatch** | 100+ provider-specific handlers (auth, streaming normalization, tokenization, cost calculation) | `openai.AsyncOpenAI(base_url=provider)` — providers must speak OpenAI |
-| **Fallback cascade** | `fallbacks` config with `allowed_fails` + `cooldown_time` circuit breaker | YAML groups with circuit breaker (same concept, reimplemented) |
-| **Retry** | Count-based with `retry_after` header support, per-deployment cooldown, and timeout | Wall-time budget — keep trying for 90s, designed for serverless GPU cold starts |
-| **JSON handling** | Pass-through with optional `response_format` schema validation | Multi-stage repair (`json_repair` lib + brace trimming) in middleware and batch loop |
-| **Concurrency** | `max_parallel_requests` per deployment with failover to next deployment | Bounded queue with TTL (queues overflow instead of rejecting) |
-| **Batch** | Router-level batching | Client-side `as_completed` iterator with request-response pairing |
-| **VLM** | Native multimodal support per provider | Auto-detects `image_url` in messages, reroutes to vision model transparently |
-| **Scope** | Enterprise gateway: 100+ providers, multi-tenant auth, SSO, admin UI, observability integrations | Single-tenant proxy for agents: 6 providers, one YAML file, Prometheus metrics |
-
-### What scillm adds
-
-- **Source grounding verification** — fuzzy-match response against source text, retry with progressive prompts
-- **JSON repair in middleware and batch loop** — attempt to fix broken JSON before discarding the response
-- **Wall-time retry budget** — designed for serverless GPU providers with hot/cold cycling
-- **VLM auto-routing** — callers use one model group for everything; proxy detects images and reroutes to a vision model
-- **Batch request-response pairing** — async iterator that pairs every response with its original request and metadata
-
 ## License
 
-scillm originated as a fork of [litellm](https://github.com/BerriAI/litellm) by [BerriAI](https://berri.ai), licensed under the MIT License. The active codebase is a rewrite; the original litellm code is archived but included for attribution.
+MIT License.

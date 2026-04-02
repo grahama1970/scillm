@@ -1,6 +1,6 @@
 """Middleware hook interface for scillm proxy.
 
-Replaces litellm's CustomLogger with a clean async chain of pre_call /
+Clean async chain of pre_call /
 post_call / on_error hooks.  Each middleware is a BaseMiddleware subclass
 that overrides only the hooks it needs.
 
