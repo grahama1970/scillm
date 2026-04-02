@@ -40,6 +40,18 @@ Makefile shortcuts: `make proxy-rebuild` (build+start), `make proxy-up`, `make p
 
 **Container details:** `python:3.12-slim`, `uvicorn` on port 4001, `network_mode: host` (for local Ollama access), config mounted from `local/proxy_server_config.yaml`, health check every 15s. Redis included for caching and request logging. Ollama available via `--profile local`.
 
+## Why Docker, Not `pip install`
+
+scillm runs as a **persistent proxy service**, not a library you import. This is deliberate:
+
+- **One process, many callers.** Every project agent, skill, and script on the machine hits the same `localhost:4001` endpoint. A pip package would mean each caller imports scillm, manages its own connections, and duplicates retry/circuit-breaker state. The proxy centralizes all of that.
+- **OAuth token sharing.** Claude and Codex OAuth credentials live in `~/.claude/` and `~/.codex/`. The Docker container mounts these read-only — one token refresh serves every caller. A library would need each process to handle token management independently.
+- **Provider isolation.** If Chutes goes down, the circuit breaker opens *once* in the proxy and all callers immediately cascade to DeepSeek. With a library, each process discovers the failure independently and wastes retries.
+- **Config changes without restarts.** Update `proxy_server_config.yaml`, rebuild the container, done. Every caller sees the new model list immediately. No code changes, no redeployments, no version bumps.
+- **No dependency conflicts.** The proxy's dependencies (httpx, openai SDK, json_repair) live inside the container. Callers only need `httpx` — they don't inherit scillm's dependency tree.
+
+The `src/scillm/batch.py` and `src/scillm/paved/chat.py` modules *are* importable for advanced use (parallel batch iteration, source grounding), but the standard path is `httpx.post("http://localhost:4001/v1/chat/completions")`.
+
 ## Security
 
 scillm is designed for **local development and trusted networks**. The default configuration uses:
