@@ -95,6 +95,8 @@ Every provider scillm targets speaks OpenAI-compatible API (`/v1/chat/completion
 
 ## Why scillm
 
+scillm started because cheap LLM providers (Chutes, DeepSeek) are unreliable — 503s, timeouts, rate limits with 90-second penalties. Fixed retry counts don't work when a provider might be back in 20 seconds or down for 5 minutes. scillm was built to make flaky providers reliable: wall-time retry budgets, circuit breakers, fallback cascades. The multi-provider unification came later as a natural extension.
+
 If you already have Claude Max and Codex Pro subscriptions plus a few API keys, scillm turns them into one endpoint with zero glue code. Here's what you'd need without it:
 
 | Capability | Without scillm | With scillm |
