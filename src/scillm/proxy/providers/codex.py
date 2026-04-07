@@ -242,17 +242,17 @@ async def codex_completion(
         "instructions": instructions or "You are a helpful assistant.",
         "stream": True,
         "store": False,
+        # Match Pi CLI: enable reasoning and control text verbosity
+        "text": {"verbosity": "medium"},
+        "include": ["reasoning.encrypted_content"],
     }
     # ChatGPT Codex backend does NOT support: temperature, max_output_tokens, top_p
 
     # Tool use: translate OpenAI Chat tools to Codex Responses API format
-    # OpenAI Chat: {"type": "function", "function": {"name": ..., "parameters": ...}}
-    # Codex Responses: {"type": "function", "name": ..., "parameters": ..., "description": ...}
     if "tools" in kwargs and kwargs["tools"]:
         body["tools"] = _openai_tools_to_codex(kwargs["tools"])
-    # Codex Responses API only supports tool_choice: "auto" (Pi hardcodes this)
-    if "tools" in body:
         body["tool_choice"] = "auto"
+        body["parallel_tool_calls"] = True
 
     headers = {
         "Authorization": f"Bearer {access_token}",
@@ -316,14 +316,15 @@ async def codex_completion_stream(
         "instructions": instructions or "You are a helpful assistant.",
         "stream": True,
         "store": False,
+        "text": {"verbosity": "medium"},
+        "include": ["reasoning.encrypted_content"],
     }
 
     # Tool use: translate OpenAI Chat tools to Codex Responses API format
     if "tools" in kwargs and kwargs["tools"]:
         body["tools"] = _openai_tools_to_codex(kwargs["tools"])
-    # Codex Responses API only supports tool_choice: "auto" (Pi hardcodes this)
-    if "tools" in body:
         body["tool_choice"] = "auto"
+        body["parallel_tool_calls"] = True
 
     headers = {
         "Authorization": f"Bearer {access_token}",
