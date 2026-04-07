@@ -128,6 +128,35 @@ def _parse_codex_response(events: list[dict[str, Any]], model: str) -> openai.ty
             if delta:
                 text_parts.append(delta)
 
+        elif event_type == "response.output_item.added":
+            # Track function_call items as they start (has call_id + name)
+            item = event.get("item", {})
+            if item.get("type") == "function_call":
+                call_id = item.get("call_id", item.get("id", ""))
+                if call_id:
+                    tool_calls_map[call_id] = {
+                        "name": item.get("name", ""),
+                        "arguments": item.get("arguments", ""),
+                    }
+
+        elif event_type == "response.output_item.done":
+            # Finalize function_call with complete data
+            item = event.get("item", {})
+            if item.get("type") == "function_call":
+                call_id = item.get("call_id", item.get("id", ""))
+                if call_id:
+                    tool_calls_map[call_id] = {
+                        "name": item.get("name", ""),
+                        "arguments": item.get("arguments", ""),
+                    }
+
+        elif event_type == "response.function_call_arguments.done":
+            call_id = event.get("call_id", "")
+            name = event.get("name", "")
+            arguments = event.get("arguments", "")
+            if call_id:
+                tool_calls_map[call_id] = {"name": name, "arguments": arguments}
+
         elif event_type == "response.completed":
             resp = event.get("response", {})
             actual_model = resp.get("model", model)
@@ -221,8 +250,9 @@ async def codex_completion(
     # Codex Responses: {"type": "function", "name": ..., "parameters": ..., "description": ...}
     if "tools" in kwargs and kwargs["tools"]:
         body["tools"] = _openai_tools_to_codex(kwargs["tools"])
-    if "tool_choice" in kwargs:
-        body["tool_choice"] = kwargs["tool_choice"]
+    # Codex Responses API only supports tool_choice: "auto" (Pi hardcodes this)
+    if "tools" in body:
+        body["tool_choice"] = "auto"
 
     headers = {
         "Authorization": f"Bearer {access_token}",
@@ -291,8 +321,9 @@ async def codex_completion_stream(
     # Tool use: translate OpenAI Chat tools to Codex Responses API format
     if "tools" in kwargs and kwargs["tools"]:
         body["tools"] = _openai_tools_to_codex(kwargs["tools"])
-    if "tool_choice" in kwargs:
-        body["tool_choice"] = kwargs["tool_choice"]
+    # Codex Responses API only supports tool_choice: "auto" (Pi hardcodes this)
+    if "tools" in body:
+        body["tool_choice"] = "auto"
 
     headers = {
         "Authorization": f"Bearer {access_token}",
