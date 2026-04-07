@@ -277,18 +277,19 @@ async def claude_completion(
 
     system_prompt, anthropic_msgs = _openai_to_anthropic_messages(messages)
 
-    # Build request body
-    # OAuth scope requires exactly this system prompt — no modifications allowed.
-    # Custom system prompts are prepended as a user message instead.
+    # System prompt: OAuth requires the Claude Code prefix as the first block.
+    # Caller's system prompt is appended as a second block (same as Pi CLI).
+    system_blocks: list[dict[str, str]] = [
+        {"type": "text", "text": CLAUDE_CODE_SYSTEM_PREFIX},
+    ]
     if system_prompt:
-        anthropic_msgs.insert(0, {"role": "user", "content": f"[System instruction]: {system_prompt}"})
-        anthropic_msgs.insert(1, {"role": "assistant", "content": "Understood. I will follow that instruction."})
+        system_blocks.append({"type": "text", "text": system_prompt})
 
     body: dict[str, Any] = {
         "model": api_model,
         "messages": anthropic_msgs,
         "max_tokens": kwargs.get("max_tokens", 4096),
-        "system": CLAUDE_CODE_SYSTEM_PREFIX,
+        "system": system_blocks,
     }
     if "temperature" in kwargs:
         body["temperature"] = kwargs["temperature"]
@@ -350,15 +351,17 @@ async def claude_completion_stream(
     api_model = CLAUDE_MODEL_MAP.get(model, model)
     system_prompt, anthropic_msgs = _openai_to_anthropic_messages(messages)
 
+    system_blocks: list[dict[str, str]] = [
+        {"type": "text", "text": CLAUDE_CODE_SYSTEM_PREFIX},
+    ]
     if system_prompt:
-        anthropic_msgs.insert(0, {"role": "user", "content": f"[System instruction]: {system_prompt}"})
-        anthropic_msgs.insert(1, {"role": "assistant", "content": "Understood. I will follow that instruction."})
+        system_blocks.append({"type": "text", "text": system_prompt})
 
     body: dict[str, Any] = {
         "model": api_model,
         "messages": anthropic_msgs,
         "max_tokens": kwargs.get("max_tokens", 4096),
-        "system": CLAUDE_CODE_SYSTEM_PREFIX,
+        "system": system_blocks,
         "stream": True,
     }
     if "temperature" in kwargs:
