@@ -38,12 +38,54 @@ CLAUDE_MODEL_MAP = {
 }
 
 
+def _openai_tools_to_anthropic(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Convert OpenAI tool definitions to Anthropic format.
+
+    OpenAI: {"type": "function", "function": {"name": ..., "description": ..., "parameters": ...}}
+    Anthropic: {"name": ..., "description": ..., "input_schema": ...}
+    """
+    anthropic_tools = []
+    for tool in tools:
+        if tool.get("type") != "function":
+            continue
+        fn = tool.get("function", {})
+        anthropic_tools.append({
+            "name": fn.get("name", ""),
+            "description": fn.get("description", ""),
+            "input_schema": fn.get("parameters", {"type": "object", "properties": {}}),
+        })
+    return anthropic_tools
+
+
+def _openai_tool_choice_to_anthropic(tool_choice: Any) -> dict[str, Any] | None:
+    """Convert OpenAI tool_choice to Anthropic format.
+
+    OpenAI "auto" → {"type": "auto"}
+    OpenAI "required" → {"type": "any"}
+    OpenAI "none" → {"type": "none"}  (omit — Anthropic doesn't send tools if none)
+    OpenAI {"type": "function", "function": {"name": "X"}} → {"type": "tool", "name": "X"}
+    """
+    if tool_choice is None or tool_choice == "auto":
+        return {"type": "auto"}
+    if tool_choice == "required":
+        return {"type": "any"}
+    if tool_choice == "none":
+        return None  # Don't send tools at all
+    if isinstance(tool_choice, dict):
+        fn = tool_choice.get("function", {})
+        name = fn.get("name", "")
+        if name:
+            return {"type": "tool", "name": name}
+    return {"type": "auto"}
+
+
 def _openai_to_anthropic_messages(
     messages: list[dict[str, Any]],
 ) -> tuple[str | None, list[dict[str, Any]]]:
     """Convert OpenAI messages to Anthropic format.
 
     Returns (system_prompt, anthropic_messages).
+    Handles tool_calls in assistant messages and tool results.
     """
     system_prompt: str | None = None
     anthropic_msgs: list[dict[str, Any]] = []
@@ -58,18 +100,58 @@ def _openai_to_anthropic_messages(
                 system_prompt = content
             continue
 
+        # Tool result messages → Anthropic tool_result content block
+        if role == "tool":
+            tool_call_id = msg.get("tool_call_id", "")
+            result_content = msg.get("content", "")
+            anthropic_msgs.append({
+                "role": "user",
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": tool_call_id,
+                        "content": result_content if isinstance(result_content, str) else json.dumps(result_content),
+                    }
+                ],
+            })
+            continue
+
         # Map OpenAI roles to Anthropic roles
         if role == "assistant":
             a_role = "assistant"
         else:
             a_role = "user"
 
+        # Assistant messages with tool_calls → Anthropic tool_use content blocks
+        tool_calls = msg.get("tool_calls")
+        if role == "assistant" and tool_calls:
+            a_parts: list[dict[str, Any]] = []
+            # Include text content if present
+            if content and isinstance(content, str):
+                a_parts.append({"type": "text", "text": content})
+            for tc in tool_calls:
+                fn = tc.get("function", {})
+                arguments = fn.get("arguments", "{}")
+                if isinstance(arguments, str):
+                    try:
+                        arguments = json.loads(arguments)
+                    except json.JSONDecodeError:
+                        arguments = {"raw": arguments}
+                a_parts.append({
+                    "type": "tool_use",
+                    "id": tc.get("id", ""),
+                    "name": fn.get("name", ""),
+                    "input": arguments,
+                })
+            anthropic_msgs.append({"role": "assistant", "content": a_parts})
+            continue
+
         # Handle content types
         if isinstance(content, str):
             anthropic_msgs.append({"role": a_role, "content": content})
         elif isinstance(content, list):
             # Convert OpenAI content parts to Anthropic format
-            a_parts: list[dict[str, Any]] = []
+            a_parts = []
             for part in content:
                 if not isinstance(part, dict):
                     continue
@@ -100,14 +182,33 @@ def _anthropic_to_openai_response(
     model: str,
 ) -> openai.types.chat.ChatCompletion:
     """Wrap Anthropic Messages response in OpenAI ChatCompletion format."""
-    # Extract text content
     content_blocks = data.get("content", [])
     text_parts = [b.get("text", "") for b in content_blocks if b.get("type") == "text"]
-    text = "".join(text_parts)
+    text = "".join(text_parts) or None
+
+    # Extract tool_use blocks → OpenAI tool_calls
+    tool_calls_list = []
+    for block in content_blocks:
+        if block.get("type") == "tool_use":
+            tool_calls_list.append(
+                openai.types.chat.ChatCompletionMessageToolCall(
+                    id=block.get("id", ""),
+                    type="function",
+                    function=openai.types.chat.chat_completion_message_tool_call.Function(
+                        name=block.get("name", ""),
+                        arguments=json.dumps(block.get("input", {})),
+                    ),
+                )
+            )
 
     # Map stop reason
     stop_reason = data.get("stop_reason", "end_turn")
-    finish_reason = "length" if stop_reason == "max_tokens" else "stop"
+    if stop_reason == "max_tokens":
+        finish_reason = "length"
+    elif stop_reason == "tool_use":
+        finish_reason = "tool_calls"
+    else:
+        finish_reason = "stop"
 
     # Usage
     usage = data.get("usage", {})
@@ -121,6 +222,7 @@ def _anthropic_to_openai_response(
                 message=openai.types.chat.ChatCompletionMessage(
                     content=text,
                     role="assistant",
+                    tool_calls=tool_calls_list if tool_calls_list else None,
                 ),
             )
         ],
@@ -174,6 +276,15 @@ async def claude_completion(
         stop = kwargs["stop"]
         body["stop_sequences"] = stop if isinstance(stop, list) else [stop]
 
+    # Tool use: translate OpenAI tools format to Anthropic
+    if "tools" in kwargs and kwargs["tools"]:
+        anthropic_tools = _openai_tools_to_anthropic(kwargs["tools"])
+        if anthropic_tools:
+            body["tools"] = anthropic_tools
+            tc = _openai_tool_choice_to_anthropic(kwargs.get("tool_choice"))
+            if tc is not None:
+                body["tool_choice"] = tc
+
     # OAuth tokens use Authorization: Bearer, NOT x-api-key
     headers = {
         "Authorization": f"Bearer {token}",
@@ -184,7 +295,7 @@ async def claude_completion(
         "content-type": "application/json",
     }
 
-    logger.info("Claude OAuth call: model={}, {} messages", model, len(anthropic_msgs))
+    logger.info("Claude OAuth call: model={}, {} messages, {} tools", model, len(anthropic_msgs), len(body.get("tools", [])))
 
     timeout = kwargs.get("timeout", 90)
     async with httpx.AsyncClient(timeout=float(timeout)) as client:
@@ -236,6 +347,15 @@ async def claude_completion_stream(
         stop = kwargs["stop"]
         body["stop_sequences"] = stop if isinstance(stop, list) else [stop]
 
+    # Tool use: translate OpenAI tools format to Anthropic
+    if "tools" in kwargs and kwargs["tools"]:
+        anthropic_tools = _openai_tools_to_anthropic(kwargs["tools"])
+        if anthropic_tools:
+            body["tools"] = anthropic_tools
+            tc = _openai_tool_choice_to_anthropic(kwargs.get("tool_choice"))
+            if tc is not None:
+                body["tool_choice"] = tc
+
     headers = {
         "Authorization": f"Bearer {token}",
         "anthropic-version": ANTHROPIC_VERSION,
@@ -245,9 +365,10 @@ async def claude_completion_stream(
         "content-type": "application/json",
     }
 
-    logger.info("Claude OAuth stream: model={}, {} messages", model, len(anthropic_msgs))
+    logger.info("Claude OAuth stream: model={}, {} messages, {} tools", model, len(anthropic_msgs), len(body.get("tools", [])))
     chunk_id = make_chunk_id()
     timeout = kwargs.get("timeout", 90)
+    tool_call_index = 0  # tracks which tool_call we're streaming
 
     try:
         async with httpx.AsyncClient(timeout=float(timeout)) as client:
@@ -282,16 +403,48 @@ async def claude_completion_stream(
                         except json.JSONDecodeError:
                             continue
 
-                        if event_type == "content_block_delta":
+                        if event_type == "content_block_start":
+                            # Tool use block starts here — emit initial tool_call chunk
+                            block = data.get("content_block", {})
+                            if block.get("type") == "tool_use":
+                                tc = [{
+                                    "index": tool_call_index,
+                                    "id": block.get("id", ""),
+                                    "type": "function",
+                                    "function": {
+                                        "name": block.get("name", ""),
+                                        "arguments": "",
+                                    },
+                                }]
+                                chunk = sse_chunk(chunk_id, model, tool_calls=tc)
+                                yield sse_format(chunk).encode()
+                                tool_call_index += 1
+
+                        elif event_type == "content_block_delta":
                             delta = data.get("delta", {})
                             if delta.get("type") == "text_delta":
                                 chunk = sse_chunk(chunk_id, model, content_delta=delta.get("text", ""))
+                                yield sse_format(chunk).encode()
+                            elif delta.get("type") == "input_json_delta":
+                                # Stream tool call arguments incrementally
+                                tc = [{
+                                    "index": tool_call_index - 1,
+                                    "function": {
+                                        "arguments": delta.get("partial_json", ""),
+                                    },
+                                }]
+                                chunk = sse_chunk(chunk_id, model, tool_calls=tc)
                                 yield sse_format(chunk).encode()
 
                         elif event_type == "message_delta":
                             delta = data.get("delta", {})
                             stop_reason = delta.get("stop_reason", "end_turn")
-                            finish = "length" if stop_reason == "max_tokens" else "stop"
+                            if stop_reason == "max_tokens":
+                                finish = "length"
+                            elif stop_reason == "tool_use":
+                                finish = "tool_calls"
+                            else:
+                                finish = "stop"
                             usage_data = data.get("usage", {})
                             usage = None
                             if usage_data:

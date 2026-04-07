@@ -14,16 +14,25 @@ def sse_chunk(
     content_delta: str | None = None,
     finish_reason: str | None = None,
     usage: dict[str, Any] | None = None,
+    tool_calls: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Build an OpenAI-compatible streaming chunk dict.
 
     Returns a dict matching the ``chat.completion.chunk`` schema used by
     the OpenAI SDK streaming responses.
+
+    For tool calls, pass ``tool_calls`` as a list of dicts with:
+    - index, id, type, function.name, function.arguments (for initial chunk)
+    - index, function.arguments (for argument deltas)
     """
     delta: dict[str, Any] = {}
     if content_delta is not None:
         delta["content"] = content_delta
         delta["role"] = "assistant"
+    if tool_calls is not None:
+        delta["tool_calls"] = tool_calls
+        if "role" not in delta:
+            delta["role"] = "assistant"
 
     chunk: dict[str, Any] = {
         "id": chunk_id,

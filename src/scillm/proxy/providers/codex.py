@@ -21,6 +21,29 @@ from scillm.proxy.providers.auth import get_codex_credentials
 CODEX_API_URL = "https://chatgpt.com/backend-api/codex/responses"
 
 
+def _openai_tools_to_codex(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Convert OpenAI Chat tool definitions to Codex Responses API format.
+
+    OpenAI Chat: {"type": "function", "function": {"name": ..., "description": ..., "parameters": ...}}
+    Codex Responses: {"type": "function", "name": ..., "description": ..., "parameters": ...}
+    """
+    codex_tools = []
+    for tool in tools:
+        if tool.get("type") != "function":
+            continue
+        fn = tool.get("function", {})
+        codex_tool: dict[str, Any] = {
+            "type": "function",
+            "name": fn.get("name", ""),
+        }
+        if "description" in fn:
+            codex_tool["description"] = fn["description"]
+        if "parameters" in fn:
+            codex_tool["parameters"] = fn["parameters"]
+        codex_tools.append(codex_tool)
+    return codex_tools
+
+
 def _openai_messages_to_codex_input(
     messages: list[dict[str, Any]],
 ) -> tuple[str | None, list[dict[str, Any]]]:
@@ -38,6 +61,32 @@ def _openai_messages_to_codex_input(
         if role == "system":
             if isinstance(content, str):
                 instructions = content
+            continue
+
+        # Tool result messages → Codex function_call_output
+        if role == "tool":
+            input_items.append({
+                "type": "function_call_output",
+                "call_id": msg.get("tool_call_id", ""),
+                "output": content if isinstance(content, str) else json.dumps(content),
+            })
+            continue
+
+        # Assistant messages with tool_calls → Codex function_call items
+        tool_calls = msg.get("tool_calls")
+        if role == "assistant" and tool_calls:
+            # First add any text content as a message
+            if content and isinstance(content, str):
+                input_items.append({"role": "assistant", "type": "message", "content": content})
+            # Then add each tool call
+            for tc in tool_calls:
+                fn = tc.get("function", {})
+                input_items.append({
+                    "type": "function_call",
+                    "call_id": tc.get("id", ""),
+                    "name": fn.get("name", ""),
+                    "arguments": fn.get("arguments", "{}"),
+                })
             continue
 
         # Codex uses the same role names as OpenAI
@@ -60,8 +109,13 @@ def _openai_messages_to_codex_input(
 
 
 def _parse_codex_response(events: list[dict[str, Any]], model: str) -> openai.types.chat.ChatCompletion:
-    """Parse Codex SSE events into OpenAI ChatCompletion format."""
+    """Parse Codex SSE events into OpenAI ChatCompletion format.
+
+    For tool calls, we prefer the response.completed event's output items
+    which have complete call_id and name. Delta events may have empty call_ids.
+    """
     text_parts: list[str] = []
+    tool_calls_map: dict[str, dict[str, Any]] = {}  # call_id → {name, arguments}
     usage_input = 0
     usage_output = 0
     actual_model = model
@@ -80,25 +134,48 @@ def _parse_codex_response(events: list[dict[str, Any]], model: str) -> openai.ty
             resp_usage = resp.get("usage", {})
             usage_input = resp_usage.get("input_tokens", 0)
             usage_output = resp_usage.get("output_tokens", 0)
-            # Also extract full text from output items if we missed deltas
-            if not text_parts:
-                for item in resp.get("output", []):
-                    if item.get("type") == "message":
+            # Extract from output items — authoritative source for tool calls
+            for item in resp.get("output", []):
+                if item.get("type") == "message":
+                    if not text_parts:
                         for c in item.get("content", []):
                             if c.get("type") == "output_text":
                                 text_parts.append(c.get("text", ""))
+                elif item.get("type") == "function_call":
+                    call_id = item.get("call_id", item.get("id", ""))
+                    tool_calls_map[call_id] = {
+                        "name": item.get("name", ""),
+                        "arguments": item.get("arguments", ""),
+                    }
 
-    text = "".join(text_parts)
+    text = "".join(text_parts) or None
+
+    # Build OpenAI tool_calls list
+    tool_calls_list = []
+    for call_id, tc_data in tool_calls_map.items():
+        tool_calls_list.append(
+            openai.types.chat.ChatCompletionMessageToolCall(
+                id=call_id,
+                type="function",
+                function=openai.types.chat.chat_completion_message_tool_call.Function(
+                    name=tc_data["name"],
+                    arguments=tc_data["arguments"],
+                ),
+            )
+        )
+
+    finish_reason = "tool_calls" if tool_calls_list else "stop"
 
     return openai.types.chat.ChatCompletion(
         id=f"chatcmpl-codex-{uuid.uuid4().hex[:8]}",
         choices=[
             openai.types.chat.chat_completion.Choice(
-                finish_reason="stop",
+                finish_reason=finish_reason,
                 index=0,
                 message=openai.types.chat.ChatCompletionMessage(
                     content=text,
                     role="assistant",
+                    tool_calls=tool_calls_list if tool_calls_list else None,
                 ),
             )
         ],
@@ -139,6 +216,14 @@ async def codex_completion(
     }
     # ChatGPT Codex backend does NOT support: temperature, max_output_tokens, top_p
 
+    # Tool use: translate OpenAI Chat tools to Codex Responses API format
+    # OpenAI Chat: {"type": "function", "function": {"name": ..., "parameters": ...}}
+    # Codex Responses: {"type": "function", "name": ..., "parameters": ..., "description": ...}
+    if "tools" in kwargs and kwargs["tools"]:
+        body["tools"] = _openai_tools_to_codex(kwargs["tools"])
+    if "tool_choice" in kwargs:
+        body["tool_choice"] = kwargs["tool_choice"]
+
     headers = {
         "Authorization": f"Bearer {access_token}",
         "Content-Type": "application/json",
@@ -146,7 +231,7 @@ async def codex_completion(
         "chatgpt-account-id": account_id,
     }
 
-    logger.info("Codex OAuth call: model={}, {} input items", model, len(input_items))
+    logger.info("Codex OAuth call: model={}, {} input items, {} tools", model, len(input_items), len(body.get("tools", [])))
 
     timeout = kwargs.get("timeout", 120)
     events: list[dict[str, Any]] = []
@@ -203,6 +288,12 @@ async def codex_completion_stream(
         "store": False,
     }
 
+    # Tool use: translate OpenAI Chat tools to Codex Responses API format
+    if "tools" in kwargs and kwargs["tools"]:
+        body["tools"] = _openai_tools_to_codex(kwargs["tools"])
+    if "tool_choice" in kwargs:
+        body["tool_choice"] = kwargs["tool_choice"]
+
     headers = {
         "Authorization": f"Bearer {access_token}",
         "Content-Type": "application/json",
@@ -210,9 +301,11 @@ async def codex_completion_stream(
         "chatgpt-account-id": account_id,
     }
 
-    logger.info("Codex OAuth stream: model={}, {} input items", model, len(input_items))
+    logger.info("Codex OAuth stream: model={}, {} input items, {} tools", model, len(input_items), len(body.get("tools", [])))
     chunk_id = make_chunk_id()
     timeout = kwargs.get("timeout", 120)
+    tool_call_index = 0
+    tool_call_ids: dict[str, int] = {}  # call_id → index
 
     try:
         async with httpx.AsyncClient(timeout=float(timeout)) as client:
@@ -252,6 +345,32 @@ async def codex_completion_stream(
                                     chunk = sse_chunk(chunk_id, model, content_delta=delta)
                                     yield sse_format(chunk).encode()
 
+                            elif event_type == "response.function_call_arguments.delta":
+                                call_id = event.get("call_id", "")
+                                if call_id not in tool_call_ids:
+                                    # First chunk for this tool call — emit initial with name
+                                    tool_call_ids[call_id] = tool_call_index
+                                    tc = [{
+                                        "index": tool_call_index,
+                                        "id": call_id,
+                                        "type": "function",
+                                        "function": {
+                                            "name": event.get("name", ""),
+                                            "arguments": event.get("delta", ""),
+                                        },
+                                    }]
+                                    tool_call_index += 1
+                                else:
+                                    # Subsequent argument delta
+                                    tc = [{
+                                        "index": tool_call_ids[call_id],
+                                        "function": {
+                                            "arguments": event.get("delta", ""),
+                                        },
+                                    }]
+                                chunk = sse_chunk(chunk_id, model, tool_calls=tc)
+                                yield sse_format(chunk).encode()
+
                             elif event_type == "response.completed":
                                 resp_data = event.get("response", {})
                                 actual_model = resp_data.get("model", model)
@@ -261,7 +380,8 @@ async def codex_completion_stream(
                                     "completion_tokens": resp_usage.get("output_tokens", 0),
                                     "total_tokens": resp_usage.get("input_tokens", 0) + resp_usage.get("output_tokens", 0),
                                 }
-                                chunk = sse_chunk(chunk_id, actual_model, finish_reason="stop", usage=usage)
+                                finish = "tool_calls" if tool_call_ids else "stop"
+                                chunk = sse_chunk(chunk_id, actual_model, finish_reason=finish, usage=usage)
                                 yield sse_format(chunk).encode()
                                 yield sse_done().encode()
                                 return

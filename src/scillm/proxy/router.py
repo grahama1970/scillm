@@ -21,6 +21,8 @@ import io
 import mimetypes
 import zipfile
 
+import os
+
 import httpx
 import openai
 from loguru import logger
@@ -29,6 +31,46 @@ from scillm.proxy.config import Deployment, ModelGroup, ProxyConfig, RetryPolicy
 from scillm.proxy.providers.auth import is_anthropic_available, is_codex_available
 from scillm.proxy.providers.claude import claude_completion, claude_completion_stream
 from scillm.proxy.providers.codex import codex_completion, codex_completion_stream
+
+# Chutes warmup: called when a Chutes model returns 5xx (cold start)
+_CHUTES_API_BASE = os.environ.get("CHUTES_API_BASE", "https://llm.chutes.ai")
+_CHUTES_MGMT_API = "https://api.chutes.ai"
+_chutes_warmup_pending: set[str] = set()  # models already being warmed (avoid spam)
+
+
+def _trigger_chutes_warmup(model: str) -> None:
+    """Fire-and-forget warmup call to Chutes management API.
+
+    Called when a Chutes model returns 5xx (likely cold). The warmup API
+    notifies miners to spin up instances. Non-blocking — runs in background.
+    """
+    if model in _chutes_warmup_pending:
+        return
+    _chutes_warmup_pending.add(model)
+
+    async def _do_warmup() -> None:
+        try:
+            key = os.environ.get("CHUTES_API_KEY") or os.environ.get("CHUTES_API_TOKEN")
+            if not key:
+                return
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                resp = await client.get(
+                    f"{_CHUTES_MGMT_API}/chutes/warmup/{model}",
+                    params={"quick": "true"},
+                    headers={"Authorization": f"Bearer {key}"},
+                )
+                if resp.status_code == 200:
+                    logger.info("Chutes warmup triggered for cold model {} — miners notified", model)
+                else:
+                    logger.warning("Chutes warmup {} returned {}", model, resp.status_code)
+        except Exception as exc:
+            logger.debug("Chutes warmup {} failed: {}", model, exc)
+        finally:
+            # Allow re-warmup after 60s
+            await asyncio.sleep(60)
+            _chutes_warmup_pending.discard(model)
+
+    asyncio.create_task(_do_warmup())
 
 
 # ---------------------------------------------------------------------------
@@ -540,8 +582,9 @@ class Router:
             return await codex_completion(dep.model, messages, timeout=dep.timeout, **kwargs)
 
         # We do one initial attempt + up to max_retries retries.
-        # max_retries is only known after the first failure, so we loop
-        # with a generous upper bound and break when budget exhausted.
+        # _max_retries_override caps retries when multiple models share a group
+        # (e.g., non-TEE + TEE) so we fail fast to the next deployment.
+        override = kwargs.pop("_max_retries_override", None)
         max_possible = max(
             policy.internal_server_error,
             policy.rate_limit_error,
@@ -549,6 +592,8 @@ class Router:
             policy.authentication_error,
             policy.bad_request_error,
         )
+        if override is not None:
+            max_possible = min(max_possible, override)
 
         for attempt in range(max_possible + 1):
             try:
@@ -567,6 +612,16 @@ class Router:
                 openai.APIStatusError,
             ) as exc:
                 last_exc = exc
+
+                # Chutes cold-start detection: on first 5xx, trigger warmup API
+                if (
+                    attempt == 0
+                    and isinstance(exc, (openai.InternalServerError, openai.APITimeoutError))
+                    and dep.api_base
+                    and _CHUTES_API_BASE in dep.api_base
+                ):
+                    _trigger_chutes_warmup(dep.model)
+
                 allowed = _max_retries_for(exc, policy)
                 if attempt >= allowed:
                     logger.warning(
@@ -602,14 +657,28 @@ class Router:
         messages: list[dict[str, Any]],
         **kwargs: Any,
     ) -> Any:
-        """Try all deployments in a group (shuffled). Returns first success."""
+        """Try all deployments in a group in config order. Returns first success.
+
+        Config order matters: non-TEE before TEE, free key before paid key.
+        Only shuffle when all deployments use the same model (load balancing).
+        When multiple distinct models exist, fail fast (1 retry) per deployment
+        so we don't burn minutes on a cold model when a hot one is next.
+        """
         deps = list(group.deployments)
-        random.shuffle(deps)
+        models = {d.model for d in deps}
+        multi_model = len(models) > 1
+        if not multi_model:
+            random.shuffle(deps)  # Same model, different keys → load balance
 
         last_exc: Exception | None = None
         for dep in deps:
             try:
-                return await self._try_deployment(dep, messages, **kwargs)
+                # Multi-model groups: fail fast (1 retry) so we don't burn time
+                # on a cold model when a hot alternative is next in line.
+                kw = dict(**kwargs)
+                if multi_model:
+                    kw["_max_retries_override"] = 1
+                return await self._try_deployment(dep, messages, **kw)
             except Exception as exc:
                 last_exc = exc
                 logger.debug(

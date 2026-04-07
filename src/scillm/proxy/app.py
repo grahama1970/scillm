@@ -6,6 +6,7 @@ FastAPI application for the scillm proxy (~350 lines).
 
 from __future__ import annotations
 
+import asyncio
 import os
 import time
 import uuid
@@ -92,7 +93,7 @@ def _load_middleware(config: ProxyConfig) -> list[BaseMiddleware]:
     except (ImportError, Exception) as exc:
         logger.debug("CostHeaderMiddleware not loaded: {}", exc)
 
-    # Request logging — MUST be last (reads cost headers set by CostHeaderMiddleware)
+    # Request logging — reads cost headers set by CostHeaderMiddleware
     try:
         from chutes.middleware.request_log import RequestLogMiddleware
         middlewares.append(RequestLogMiddleware())
@@ -100,7 +101,63 @@ def _load_middleware(config: ProxyConfig) -> list[BaseMiddleware]:
     except (ImportError, Exception) as exc:
         logger.debug("RequestLogMiddleware not loaded: {}", exc)
 
+    # ArangoDB logging — writes to llm_call_log for /learn-timeout and /orchestrate
+    try:
+        from chutes.middleware.arango_log import ArangoLogMiddleware
+        middlewares.append(ArangoLogMiddleware())
+        logger.info("ArangoLogMiddleware loaded")
+    except (ImportError, Exception) as exc:
+        logger.debug("ArangoLogMiddleware not loaded: {}", exc)
+
     return middlewares
+
+
+# ---------------------------------------------------------------------------
+# Chutes cold-start warmup
+# ---------------------------------------------------------------------------
+
+CHUTES_API_BASE = os.environ.get("CHUTES_API_BASE", "https://llm.chutes.ai")
+CHUTES_MGMT_API = "https://api.chutes.ai"
+
+
+async def _warmup_chutes_models(config: ProxyConfig) -> None:
+    """Call the Chutes warmup API for each Chutes deployment on startup.
+
+    Runs in the background — doesn't block proxy readiness.
+    Uses GET /chutes/warmup/{model_name}?quick=true which returns immediately
+    and creates a bounty for miners to spin up instances.
+    """
+    chutes_base = os.environ.get("CHUTES_API_BASE", CHUTES_API_BASE)
+    chutes_key = os.environ.get("CHUTES_API_KEY") or os.environ.get("CHUTES_API_TOKEN")
+    if not chutes_key:
+        logger.debug("No CHUTES_API_KEY — skipping warmup")
+        return
+
+    # Collect unique Chutes model names from config
+    models_to_warm: set[str] = set()
+    for group in config.model_groups.values():
+        for dep in group.deployments:
+            if dep.api_base and chutes_base in dep.api_base:
+                models_to_warm.add(dep.model)
+
+    if not models_to_warm:
+        return
+
+    headers = {"Authorization": f"Bearer {chutes_key}"}
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        for model in models_to_warm:
+            try:
+                resp = await client.get(
+                    f"{CHUTES_MGMT_API}/chutes/warmup/{model}",
+                    params={"quick": "true"},
+                    headers=headers,
+                )
+                if resp.status_code == 200:
+                    logger.info("Chutes warmup sent for {} — miners notified", model)
+                else:
+                    logger.warning("Chutes warmup {} returned {}: {}", model, resp.status_code, resp.text[:200])
+            except Exception as exc:
+                logger.warning("Chutes warmup {} failed: {}", model, exc)
 
 
 # ---------------------------------------------------------------------------
@@ -127,6 +184,10 @@ async def lifespan(app: FastAPI):
         len(_config.aliases),
         len(_config.fallbacks),
     )
+
+    # Background warmup: fire cheap requests to cold-start-prone providers
+    asyncio.create_task(_warmup_chutes_models(_config))
+
     yield
     # Graceful shutdown: drain in-flight requests before closing clients
     logger.info("scillm proxy shutting down — draining connections...")
@@ -213,6 +274,12 @@ async def chat_completions(request: Request):
     model = body.get("model", model)
     messages = body.get("messages", messages)
 
+    # Opaque metadata: stripped before routing (LLM never sees it),
+    # echoed back in the response for caller-side correlation.
+    # Use case: ArangoDB _key round-trip so batch callers can join
+    # responses to source documents without the LLM fabricating keys.
+    caller_metadata = body.pop("scillm_metadata", None)
+
     # Extract kwargs for the openai client
     kwargs: dict[str, Any] = {}
     for key in ("temperature", "max_tokens", "top_p", "frequency_penalty",
@@ -269,6 +336,11 @@ async def chat_completions(request: Request):
                 )
 
             response_dict = await _middleware_chain.run_post_call(body, response_dict)
+
+            # Echo opaque metadata back — LLM never saw it, can't fabricate it
+            if caller_metadata is not None:
+                response_dict["scillm_metadata"] = caller_metadata
+
             elapsed = time.monotonic() - start
 
             # Extract cost headers stashed by CostHeaderMiddleware
