@@ -157,20 +157,42 @@ def _openai_to_anthropic_messages(
                     continue
                 if part.get("type") == "text":
                     a_parts.append({"type": "text", "text": part["text"]})
+                elif part.get("type") == "document":
+                    # Native document block (e.g., PDF) — pass through to Anthropic
+                    source = part.get("source", {})
+                    a_parts.append({
+                        "type": "document",
+                        "source": {
+                            "type": source.get("type", "base64"),
+                            "media_type": source.get("media_type", "application/pdf"),
+                            "data": source.get("data", ""),
+                        },
+                    })
                 elif part.get("type") == "image_url":
                     url = part.get("image_url", {}).get("url", "")
                     if url.startswith("data:"):
-                        # data:image/png;base64,xxxxx
+                        # data:image/png;base64,xxxxx or data:application/pdf;base64,xxxxx
                         header, data = url.split(",", 1)
                         media_type = header.split(":")[1].split(";")[0]
-                        a_parts.append({
-                            "type": "image",
-                            "source": {
-                                "type": "base64",
-                                "media_type": media_type,
-                                "data": data,
-                            },
-                        })
+                        if media_type == "application/pdf":
+                            # PDF → Anthropic document block
+                            a_parts.append({
+                                "type": "document",
+                                "source": {
+                                    "type": "base64",
+                                    "media_type": "application/pdf",
+                                    "data": data,
+                                },
+                            })
+                        else:
+                            a_parts.append({
+                                "type": "image",
+                                "source": {
+                                    "type": "base64",
+                                    "media_type": media_type,
+                                    "data": data,
+                                },
+                            })
             if a_parts:
                 anthropic_msgs.append({"role": a_role, "content": a_parts})
 
