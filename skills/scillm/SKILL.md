@@ -452,16 +452,38 @@ resp = httpx.post(
 
 **ZIP files**: Supported! The proxy auto-explodes ZIP archives — unpacks each file and sends it as its own part (text files as text, images/PDFs as `inlineData`). Just send `mimeType: "application/zip"` and the proxy handles the rest. Tested: 64KB ZIP with 8 files (code, markdown, PNG) → 2.78s, 14K tokens.
 
-**WARNING**: `inlineData` only works with `model: "text-gemini"` (direct). Using `model: "text"` will fail on Chutes/DeepSeek before reaching Gemini. The proxy only switches to the native Gemini API when the deployment targets `generativelanguage.googleapis.com`.
+**WARNING**: `inlineData` only works with `model: "text-gemini"` or `"text-gemini-3"` (direct). Using `model: "text"` will fail on Chutes/DeepSeek before reaching Gemini. The proxy only switches to the native Gemini API when the deployment targets `generativelanguage.googleapis.com`.
+
+**`text-gemini-3`** (Gemini 3 Flash Preview) is a thinking model — better for complex analysis of PDFs/images but uses internal reasoning tokens. Set `max_tokens` higher (4096+) to avoid budget exhaustion.
+
+### Option C: Images via image_url (all VLM providers)
+
+For images (not PDFs), use the OpenAI-compat `image_url` format. This works across the full VLM cascade (Gemini → Claude → Codex):
+
+```python
+with open("screenshot.png", "rb") as f:
+    img_b64 = base64.b64encode(f.read()).decode()
+
+resp = httpx.post(url, json={
+    "model": "vlm",  # cascade: Gemini free → paid → Claude → Codex
+    "messages": [{"role": "user", "content": [
+        {"type": "text", "text": "Describe this screenshot"},
+        {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{img_b64}"}},
+    ]}],
+    "max_tokens": 2048,
+}, headers=headers, timeout=120)
+```
 
 ### Decision Table
 
-| Situation | Use | Model |
-|-----------|-----|-------|
-| Text files, any provider | Concatenated text | `text` (cascade) |
-| Binary files (PDF/images), Gemini | `inlineData` parts | `text-gemini` (direct) |
-| Mixed text+binary, need cascade | Extract text client-side, concatenate | `text` (cascade) |
-| Mixed text+binary, Gemini OK | `inlineData` per file | `text-gemini` (direct) |
+| Situation | Format | Model | Cascade? |
+|-----------|--------|-------|----------|
+| Text files, any provider | Concatenated text | `text` | YES (full) |
+| Images only, need cascade | `image_url` base64 | `vlm` | YES → Claude → Codex |
+| PDFs, Gemini only | `inlineData` parts | `text-gemini` or `text-gemini-3` | NO (Gemini only) |
+| PDFs + images, Gemini | `inlineData` per file | `text-gemini` or `text-gemini-3` | NO (Gemini only) |
+| PDFs, need cascade | Extract text client-side | `text` | YES (full) |
+| Mixed PDF+images, need cascade | Extract PDF text, `image_url` for images | `vlm` | YES → Claude → Codex |
 
 ---
 
