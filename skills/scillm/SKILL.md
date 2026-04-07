@@ -474,16 +474,31 @@ resp = httpx.post(url, json={
 }, headers=headers, timeout=120)
 ```
 
+### Option D: PDFs via Claude OAuth
+
+Claude reads PDF binaries natively. Two formats work through scillm:
+
+```python
+# Format 1: data URI via image_url (same as Gemini, auto-converted)
+{"type": "image_url", "image_url": {"url": f"data:application/pdf;base64,{pdf_b64}"}}
+
+# Format 2: Anthropic-native document block (passed through directly)
+{"type": "document", "source": {"type": "base64", "media_type": "application/pdf", "data": pdf_b64}}
+```
+
+Both work with any `claude-*` model. The VLM cascade now handles PDFs on the Claude fallback path.
+
 ### Decision Table
 
 | Situation | Format | Model | Cascade? |
 |-----------|--------|-------|----------|
 | Text files, any provider | Concatenated text | `text` | YES (full) |
 | Images only, need cascade | `image_url` base64 | `vlm` | YES → Claude → Codex |
-| PDFs, Gemini only | `inlineData` parts | `text-gemini` or `text-gemini-3` | NO (Gemini only) |
-| PDFs + images, Gemini | `inlineData` per file | `text-gemini` or `text-gemini-3` | NO (Gemini only) |
-| PDFs, need cascade | Extract text client-side | `text` | YES (full) |
-| Mixed PDF+images, need cascade | Extract PDF text, `image_url` for images | `vlm` | YES → Claude → Codex |
+| PDFs, Gemini | `inlineData` parts | `text-gemini` or `text-gemini-3` | Gemini free → paid |
+| PDFs, Claude | `image_url` data URI or `document` block | `claude-sonnet-4-6` | Claude direct |
+| PDFs, full cascade | `image_url` data:application/pdf | `vlm` | YES → Gemini → Claude |
+| PDFs + images, Gemini | `inlineData` per file | `text-gemini` or `text-gemini-3` | Gemini free → paid |
+| Mixed PDF+images, Claude | `image_url` for both | `claude-sonnet-4-6` | Claude direct |
 
 ---
 
