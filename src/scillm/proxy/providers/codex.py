@@ -377,6 +377,50 @@ async def codex_completion_stream(
                                     chunk = sse_chunk(chunk_id, model, content_delta=delta)
                                     yield sse_format(chunk).encode()
 
+                            elif event_type == "response.output_item.added":
+                                item = event.get("item", {})
+                                if item.get("type") == "function_call":
+                                    call_id = item.get("call_id", item.get("id", ""))
+                                    if call_id and call_id not in tool_call_ids:
+                                        tool_call_ids[call_id] = tool_call_index
+                                        tc = [{
+                                            "index": tool_call_index,
+                                            "id": call_id,
+                                            "type": "function",
+                                            "function": {
+                                                "name": item.get("name", ""),
+                                                "arguments": "",
+                                            },
+                                        }]
+                                        tool_call_index += 1
+                                        chunk = sse_chunk(chunk_id, model, tool_calls=tc)
+                                        yield sse_format(chunk).encode()
+
+                            elif event_type == "response.output_item.done":
+                                item = event.get("item", {})
+                                if item.get("type") == "function_call":
+                                    call_id = item.get("call_id", item.get("id", ""))
+                                    if call_id and call_id not in tool_call_ids:
+                                        tool_call_ids[call_id] = tool_call_index
+                                        tool_call_index += 1
+
+                            elif event_type == "response.function_call_arguments.done":
+                                call_id = event.get("call_id", "")
+                                if call_id and call_id not in tool_call_ids:
+                                    tool_call_ids[call_id] = tool_call_index
+                                    tc = [{
+                                        "index": tool_call_index,
+                                        "id": call_id,
+                                        "type": "function",
+                                        "function": {
+                                            "name": event.get("name", ""),
+                                            "arguments": event.get("arguments", ""),
+                                        },
+                                    }]
+                                    tool_call_index += 1
+                                    chunk = sse_chunk(chunk_id, model, tool_calls=tc)
+                                    yield sse_format(chunk).encode()
+
                             elif event_type == "response.function_call_arguments.delta":
                                 call_id = event.get("call_id", "")
                                 if call_id not in tool_call_ids:
