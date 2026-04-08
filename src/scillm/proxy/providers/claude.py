@@ -326,8 +326,14 @@ async def claude_completion(
 
     if resp.status_code != 200:
         error_body = resp.text
+        # Detect Anthropic OAuth gate changes — fail fast to cascade
+        if "third-party" in error_body.lower() or "extra usage" in error_body.lower():
+            logger.error(
+                "Claude OAuth BLOCKED — Anthropic changed third-party policy. "
+                "Check headers (user-agent, x-app, anthropic-beta). Error: {}",
+                error_body[:300],
+            )
         logger.warning("Claude API error {}: {}", resp.status_code, error_body[:500])
-        # Raise a plain Exception — the router catches it and wraps appropriately
         raise Exception(f"Claude API {resp.status_code}: {error_body[:500]}")
 
     data = resp.json()
