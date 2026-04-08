@@ -67,19 +67,27 @@ scillm does not implement multi-tenant auth, key rotation, or per-client access 
 
 ## What You Get
 
-Every provider scillm targets speaks OpenAI-compatible API (`/v1/chat/completions`). Provider-specific handler code is unnecessary for this use case. Adding a provider is 5 lines of YAML. The entire proxy is ~4,700 lines of Python — not a framework, just the code that does the work.
+Every provider scillm targets speaks OpenAI-compatible API (`/v1/chat/completions`). Provider-specific handler code is unnecessary for this use case. Adding a provider is 5 lines of YAML. The proxy handles format translation (OpenAI tools → Anthropic/Codex/Gemini native), OAuth token management, streaming SSE normalization, and fallback cascading — not a framework, just the code that does the work.
 
+- **Tool use across all providers** — Send OpenAI-format `tools` and `tool_choice`. The proxy translates to each provider's native format: Anthropic tool blocks for Claude, flattened Responses API for Codex, native function calling for Gemini. Streaming tool call deltas work everywhere.
 - **Wall-time retry budget** — Providers with hot/cold cycling return 503 now but may be back in 20 seconds. Fixed retry counts fail here. scillm retries on a clock — keep trying for 90 seconds, not 3 attempts.
 - **Batch iterator with request-response pairing** — Fire 200 parallel requests, results arrive out of order. scillm's `as_completed` iterator pairs every response with its original request.
+- **Opaque metadata round-trip** — Send `scillm_metadata` (any dict) in the request. The proxy strips it before the LLM sees it, then staples it back onto the response. The LLM cannot fabricate these values — use it for ArangoDB `_key` correlation in batch pipelines.
 - **JSON repair inside retry loop** — LLM responses with trailing commas, missing braces, or markdown fences wrapping JSON are repaired automatically instead of wasting the call.
 - **Auto multimodal routing** — Pass an image and scillm figures it out. No model selection needed — the proxy detects images in messages and reroutes to a vision model automatically.
+- **4-provider VLM cascade** — Images and PDFs cascade through Gemini free → Gemini paid → Claude OAuth → Codex OAuth. All four providers handle images; Claude and Codex also handle PDFs natively.
+- **Gemini free-to-paid key rotation** — Gemini free and paid keys are separate groups. A 429 on the free key cascades immediately to the paid key — no wasted retries on an exhausted quota.
+- **Cold-start warmup** — Chutes models that return 503 (cold) trigger a background warmup API call that posts a bounty for miners. The proxy falls through to the next deployment immediately. On startup, configured Chutes models are pre-warmed.
 - **Bounded concurrency queue** — Chutes.ai has a 5-connection limit. Exceed it and you get a 429 with a 90-second penalty. scillm queues overflow instead of rejecting it.
 - **Source grounding verification** — Pass source text, scillm verifies the response is grounded using fuzzy matching, retries with progressive prompts if not.
-- **Fallback cascade with circuit breaker** — `text` → `text-deepseek` → `text-gemini`. 3 failures trigger a 20-second cooldown per group.
+- **Fallback cascade with circuit breaker** — `text` → `text-gemini` (free) → `text-gemini-paid` → `text-deepseek`. VLM: `vlm` (free) → `vlm-paid` → `vlm-claude` → `vlm-codex`. 3 failures trigger a 20-second cooldown per group.
+- **Non-TEE fast-fail routing** — Multi-model Chutes groups try non-TEE first (better throughput) with 1 retry, then fall through to TEE. No 8-retry stall on cold non-TEE models.
+- **Native system prompts** — Claude gets an array of system blocks (matches Claude Code CLI). Codex gets the `instructions` field. No fake user-message hacks.
+- **Claude PDF support** — Send PDFs via `data:application/pdf;base64,...` in `image_url` or as Anthropic-native `type:document` blocks. Both formats auto-translate.
 - **5xx-specific backoff** — Server errors (503) get different retry timing than rate limits (429).
 - **Gemini native file support** — Send PDFs, images, and ZIP archives via `inlineData` parts when targeting Gemini. ZIP files are auto-exploded into individual parts (text as text, binaries as native `inlineData`).
 - **Ollama auto-routing** — Any locally-pulled Ollama model works without a config entry. The proxy auto-detects unknown model names and routes them to the local Ollama instance.
-- **SSE streaming for all providers** — `"stream": true` works everywhere, including Claude and Codex OAuth. The proxy translates provider-specific SSE formats into OpenAI-compatible delta chunks. Same `data: {"choices":[{"delta":{"content":"..."}}]}` format regardless of backend.
+- **SSE streaming for all providers** — `"stream": true` works everywhere, including Claude and Codex OAuth. The proxy translates provider-specific SSE formats into OpenAI-compatible delta chunks, including streaming tool call deltas.
 
 ## Why Docker, Not `pip install`
 
@@ -103,12 +111,14 @@ If you already have Claude Max and Codex Pro subscriptions plus a few API keys, 
 |------------|---------------|-------------|
 | **Call Claude** | Anthropic SDK, manage OAuth tokens, translate message format, handle `system` prompt constraints | `model: "claude-sonnet-4-6"` — done |
 | **Call Codex** | Custom SSE parser for chatgpt.com backend, `chatgpt-account-id` header, strip unsupported params | `model: "gpt-5.3-codex"` — done |
+| **Tool use** | Different tool format per provider (Anthropic input_schema, Codex flattened, Gemini native) | Send OpenAI-format `tools` — proxy translates |
 | **Call Gemini with files** | Gemini REST API, `inlineData` parts, ZIP explosion logic, MIME detection | Attach files in messages — auto-routed |
 | **Call any Ollama model** | Configure each model, manage base URL | Pull and call — auto-detected |
 | **Streaming** | Different SSE format per provider, custom parsers for each | `"stream": true` — same format for all |
 | **Failover** | Client-side retry logic per provider, circuit breaker state per process | Proxy handles cascade + circuit breaker |
 | **Concurrency** | Per-process semaphores, risk of 429 penalties | Proxy queues globally — one semaphore |
 | **JSON repair** | Retry the whole call on broken JSON | Proxy repairs and returns — no wasted call |
+| **Metadata round-trip** | Track request-response correlation manually | `scillm_metadata` — stripped before LLM, returned unchanged |
 | **Provider switch** | Change code in every caller | Change YAML config — callers unchanged |
 | **OAuth refresh** | Each process manages token lifecycle | Proxy mounts credentials — one refresh |
 
@@ -117,8 +127,9 @@ If you already have Claude Max and Codex Pro subscriptions plus a few API keys, 
 | | scillm | Multi-provider proxies |
 |---|---|---|
 | **Subscription bridging** | Uses your Claude Max + Codex Pro subscriptions directly (OAuth) | API keys only — can't use Max/Pro subscriptions |
+| **Tool use translation** | OpenAI tools → Anthropic/Codex/Gemini native format, streaming tool deltas | Pass-through only (tools must match provider format) |
 | **Tenant model** | Single-user, runs locally, data stays on your machine | Multi-tenant SaaS or complex self-host |
-| **File handling** | ZIP explosion, Gemini native `inlineData`, VLM auto-routing | Pass-through only (OpenRouter has a PDF plugin) |
+| **File handling** | ZIP explosion, Gemini `inlineData`, Claude PDF blocks, VLM auto-routing | Pass-through only (OpenRouter has a PDF plugin) |
 | **JSON repair** | Multi-stage repair loop (`json_repair` + brace trim + prose rejection) | OpenRouter has response-healing; others reject |
 | **Provider count** | ~8 built-in + any OpenAI-compatible via YAML | 100–1,600 integrations |
 | **Observability** | Prometheus metrics + budget headers | Full tracing dashboards, cost forecasting |
@@ -185,6 +196,56 @@ Each yielded `result`:
 | `attempts` | Retry count |
 | `elapsed_s` | Wall-clock time |
 
+## Tool Use (Function Calling)
+
+Send OpenAI-format `tools` and `tool_choice` — the proxy translates to each provider's native format automatically:
+
+```python
+resp = httpx.post(
+    "http://localhost:4001/v1/chat/completions",
+    headers={"Authorization": "Bearer sk-dev-proxy-123"},
+    json={
+        "model": "claude-sonnet-4-6",  # or gpt-5.3-codex, text-gemini, text
+        "messages": [{"role": "user", "content": "What's the weather in SF?"}],
+        "tools": [{
+            "type": "function",
+            "function": {
+                "name": "get_weather",
+                "description": "Get weather for a location",
+                "parameters": {"type": "object", "properties": {"location": {"type": "string"}}}
+            }
+        }],
+        "tool_choice": "auto",
+    },
+    timeout=60.0,
+)
+# response.choices[0].message.tool_calls → standard OpenAI tool_calls format
+```
+
+**What the proxy handles per provider:**
+- **Claude**: Translates `parameters` → `input_schema`, maps `tool_choice` (auto/required/none/specific), converts tool_use blocks back to OpenAI format
+- **Codex**: Flattens to Responses API format (name at top level), forces `tool_choice: "auto"` (Codex doesn't support `"required"`), adds `parallel_tool_calls: true` and reasoning fields
+- **Gemini**: Native function calling — passed through
+
+Streaming tool calls work on all providers (`"stream": true`). Tool call deltas arrive as standard OpenAI delta chunks with `tool_calls[].function.arguments` fragments.
+
+## Opaque Metadata Round-Trip
+
+Send `scillm_metadata` (any dict) in the request body. The proxy strips it before the LLM sees it, staples it back onto the response unchanged. The LLM cannot fabricate or hallucinate these values.
+
+```python
+resp = httpx.post(url, json={
+    "model": "text",
+    "messages": [{"role": "user", "content": "Assess this control..."}],
+    "scillm_metadata": {"_key": "sparta_controls/12345", "stage": "S12"},
+}, headers=headers)
+
+data = resp.json()
+data["scillm_metadata"]["_key"]  # → "sparta_controls/12345" — guaranteed untouched
+```
+
+Works with all providers. Use it for ArangoDB `_key` correlation in async batch pipelines where results arrive out of order.
+
 ## Source Grounding Verification
 
 Pass a `source` field and scillm verifies the response is grounded using fuzzy token matching. If the response doesn't meet the threshold, scillm retries with progressive prompts that push the model to stick to the source.
@@ -231,21 +292,23 @@ Callers say `model: "text"` — the proxy picks the provider. When models change
 
 | Group | Provider | Model | Fallback chain |
 |-------|----------|-------|----------------|
-| `text` | Chutes | DeepSeek-V3 | → text-deepseek → text-gemini |
-| `text-gemini` | Google | Gemini 2.5 Flash | (none) |
-| `text-gemini-3` | Google | Gemini 3 Flash Preview | (none) |
-| `vlm` | Chutes | Qwen3-VL-235B | → vlm-openrouter |
+| `text` | Chutes | DeepSeek-V3 (non-TEE → V3.1-TEE) | → text-gemini → text-gemini-paid → text-deepseek |
+| `text-gemini` | Google | Gemini 2.5 Flash (free key) | → text-gemini-paid → text-deepseek |
+| `text-gemini-paid` | Google | Gemini 2.5 Flash (paid key) | (none) |
+| `text-gemini-3` | Google | Gemini 3 Flash Preview (free) | → text-gemini-3-paid |
+| `vlm` | Google | Gemini 2.5 Flash (free key) | → vlm-paid → vlm-claude → vlm-codex |
+| `vlm-claude` | Anthropic (OAuth) | Claude Sonnet | Images + PDFs |
+| `vlm-codex` | OpenAI (OAuth) | GPT-5.3 Codex | Images + PDFs |
 | `local-text` | Ollama | qwen2.5:0.5b | (none) |
-| `moonshot-text` | Moonshot | kimi-k2 | (none) |
+| `moonshot-text` | Moonshot | Kimi K2 | (none) |
 | `text-glm` | Z.AI GLM | glm-5.1 | (none) |
-| `claude-sonnet-4-6` | Anthropic (OAuth) | Claude Sonnet | (none) |
-| `gpt-5.3-codex` | OpenAI (OAuth) | Codex | (none) |
-| Any `claude-*` | Anthropic | (auto-routed) | (none) |
-| Any `gemini-*` | Google | (auto-routed) | (none) |
-| Any `Org/Model` | Chutes | (auto-routed) | (none) |
-| Any Ollama tag | Ollama | (auto-routed) | (none) |
+| Any `claude-*` | Anthropic | Auto-routed via Claude Code OAuth | (none) |
+| Any `gpt-*`/`codex-*` | OpenAI | Auto-routed via Codex CLI OAuth | (none) |
+| Any `gemini-*` | Google | Auto-routed to Gemini API | (none) |
+| Any `Org/Model` | Chutes | Auto-routed to Chutes API | (none) |
+| Any `model:tag` | Ollama | Auto-routed to local Ollama | (none) |
 
-Auto-routing handles most model names without config entries. Claude and Codex use OAuth from `~/.claude/` and `~/.codex/` respectively.
+Auto-routing handles most model names without config entries. Claude and Codex use OAuth from `~/.claude/` and `~/.codex/` respectively. Gemini free/paid are separate groups — 429 on free cascades immediately to paid.
 
 ## Adding Your Own Models
 
