@@ -541,6 +541,14 @@ async def scillm_health(request: Request):
     except ImportError:
         pass
 
+    # Abuse guard status (optional)
+    abuse_guard = {}
+    try:
+        from chutes.middleware.abuse_guard import get_abuse_status
+        abuse_guard = get_abuse_status()
+    except ImportError:
+        pass
+
     return {
         "status": "ok",
         "uptime_seconds": round(uptime, 1),
@@ -554,6 +562,7 @@ async def scillm_health(request: Request):
         "routing_strategy": _config.routing_strategy,
         "circuit_breaker": _router.circuit_status(),
         "concurrency": concurrency,
+        "abuse_guard": abuse_guard,
     }
 
 
