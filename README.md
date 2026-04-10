@@ -53,7 +53,7 @@ After adding credentials, rebuild: `docker compose -p scillm -f deploy/docker/co
 
 Makefile shortcuts: `make proxy-rebuild` (build+start), `make proxy-up`, `make proxy-down`, `make proxy-logs`
 
-**Container details:** Multi-process via `supervisord`: scillm (Python/uvicorn, :4001) + Bifrost (Go, :4002). Separate `utls-proxy` sidecar (:8444) for Codex TLS. `network_mode: host` (for local Ollama access), config mounted from `local/proxy_server_config.yaml`, health check every 15s. Ollama available via `--profile local`.
+**Container details:** Multi-process via `supervisord`: scillm (Python/uvicorn, :4001) + Bifrost (Go, :4002). Separate `utls-proxy` sidecar (:8444) for Codex TLS. `network_mode: host` (for local Ollama access), config mounted from `local/proxy_server_config.yaml`, health check every 15s. Ollama available via `--profile local`. Set `BIFROST_ENABLED=true` in `.env` to send EVERY call through Bifrost and view logs/costs at `http://127.0.0.1:4002/workspace/logs`.
 
 ## Security
 

@@ -28,6 +28,7 @@ import openai
 from loguru import logger
 
 from scillm.proxy.config import Deployment, ModelGroup, ProxyConfig, RetryPolicy
+from chutes.middleware.bifrost_forwarder import get_bifrost_forwarder
 from scillm.proxy.providers.auth import is_anthropic_available, is_codex_available
 from scillm.proxy.providers.claude import claude_completion, claude_completion_stream
 from scillm.proxy.providers.codex import codex_completion, codex_completion_stream
@@ -217,6 +218,18 @@ class Router:
         self._config = config
         self._clients: dict[int, openai.AsyncOpenAI] = {}
         self._circuits: dict[str, _CircuitState] = {}
+        self._bifrost = get_bifrost_forwarder()
+        self._bifrost_client: openai.AsyncOpenAI | None = None
+        if self._bifrost.enabled:
+            self._bifrost_client = openai.AsyncOpenAI(
+                api_key=self._bifrost.client_key,
+                base_url=self._bifrost.api_base,
+                timeout=120.0,
+            )
+            logger.info(
+                "Router configured to route completions via Bifrost at {}",
+                self._bifrost.base_url,
+            )
         logger.info(
             "Router initialised — {} group(s), {} alias(es), {} fallback chain(s), "
             "circuit_breaker(allowed_fails={}, cooldown={}s)",
@@ -549,6 +562,12 @@ class Router:
         Returns the OpenAI response/stream on success.
         Raises the last exception on exhaustion.
         """
+        kwargs = dict(kwargs)
+        override = kwargs.pop("_max_retries_override", None)
+
+        if self._bifrost_client is not None:
+            return await self._call_bifrost(dep, messages, **kwargs)
+
         client = self._client_for(dep)
         policy = self._config.retry_policy
         base_delay = self._config.retry_after
@@ -584,7 +603,6 @@ class Router:
         # We do one initial attempt + up to max_retries retries.
         # _max_retries_override caps retries when multiple models share a group
         # (e.g., non-TEE + TEE) so we fail fast to the next deployment.
-        override = kwargs.pop("_max_retries_override", None)
         max_possible = max(
             policy.internal_server_error,
             policy.rate_limit_error,
@@ -646,6 +664,22 @@ class Router:
         # Should not reach here, but satisfy the type checker
         assert last_exc is not None  # noqa: S101
         raise last_exc
+
+    async def _call_bifrost(
+        self,
+        dep: Deployment,
+        messages: list[dict[str, Any]],
+        **kwargs: Any,
+    ) -> Any:
+        assert self._bifrost_client is not None
+        bifrost_model = self._bifrost.format_model(dep.model)
+        logger.debug("Bifrost route: %s → %s", dep.model, bifrost_model)
+        return await self._bifrost_client.chat.completions.create(
+            model=bifrost_model,
+            messages=messages,
+            timeout=float(dep.timeout or 120),
+            **kwargs,
+        )
 
     # ------------------------------------------------------------------
     # Group-level attempt (shuffle deployments, try each)
@@ -790,4 +824,7 @@ class Router:
         for client in self._clients.values():
             await client.close()
         self._clients.clear()
+        if self._bifrost_client is not None:
+            await self._bifrost_client.close()
+            self._bifrost_client = None
         logger.info("Router closed — all clients released")

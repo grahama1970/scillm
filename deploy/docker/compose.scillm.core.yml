@@ -28,6 +28,9 @@ services:
       METRICS_ENV: ${METRICS_ENV:-dev}
       REDIS_HOST: ${REDIS_HOST:-127.0.0.1}
       REDIS_PORT: ${REDIS_PORT:-6379}
+      BIFROST_ENABLED: ${BIFROST_ENABLED:-false}
+      BIFROST_URL: ${BIFROST_URL:-http://127.0.0.1:4002}
+      BIFROST_CLIENT_KEY: ${BIFROST_CLIENT_KEY:-}
     restart: unless-stopped
     network_mode: host
     depends_on:
