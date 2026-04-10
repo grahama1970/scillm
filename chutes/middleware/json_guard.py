@@ -97,9 +97,15 @@ class JsonGuard(BaseMiddleware):
 
     async def pre_call(self, request: dict) -> dict | None:
         rf = request.get("response_format")
+        expect_json = request.get("_expect_json", False)
+
         if isinstance(rf, dict) and rf.get("type") in ("json_object", "json_schema"):
             _json_mode_requested.set(True)
-            logger.debug("json_guard: JSON mode requested")
+            logger.debug("json_guard: JSON mode requested via response_format")
+        elif expect_json:
+            # x-expect-json header: activate JSON repair for providers that don't support response_format
+            _json_mode_requested.set(True)
+            logger.debug("json_guard: JSON mode requested via x-expect-json header")
         else:
             _json_mode_requested.set(False)
         return request

@@ -261,6 +261,10 @@ async def chat_completions(request: Request):
     messages = body.get("messages", [])
     stream = body.get("stream", False)
 
+    # Pass x-expect-json header to middleware for Claude JSON repair
+    if request.headers.get("x-expect-json", "").lower() in ("true", "1", "yes"):
+        body["_expect_json"] = True
+
     if not model:
         raise ProxyError(400, "model is required", "invalid_request_error")
     if not messages:
