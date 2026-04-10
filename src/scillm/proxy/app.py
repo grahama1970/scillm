@@ -56,6 +56,128 @@ def _check_auth(request: Request) -> str | None:
 
 
 # ---------------------------------------------------------------------------
+# Request Validation (fail loudly on common mistakes)
+# ---------------------------------------------------------------------------
+
+# Deprecated models that no longer exist — reject immediately with helpful error
+_DEPRECATED_MODELS = {
+    "deepseek-ai/DeepSeek-V3": "Model removed from Chutes. Use 'text' alias instead.",
+    "deepseek-ai/DeepSeek-V3.1-TEE": "Model deprecated. Use 'text' alias instead.",
+    "deepseek-ai/DeepSeek-V3-0324": "Model deprecated. Use 'text' alias instead.",
+    "deepseek-ai/DeepSeek-V3-0324-TEE": "Model deprecated. Use 'text' alias instead.",
+}
+
+# Direct provider model names that should use aliases instead
+_DIRECT_MODEL_PATTERNS = {
+    "claude-": "Use 'text' or 'vlm-claude' alias for Claude models (has fallbacks).",
+    "gpt-4": "Use 'text' or 'vlm-codex' alias for GPT models (has fallbacks).",
+    "gemini-": "Use 'text-gemini' alias for Gemini models (has fallbacks).",
+}
+
+# Known good model aliases (checked at startup from config)
+_VALID_MODEL_ALIASES: set[str] = set()
+
+
+def _validate_model_request(model: str, body: dict, request: Request) -> None:
+    """Validate model request and auto-fix common issues.
+
+    Guardrails (in order):
+    1. Reject deprecated models with clear error
+    2. Reject unknown models with helpful suggestions
+    3. Reject empty messages
+    4. Warn on direct model names (should use aliases)
+    5. Auto-enable x-expect-json when response_format: json_object is used
+    6. Strip max_tokens (causes empty output on reasoning models)
+    7. Clamp temperature to valid range
+    8. Warn on very long prompts
+    """
+    messages = body.get("messages", [])
+
+    # 0. Reject empty messages — crashes some providers
+    if not messages:
+        raise ProxyError(
+            400,
+            "messages is required and cannot be empty. "
+            "Provide at least one message: [{\"role\": \"user\", \"content\": \"...\"}]",
+            "invalid_request_error",
+        )
+
+    # 1. Reject deprecated models immediately
+    if model in _DEPRECATED_MODELS:
+        raise ProxyError(
+            400,
+            f"Model '{model}' is deprecated. {_DEPRECATED_MODELS[model]}",
+            "invalid_request_error",
+        )
+
+    # 2. Reject unknown models with helpful error
+    # Only check if we have loaded valid aliases (after startup)
+    if _VALID_MODEL_ALIASES and model not in _VALID_MODEL_ALIASES:
+        available = ", ".join(sorted(m for m in _VALID_MODEL_ALIASES if not m.startswith("deepseek-ai/")))
+        raise ProxyError(
+            400,
+            f"Unknown model '{model}'. scillm is an HTTP API, not an importable package. "
+            f"Available models: {available}. "
+            f"Usage: POST http://localhost:4001/v1/chat/completions with model='text'",
+            "invalid_request_error",
+        )
+
+    # 3. Warn on direct model names (log only, don't block)
+    model_lower = model.lower()
+    for pattern, hint in _DIRECT_MODEL_PATTERNS.items():
+        if model_lower.startswith(pattern) and "/" not in model:
+            logger.warning(
+                f"Direct model name '{model}' used without fallbacks. {hint}"
+            )
+            break
+
+    # 4. Auto-enable JSON repair when response_format: json_object is used
+    # This is the #1 cause of failures — Claude ignores response_format and
+    # returns markdown-wrapped JSON. Auto-fix makes it "just work".
+    rf = body.get("response_format")
+    if isinstance(rf, dict) and rf.get("type") in ("json_object", "json_schema"):
+        # Always enable JSON repair when JSON is requested
+        body["_expect_json"] = True
+        logger.debug("Auto-enabled JSON repair for response_format: json_object")
+
+    # 5. Strip max_tokens — causes 90% empty responses on reasoning models
+    # Reasoning models (DeepSeek-R1, o1, etc) spend tokens on internal reasoning.
+    # If max_tokens is set too low, all tokens go to reasoning and output is empty.
+    # Better to let the model decide than risk empty responses.
+    if "max_tokens" in body:
+        logger.warning(
+            f"Stripping max_tokens={body['max_tokens']} — causes empty output on reasoning models. "
+            f"See MEMORY.md: 'Never use max_tokens'."
+        )
+        del body["max_tokens"]
+
+    # Also honor explicit x-expect-json header
+    if request.headers.get("x-expect-json", "").lower() in ("true", "1", "yes"):
+        body["_expect_json"] = True
+
+    # 6. Clamp temperature to valid range (0-2)
+    # Values outside this range break most providers
+    temp = body.get("temperature")
+    if temp is not None:
+        if not isinstance(temp, (int, float)):
+            logger.warning(f"Invalid temperature type {type(temp).__name__}, removing")
+            del body["temperature"]
+        elif temp < 0 or temp > 2:
+            clamped = max(0, min(2, temp))
+            logger.warning(f"Clamping temperature {temp} to valid range: {clamped}")
+            body["temperature"] = clamped
+
+    # 7. Warn on very long prompts (>100k chars ~ 25k tokens)
+    # These can timeout or OOM on some providers
+    total_chars = sum(len(str(m.get("content", ""))) for m in messages)
+    if total_chars > 100000:
+        logger.warning(
+            f"Very long prompt ({total_chars:,} chars, ~{total_chars//4:,} tokens). "
+            f"May timeout on some providers."
+        )
+
+
+# ---------------------------------------------------------------------------
 # Middleware loading
 # ---------------------------------------------------------------------------
 
@@ -178,6 +300,12 @@ async def lifespan(app: FastAPI):
     _embedding_client = httpx.AsyncClient(base_url=EMBEDDING_SERVICE_URL, timeout=30.0)
     _start_time = time.monotonic()
 
+    # Populate valid model aliases for request validation
+    _VALID_MODEL_ALIASES.clear()
+    _VALID_MODEL_ALIASES.update(_config.model_groups.keys())
+    _VALID_MODEL_ALIASES.update(_config.aliases.keys())
+    logger.debug("Valid model aliases: {}", sorted(_VALID_MODEL_ALIASES))
+
     logger.info(
         "scillm proxy started — {} model groups, {} aliases, {} fallback chains",
         len(_config.model_groups),
@@ -261,14 +389,15 @@ async def chat_completions(request: Request):
     messages = body.get("messages", [])
     stream = body.get("stream", False)
 
-    # Pass x-expect-json header to middleware for Claude JSON repair
-    if request.headers.get("x-expect-json", "").lower() in ("true", "1", "yes"):
-        body["_expect_json"] = True
-
     if not model:
         raise ProxyError(400, "model is required", "invalid_request_error")
     if not messages:
         raise ProxyError(400, "messages is required", "invalid_request_error")
+
+    # -------------------------------------------------------------------------
+    # GUARDRAILS: Make common mistakes fail loudly or auto-fix
+    # -------------------------------------------------------------------------
+    _validate_model_request(model, body, request)
 
     if _middleware_chain is None or _router is None:
         raise ProxyError(503, "Proxy not ready — startup incomplete", "service_unavailable")
