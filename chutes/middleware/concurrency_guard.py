@@ -57,7 +57,7 @@ PROVIDER_LIMITS: Dict[str, int] = _load_provider_limits()
 
 # ── Queue safety bounds ──────────────────────────────────────────────────
 MAX_QUEUE_PER_PROVIDER = 50   # Reject new requests when queue exceeds this
-QUEUE_TIMEOUT_S = 60.0        # Queued requests time out after 60s
+QUEUE_TIMEOUT_S = 300.0       # Queued requests time out after 5min (ZIP+thinking models need more)
 
 # ── Adaptive backpressure ─────────────────────────────────────────────────
 # When upstream returns 429, reduce effective concurrency. Recover slowly.

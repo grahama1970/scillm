@@ -3,7 +3,6 @@ services:
     build:
       context: ../..
       dockerfile: deploy/docker/Dockerfile.scillm
-    command: ["uvicorn", "scillm.proxy.app:app", "--host", "0.0.0.0", "--port", "4001"]
     env_file: ["../../.env"]
     environment:
       PYTHONPATH: /app/src
