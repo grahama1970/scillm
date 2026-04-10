@@ -25,8 +25,10 @@ _PROVIDER_MAP = [
     ("127.0.0.1:11434", "ollama", None),
 ]
 
-# OAuth providers — skip, scillm handles these directly
-_OAUTH_PROVIDERS = {"anthropic-oauth", "codex-oauth"}
+# OAuth providers that need special handling.
+# Claude OAuth: route through Bifrost's native anthropic provider with token injection.
+# Codex OAuth: skip — Responses API not supported by Bifrost.
+_SKIP_PROVIDERS = {"codex-oauth"}
 
 # Bifrost shell config (static parts)
 _BIFROST_BASE = {
@@ -54,6 +56,27 @@ _BIFROST_BASE = {
     "plugins": [],
     "framework": {"pricing": {"pricing_sync_interval": 86400}},
 }
+
+
+_CLAUDE_CRED_PATHS = [
+    "/root/.claude/.credentials.json",       # Docker mount
+    os.path.expanduser("~/.claude/.credentials.json"),  # Host
+]
+
+
+def _read_claude_oauth_token() -> str:
+    """Read Claude OAuth access token from credential file."""
+    for path in _CLAUDE_CRED_PATHS:
+        try:
+            with open(path) as f:
+                creds = json.load(f)
+            token = creds.get("claudeAiOauth", {}).get("accessToken", "")
+            if token:
+                print(f"  Claude OAuth token from {path}")
+                return token
+        except (FileNotFoundError, json.JSONDecodeError):
+            continue
+    return ""
 
 
 def _resolve_env(val: str) -> str:
@@ -91,8 +114,32 @@ def generate(scillm_config_path: str, output_path: str) -> None:
         api_key_raw = params.get("api_key", "")
         custom_llm = params.get("custom_llm_provider", "")
 
-        # Skip OAuth providers — scillm handles them directly
-        if custom_llm in _OAUTH_PROVIDERS or api_key_raw == "oauth":
+        # Codex OAuth: skip — Bifrost doesn't support Responses API
+        if custom_llm in _SKIP_PROVIDERS:
+            continue
+
+        # Claude OAuth: add to Bifrost's native anthropic provider with token from cred file
+        if custom_llm == "anthropic-oauth" or (api_key_raw == "oauth" and "anthropic" in api_base):
+            token = _read_claude_oauth_token()
+            if token:
+                if "anthropic" not in providers:
+                    providers["anthropic"] = {}
+                if token not in providers["anthropic"]:
+                    providers["anthropic"][token] = {
+                        "name": "claude-oauth",
+                        "value": token,
+                        "models": set(),
+                        "weight": 1.0,
+                        "base_type": None,
+                        "network_config": {},
+                    }
+                providers["anthropic"][token]["models"].add(model)
+            else:
+                print(f"  SKIP: no Claude OAuth token for {model}")
+            continue
+
+        # Skip other oauth providers we don't handle
+        if api_key_raw == "oauth":
             continue
 
         # Resolve env var references in api_base before provider detection
