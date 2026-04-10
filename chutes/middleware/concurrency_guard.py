@@ -25,7 +25,7 @@ from scillm.proxy.middleware import BaseMiddleware, MiddlewareReject
 # Override any provider via env: SCILLM_CONCURRENCY_<PROVIDER>=N
 # e.g. SCILLM_CONCURRENCY_GEMINI=5
 _DEFAULT_LIMITS: Dict[str, int] = {
-    "chutes": 4,
+    "chutes": 1,  # Serialize Chutes calls - concurrent causes timeouts
     "ollama": 1,
     "moonshot": 3,
     "deepseek": 8,
