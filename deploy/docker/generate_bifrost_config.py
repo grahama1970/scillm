@@ -27,8 +27,8 @@ _PROVIDER_MAP = [
 
 # OAuth providers that need special handling.
 # Claude OAuth: route through Bifrost's native anthropic provider with token injection.
-# Codex OAuth: skip — Responses API not supported by Bifrost.
-_SKIP_PROVIDERS = {"codex-oauth"}
+# Codex OAuth: route through Bifrost OpenAI provider via utls-proxy sidecar
+# (Chrome TLS fingerprint bypasses Cloudflare JA3 blocking on chatgpt.com).
 
 # Bifrost shell config (static parts)
 _BIFROST_BASE = {
@@ -153,7 +153,9 @@ def generate(scillm_config_path: str, output_path: str) -> None:
                         "weight": 1.0,
                         "base_type": "openai",
                         "network_config": {
-                            "base_url": "https://chatgpt.com/backend-api/codex",
+                            # Route through utls-proxy sidecar (Chrome TLS fingerprint)
+                            # to bypass Cloudflare's JA3 blocking on chatgpt.com
+                            "base_url": "http://127.0.0.1:8444/backend-api/codex",
                             "default_request_timeout_in_seconds": 120,
                             "max_retries": 0,
                         },

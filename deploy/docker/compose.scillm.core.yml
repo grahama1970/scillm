@@ -1,4 +1,21 @@
 services:
+  # utls TLS proxy: Chrome fingerprint for Cloudflare-protected endpoints (Codex)
+  utls-proxy:
+    build:
+      context: ../utls-proxy
+      dockerfile: Dockerfile
+    environment:
+      UPSTREAM: "https://chatgpt.com"
+      LISTEN: ":8444"
+    restart: unless-stopped
+    network_mode: host
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:8444/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+
   scillm-proxy:
     build:
       context: ../..
@@ -13,6 +30,9 @@ services:
       REDIS_PORT: ${REDIS_PORT:-6379}
     restart: unless-stopped
     network_mode: host
+    depends_on:
+      utls-proxy:
+        condition: service_healthy
     volumes:
       - "../../local/proxy_server_config.yaml:/app/config.yaml:ro"
       - "${HOME}/.pi/agent/auth.json:/root/.pi/agent/auth.json:ro"

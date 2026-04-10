@@ -53,7 +53,7 @@ After adding credentials, rebuild: `docker compose -p scillm -f deploy/docker/co
 
 Makefile shortcuts: `make proxy-rebuild` (build+start), `make proxy-up`, `make proxy-down`, `make proxy-logs`
 
-**Container details:** `python:3.12-slim`, `uvicorn` on port 4001, `network_mode: host` (for local Ollama access), config mounted from `local/proxy_server_config.yaml`, health check every 15s. Redis included for caching and request logging. Ollama available via `--profile local`.
+**Container details:** Multi-process via `supervisord`: scillm (Python/uvicorn, :4001) + Bifrost (Go, :4002). Separate `utls-proxy` sidecar (:8444) for Codex TLS. `network_mode: host` (for local Ollama access), config mounted from `local/proxy_server_config.yaml`, health check every 15s. Ollama available via `--profile local`.
 
 ## Security
 
@@ -93,6 +93,7 @@ Every provider scillm targets speaks OpenAI-compatible API (`/v1/chat/completion
 
 scillm runs as a **persistent proxy service**, not a library you import. This is deliberate:
 
+- **Go gateway for performance.** The Bifrost routing layer is written in Go (via [Bifrost](https://github.com/maximhorse314/bifrost)), handling concurrent requests with native performance. The Python layer handles API translation and middleware. Both run in one container via supervisord.
 - **One process, many callers.** Every project agent, skill, and script on the machine hits the same `localhost:4001` endpoint. A pip package would mean each caller imports scillm, manages its own connections, and duplicates retry/circuit-breaker state. The proxy centralizes all of that.
 - **OAuth token sharing.** Claude and Codex OAuth credentials live in `~/.claude/` and `~/.codex/`. The Docker container mounts these read-only — one token refresh serves every caller. A library would need each process to handle token management independently.
 - **Provider isolation.** If Chutes goes down, the circuit breaker opens *once* in the proxy and all callers immediately cascade to DeepSeek. With a library, each process discovers the failure independently and wastes retries.
@@ -285,6 +286,22 @@ Results carry `grounding_score` (float) and `grounding_attempts` (int). Uses `ra
 <p align="center">
   <img src="docs/assets/scillm_architecture.svg" alt="scillm architecture diagram" width="700" />
 </p>
+
+**Request flow:**
+```
+Client → scillm :4001 (Python API) → Bifrost :4002 (Go gateway) → Provider
+                                              ↓
+                                   utls-proxy :8444 (Codex only)
+                                              ↓
+                                   chatgpt.com (Chrome TLS fingerprint)
+```
+
+**Components:**
+- **scillm** (Python, port 4001): Public API, request validation, JSON guard, VLM auto-routing, OAuth token injection, SSE streaming normalization
+- **Bifrost** (Go, port 4002): High-performance routing gateway with native provider support. Built from [fork](https://github.com/grahama1970/bifrost) with Gemini thinking-only fix. Handles retries, circuit breakers, concurrent request pooling.
+- **utls-proxy** (Go, port 8444): TLS fingerprint proxy for Cloudflare-protected endpoints. Uses [utls](https://github.com/refraction-networking/utls) to present Chrome's TLS fingerprint, bypassing Cloudflare's JA3 blocking on `chatgpt.com`.
+
+**Config flow:** `proxy_server_config.yaml` → `generate_bifrost_config.py` → `bifrost.json` at container startup. Single source of truth.
 
 ## Model Groups
 
