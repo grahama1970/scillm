@@ -1,5 +1,16 @@
-# Stage 1: Grab Bifrost Go binary
-FROM maximhq/bifrost:latest AS bifrost
+# Stage 1: Build Bifrost from our fork (fixes gemini thinking-only null choices)
+FROM node:22-slim AS bifrost-ui
+WORKDIR /build
+RUN apt-get update && apt-get install -y git && rm -rf /var/lib/apt/lists/*
+RUN git clone --depth 1 -b fix/gemini-thinking-only-null-choices https://github.com/grahama1970/bifrost.git .
+RUN cd ui && npm ci && npm run build && npm run copy-build
+
+FROM golang:1.26 AS bifrost-build
+RUN apt-get update && apt-get install -y gcc musl-dev && rm -rf /var/lib/apt/lists/*
+COPY --from=bifrost-ui /build /build
+WORKDIR /build/transports/bifrost-http
+RUN GOWORK=off go mod download
+RUN GOWORK=off CGO_ENABLED=1 go build -ldflags="-w -s" -o /build/bifrost .
 
 # Stage 2: Python scillm image
 FROM python:3.12-slim
@@ -11,8 +22,8 @@ RUN apt-get update && apt-get install -y build-essential git curl supervisor && 
 # Install uv via installer script (avoids ghcr rate limits)
 RUN curl -LsSf https://astral.sh/uv/install.sh | sh && cp /root/.local/bin/uv /usr/local/bin/uv
 
-# Copy Bifrost binary from stage 1
-COPY --from=bifrost /app/main /usr/local/bin/bifrost
+# Copy Bifrost binary from build stage
+COPY --from=bifrost-build /build/bifrost /usr/local/bin/bifrost
 RUN chmod +x /usr/local/bin/bifrost
 
 # Copy scillm source and install
