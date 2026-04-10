@@ -196,8 +196,10 @@ def _load_middleware(config: ProxyConfig) -> list[BaseMiddleware]:
     from chutes.middleware.vlm_router import VlmRouter
     from chutes.middleware.concurrency_guard import ConcurrencyMiddleware
     from chutes.middleware.json_guard import JsonGuard
+    from chutes.middleware.abuse_guard import AbuseGuardMiddleware
 
-    middlewares: list[BaseMiddleware] = [VlmRouter(), ConcurrencyMiddleware(), JsonGuard()]
+    # AbuseGuard FIRST - blocks clients after repeated 4xx errors
+    middlewares: list[BaseMiddleware] = [AbuseGuardMiddleware(), VlmRouter(), ConcurrencyMiddleware(), JsonGuard()]
 
     # Budget guard is optional — only loads if chutes env vars are set
     try:
@@ -383,6 +385,15 @@ async def chat_completions(request: Request):
     auth_err = _check_auth(request)
     if auth_err:
         raise ProxyError(401, auth_err, "authentication_error")
+
+    # Check if client is blocked for repeated bad requests (early rejection)
+    try:
+        from chutes.middleware.abuse_guard import check_client_blocked
+        auth = request.headers.get("authorization", "")
+        client_ip = request.client.host if request.client else "unknown"
+        check_client_blocked(auth, client_ip)
+    except ImportError:
+        pass  # Abuse guard not loaded
 
     body = await request.json()
     model = body.get("model", "")

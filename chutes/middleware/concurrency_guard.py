@@ -33,6 +33,10 @@ _DEFAULT_LIMITS: Dict[str, int] = {
     "openrouter": 6,
     "certainly": 1,
     "codeworld": 1,
+    "claude": 2,       # Claude OAuth - RPM-based limits (50 RPM Tier 1), not concurrency
+    "anthropic": 2,    # Same as claude - adaptive backoff adjusts if 429s occur
+    "codex": 8,        # Codex Pro OAuth - OpenAI tier ~10K RPM, using 8 concurrent
+    "openai": 8,       # Standard OpenAI
 }
 DEFAULT_LIMIT = 6
 
@@ -56,7 +60,7 @@ def _load_provider_limits() -> Dict[str, int]:
 PROVIDER_LIMITS: Dict[str, int] = _load_provider_limits()
 
 # ── Queue safety bounds ──────────────────────────────────────────────────
-MAX_QUEUE_PER_PROVIDER = 50   # Reject new requests when queue exceeds this
+MAX_QUEUE_PER_PROVIDER = 0    # 0 = unlimited queue depth (no rejection)
 QUEUE_TIMEOUT_S = 300.0       # Queued requests time out after 5min (ZIP+thinking models need more)
 
 # ── Adaptive backpressure ─────────────────────────────────────────────────
@@ -174,8 +178,9 @@ class ConcurrencyMiddleware(BaseMiddleware):
         limit = PROVIDER_LIMITS.get(provider, DEFAULT_LIMIT)
 
         # Check queue depth before attempting acquire (reject if full)
+        # MAX_QUEUE_PER_PROVIDER = 0 means unlimited
         queued = _queue_depth.get(provider, 0)
-        if queued >= MAX_QUEUE_PER_PROVIDER:
+        if MAX_QUEUE_PER_PROVIDER > 0 and queued >= MAX_QUEUE_PER_PROVIDER:
             logger.warning(
                 "concurrency_guard: {} queue full ({}/{}), rejecting",
                 provider, queued, MAX_QUEUE_PER_PROVIDER,

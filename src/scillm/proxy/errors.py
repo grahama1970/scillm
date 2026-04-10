@@ -147,4 +147,15 @@ async def proxy_error_handler(request: Request, exc: ProxyError) -> JSONResponse
         path=request.url.path,
         msg=exc.message,
     )
+
+    # Track 4xx errors for abuse detection
+    if 400 <= exc.status_code < 500:
+        try:
+            from chutes.middleware.abuse_guard import _track_client_error
+            auth = request.headers.get("authorization", "")
+            client_ip = request.client.host if request.client else "unknown"
+            _track_client_error(auth, client_ip, exc.status_code)
+        except ImportError:
+            pass  # Abuse guard not loaded
+
     return JSONResponse(status_code=exc.status_code, content=exc.to_dict())
