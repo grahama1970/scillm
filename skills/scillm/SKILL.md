@@ -158,7 +158,6 @@ client = OpenAI(base_url="http://localhost:4001/v1", api_key="sk-dev-proxy-123")
 resp = client.chat.completions.create(
     model="text",
     messages=[{"role": "user", "content": "Hello"}],
-    max_tokens=64,
 )
 print(resp.choices[0].message.content)
 ```
@@ -175,7 +174,6 @@ resp = httpx.post(
         "model": "text",
         "messages": [{"role": "user", "content": "Return {name, age} for Alice who is 25"}],
         "response_format": {"type": "json_object"},
-        "max_tokens": 64,
     },
     timeout=30.0,
 )
@@ -202,7 +200,6 @@ resp = httpx.post(
             {"type": "text", "text": "Describe this image"},
             {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64}"}},
         ]}],
-        "max_tokens": 512,
     },
     timeout=60.0,
 )
@@ -225,91 +222,99 @@ OpenAI-style arrays pass through unchanged — full control for multi-turn, syst
 
 ## Batch Calls (Parallel Completions)
 
-### Simple: asyncio.gather
+**No imports needed.** Just httpx + asyncio.gather against the proxy. No `max_tokens`.
+The proxy handles concurrency limits internally — fire all requests at once.
 
-Call the same endpoint concurrently. The proxy handles concurrency internally:
+### httpx batch (recommended — no scillm import)
 
 ```python
 import asyncio, httpx
 
+URL = "http://localhost:4001/v1/chat/completions"
+HEADERS = {"Authorization": "Bearer sk-dev-proxy-123"}
+
 async def complete(client, prompt):
-    resp = await client.post(
-        "http://localhost:4001/v1/chat/completions",
-        headers={"Authorization": "Bearer sk-dev-proxy-123"},
-        json={
-            "model": "text",
-            "messages": [{"role": "user", "content": prompt}],
-            "max_tokens": 256,
-        },
-        timeout=45.0,
-    )
+    resp = await client.post(URL, headers=HEADERS, json={
+        "model": "text",
+        "messages": [{"role": "user", "content": prompt}],
+    }, timeout=45.0)
     return resp.json()["choices"][0]["message"]["content"]
 
 async def main():
+    prompts = ["What is 2+2?", "What is 3+3?", "What is 4+4?"]
     async with httpx.AsyncClient() as client:
-        results = await asyncio.gather(
-            complete(client, "What is 2+2?"),
-            complete(client, "What is 3+3?"),
-            complete(client, "What is 4+4?"),
-        )
-    return results
+        results = await asyncio.gather(*[complete(client, p) for p in prompts])
+    for p, r in zip(prompts, results):
+        print(f"{p} → {r}")
+
+asyncio.run(main())
 ```
 
-### Advanced: parallel_acompletions_iter (request-response pairing)
+### Process responses as they arrive (no scillm import)
 
-Async iterator that yields results as they complete, with every result carrying its original request.
-`messages` accepts a plain string (auto-wrapped as `[{"role": "user", "content": str}]`) or
-an OpenAI-style message array (required for multi-turn, system prompts, or multimodal/VLM content):
+Use `asyncio.as_completed` to handle each response the moment it arrives.
+Each result carries its original request metadata for pairing:
 
 ```python
-from scillm.batch import parallel_acompletions_iter
+import asyncio, httpx, time
 
-requests = [
-    {"messages": f"Summarize document {doc_id}", "metadata": {"doc_id": doc_id}}
-    for doc_id in document_ids
-]
+URL = "http://localhost:4001/v1/chat/completions"
+HEADERS = {"Authorization": "Bearer sk-dev-proxy-123"}
 
-async for result in parallel_acompletions_iter(requests, concurrency=6):
-    doc_id = result["request"]["metadata"]["doc_id"]
-    if result["ok"]:
-        save(doc_id, result["response"])
-    else:
-        retry_queue.append(doc_id)
+async def complete(client, request):
+    """Fire one request, return result paired with original request."""
+    t0 = time.monotonic()
+    try:
+        resp = await client.post(URL, headers=HEADERS, json={
+            "model": request.get("model", "text"),
+            "messages": [{"role": "user", "content": request["prompt"]}],
+        }, timeout=90.0)
+        resp.raise_for_status()
+        return {
+            "ok": True,
+            "request": request,
+            "content": resp.json()["choices"][0]["message"]["content"],
+            "elapsed_s": round(time.monotonic() - t0, 2),
+        }
+    except Exception as e:
+        return {
+            "ok": False,
+            "request": request,
+            "error": str(e),
+            "elapsed_s": round(time.monotonic() - t0, 2),
+        }
+
+async def main():
+    requests = [
+        {"prompt": f"Summarize document {doc_id}", "doc_id": doc_id}
+        for doc_id in ["AC-17", "AC-18", "AC-19", "AC-20"]
+    ]
+
+    async with httpx.AsyncClient() as client:
+        tasks = [asyncio.create_task(complete(client, r)) for r in requests]
+
+        # Process each result the moment it arrives
+        for coro in asyncio.as_completed(tasks):
+            result = await coro
+            if result["ok"]:
+                print(f"{result['request']['doc_id']} done in {result['elapsed_s']}s")
+                # save(result["request"]["doc_id"], result["content"])
+            else:
+                print(f"{result['request']['doc_id']} FAILED: {result['error']}")
+
+asyncio.run(main())
 ```
 
-For multimodal (VLM), use convenience fields — scillm auto-detects images and routes to VLM:
+**Concurrency limiting** — wrap with `asyncio.Semaphore` if you want client-side
+limits (the proxy also enforces its own per-provider limits):
 
 ```python
-# Local file paths — auto base64-encoded, auto-routed to VLM
-requests = [
-    {"messages": "Describe this image", "file_path": "/path/to/photo.png"},
-    {"messages": "What's in this diagram?", "paths": ["fig1.jpg", "fig2.png"]},
-]
+sem = asyncio.Semaphore(6)
 
-# URLs — auto-detected as image content
-requests = [
-    {"messages": "Describe this image", "url": "https://example.com/photo.jpg"},
-]
-
-# OpenAI-style image_url parts also work (for full control)
-requests = [
-    {"messages": [{"role": "user", "content": [
-        {"type": "text", "text": "Describe this image"},
-        {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64}"}},
-    ]}]}
-]
+async def complete_limited(client, request):
+    async with sem:
+        return await complete(client, request)
 ```
-
-Each yielded `result`:
-
-| Field | What it is |
-|-------|-----------|
-| `index` | Position in original list (for ordering) |
-| `request` | Your original request dict, including any metadata you attached |
-| `ok` | Success boolean |
-| `response` / `error` | The OpenAI response or error message |
-| `attempts` | Retry count |
-| `elapsed_s` | Wall-clock time |
 
 ## Source Grounding Verification
 
@@ -356,7 +361,7 @@ async def hedged_call(client, prompt, primary="text", backup="text-gemini"):
         resp = await client.post(
             "http://localhost:4001/v1/chat/completions",
             headers={"Authorization": "Bearer sk-dev-proxy-123"},
-            json={"model": model, "messages": [{"role": "user", "content": prompt}], "max_tokens": 256},
+            json={"model": model, "messages": [{"role": "user", "content": prompt}]},
             timeout=30.0,
         )
         return resp.json()["choices"][0]["message"]["content"]
@@ -392,7 +397,6 @@ resp = httpx.post(
     json={
         "model": "text",  # works with any provider in the cascade
         "messages": [{"role": "user", "content": f"{combined}\n\nYour question here"}],
-        "max_tokens": 4096,
     },
     timeout=120.0,
 )
@@ -419,7 +423,6 @@ resp = httpx.post(
             {"type": "text", "text": "Summarize this document"},
             {"inlineData": {"mimeType": "application/pdf", "data": pdf_b64}},
         ]}],
-        "max_tokens": 4096,
     },
     timeout=120.0,
 )
@@ -442,7 +445,6 @@ resp = httpx.post(
     json={
         "model": "text-gemini",
         "messages": [{"role": "user", "content": parts}],
-        "max_tokens": 4096,
     },
     timeout=120.0,
 )
@@ -454,7 +456,7 @@ resp = httpx.post(
 
 **WARNING**: `inlineData` only works with `model: "text-gemini"` or `"text-gemini-3"` (direct). Using `model: "text"` will fail on Chutes/DeepSeek before reaching Gemini. The proxy only switches to the native Gemini API when the deployment targets `generativelanguage.googleapis.com`.
 
-**`text-gemini-3`** (Gemini 3 Flash Preview) is a thinking model — better for complex analysis of PDFs/images but uses internal reasoning tokens. Set `max_tokens` higher (4096+) to avoid budget exhaustion.
+**`text-gemini-3`** (Gemini 3 Flash Preview) is a thinking model — better for complex analysis of PDFs/images but uses internal reasoning tokens. Do NOT set `max_tokens` — reasoning models consume tokens internally and a low limit produces empty output.
 
 ### Option C: Images via image_url (all VLM providers)
 
@@ -470,7 +472,6 @@ resp = httpx.post(url, json={
         {"type": "text", "text": "Describe this screenshot"},
         {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{img_b64}"}},
     ]}],
-    "max_tokens": 2048,
 }, headers=headers, timeout=120)
 ```
 
@@ -551,7 +552,6 @@ resp = httpx.post(
         "messages": [
             {"role": "user", "content": "Your prompt here"}
         ],
-        "max_tokens": 4096,
     },
     timeout=60.0,
 )
@@ -563,7 +563,7 @@ content = resp.json()["choices"][0]["message"]["content"]
 | Parameter | Supported? | Notes |
 |-----------|-----------|-------|
 | `messages` | YES | Standard OpenAI format |
-| `max_tokens` | YES | Required — Claude needs this |
+| `max_tokens` | OPTIONAL | Proxy defaults to 4096 for Claude. Omit for all other providers — most ignore it, some reject it. Only set it when you need a specific limit. |
 | `temperature` | YES | 0.0-1.0 |
 | `top_p` | YES | |
 | `stop` | YES | String or list |
@@ -601,7 +601,7 @@ Works with all providers (Chutes, Gemini, Claude, Codex, Ollama, DeepSeek). The 
 ### Common mistakes that cause 500s
 
 1. **Wrong model name**: `text-claude-sonnet` → use `claude-sonnet-4-6`
-2. **Missing `max_tokens`**: defaults to 4096 but include it explicitly
+2. **Setting `max_tokens` too low**: reasoning models consume tokens internally — a low `max_tokens` means zero output. Omit it and let the proxy default.
 3. **Sending `response_format: {"type": "json_object"}`**: Claude rejects this — instead say "Return valid JSON" in the prompt
 4. **Timeout too short**: Claude can take 10-30s for complex prompts — use `timeout=60.0`
 
