@@ -79,6 +79,30 @@ def _read_claude_oauth_token() -> str:
     return ""
 
 
+_CODEX_CRED_PATHS = [
+    "/root/.codex/auth.json",
+    os.path.expanduser("~/.codex/auth.json"),
+]
+
+
+def _read_codex_oauth_token() -> tuple[str, str]:
+    """Read Codex OAuth (access_token, account_id) from credential file."""
+    for path in _CODEX_CRED_PATHS:
+        try:
+            with open(path) as f:
+                creds = json.load(f)
+            # Codex CLI stores tokens nested: {"tokens": {"access_token": ...}}
+            tokens = creds.get("tokens", {})
+            token = tokens.get("access_token", creds.get("access_token", creds.get("token", "")))
+            account_id = creds.get("account_id", creds.get("chatgpt_account_id", ""))
+            if token:
+                print(f"  Codex OAuth token from {path}")
+                return token, account_id
+        except (FileNotFoundError, json.JSONDecodeError):
+            continue
+    return "", ""
+
+
 def _resolve_env(val: str) -> str:
     """Resolve 'os.environ/VAR' or 'env.VAR' to actual env var value."""
     if val.startswith("os.environ/"):
@@ -114,8 +138,29 @@ def generate(scillm_config_path: str, output_path: str) -> None:
         api_key_raw = params.get("api_key", "")
         custom_llm = params.get("custom_llm_provider", "")
 
-        # Codex OAuth: skip — Bifrost doesn't support Responses API
-        if custom_llm in _SKIP_PROVIDERS:
+        # Codex OAuth: add as OpenAI custom provider with chatgpt.com base URL
+        # Bifrost's /openai_passthrough forwards raw requests — scillm does format translation
+        if custom_llm == "codex-oauth" or (api_key_raw == "oauth" and "openai" in api_base):
+            codex_token, codex_account = _read_codex_oauth_token()
+            if codex_token:
+                if "openai" not in providers:
+                    providers["openai"] = {}
+                if codex_token not in providers["openai"]:
+                    providers["openai"][codex_token] = {
+                        "name": "codex-oauth",
+                        "value": codex_token,
+                        "models": set(),
+                        "weight": 1.0,
+                        "base_type": "openai",
+                        "network_config": {
+                            "base_url": "https://chatgpt.com/backend-api/codex",
+                            "default_request_timeout_in_seconds": 120,
+                            "max_retries": 0,
+                        },
+                    }
+                providers["openai"][codex_token]["models"].add(model)
+            else:
+                print(f"  SKIP: no Codex OAuth token for {model}")
             continue
 
         # Claude OAuth: add to Bifrost's native anthropic provider with token from cred file
