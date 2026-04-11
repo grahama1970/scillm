@@ -63,6 +63,12 @@ PROVIDER_LIMITS: Dict[str, int] = _load_provider_limits()
 MAX_QUEUE_PER_PROVIDER = 0    # 0 = unlimited queue depth (no rejection)
 QUEUE_TIMEOUT_S = 300.0       # Queued requests time out after 5min (ZIP+thinking models need more)
 
+# ── Batch abuse detection ────────────────────────────────────────────────
+# Detect when callers fire too many requests at once (common agent mistake).
+# These thresholds trigger warnings/rejections with helpful guidance.
+QUEUE_WARNING_THRESHOLD = 20   # Add warning header when queue exceeds this
+QUEUE_REJECT_THRESHOLD = 100   # Reject with helpful 429 when queue exceeds this
+
 # ── Adaptive backpressure ─────────────────────────────────────────────────
 # When upstream returns 429, reduce effective concurrency. Recover slowly.
 _BACKOFF_WINDOW_S = 60.0      # Count 429s within this window
@@ -177,9 +183,38 @@ class ConcurrencyMiddleware(BaseMiddleware):
         sem = _get_semaphore(provider)
         limit = PROVIDER_LIMITS.get(provider, DEFAULT_LIMIT)
 
-        # Check queue depth before attempting acquire (reject if full)
-        # MAX_QUEUE_PER_PROVIDER = 0 means unlimited
+        # Check queue depth before attempting acquire
         queued = _queue_depth.get(provider, 0)
+
+        # ── Batch abuse detection ─────────────────────────────────────────
+        # Reject with helpful message when queue is dangerously high
+        if QUEUE_REJECT_THRESHOLD > 0 and queued >= QUEUE_REJECT_THRESHOLD:
+            logger.warning(
+                "concurrency_guard: {} queue overloaded ({} queued), rejecting with batch guidance",
+                provider, queued,
+            )
+            raise MiddlewareReject(
+                f"BATCH MISUSE: {queued} requests queued for {provider} (limit {limit} concurrent). "
+                f"You are firing too many requests at once. Use chunked processing: "
+                f"process {limit} requests at a time, wait for completion, then send the next batch. "
+                f"See SKILL.md 'Batch Calls' section. "
+                f"Example: for i in range(0, len(prompts), {limit}): await asyncio.gather(*chunk)",
+                status_code=429,
+            )
+
+        # Warn when queue is getting high (request will still be queued)
+        if QUEUE_WARNING_THRESHOLD > 0 and queued >= QUEUE_WARNING_THRESHOLD:
+            logger.warning(
+                "concurrency_guard: {} queue high ({} queued) — caller should use chunked batching",
+                provider, queued,
+            )
+            # Tag request so post_call can add warning header
+            request["_concurrency_queue_warning"] = (
+                f"High queue depth ({queued}). Consider chunked batching to avoid timeouts. "
+                f"See /v1/scillm/health for current queue status."
+            )
+
+        # Legacy: reject if hard queue limit exceeded
         if MAX_QUEUE_PER_PROVIDER > 0 and queued >= MAX_QUEUE_PER_PROVIDER:
             logger.warning(
                 "concurrency_guard: {} queue full ({}/{}), rejecting",
@@ -196,12 +231,17 @@ class ConcurrencyMiddleware(BaseMiddleware):
             await asyncio.wait_for(sem.acquire(), timeout=QUEUE_TIMEOUT_S)
         except asyncio.TimeoutError:
             _queue_depth[provider] = max(0, _queue_depth.get(provider, 0) - 1)
+            current_queued = _queue_depth.get(provider, 0)
             logger.warning(
-                "concurrency_guard: {} queue timeout after {:.0f}s",
-                provider, QUEUE_TIMEOUT_S,
+                "concurrency_guard: {} queue timeout after {:.0f}s (still {} queued)",
+                provider, QUEUE_TIMEOUT_S, current_queued,
             )
             raise MiddlewareReject(
-                f"Provider {provider} queue timeout ({QUEUE_TIMEOUT_S}s)",
+                f"QUEUE TIMEOUT: Request waited {QUEUE_TIMEOUT_S}s for a {provider} slot "
+                f"(limit {limit} concurrent, {current_queued} still queued). "
+                f"This usually means you fired too many requests at once. "
+                f"Use chunked batching: process {limit} requests, wait, then send more. "
+                f"See SKILL.md 'Batch Calls' section.",
                 status_code=429,
             )
         _queue_depth[provider] = max(0, _queue_depth.get(provider, 0) - 1)

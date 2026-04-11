@@ -7,6 +7,7 @@ FastAPI application for the scillm proxy (~350 lines).
 from __future__ import annotations
 
 import asyncio
+import difflib
 import os
 import time
 import uuid
@@ -78,6 +79,19 @@ _DIRECT_MODEL_PATTERNS = {
 _VALID_MODEL_ALIASES: set[str] = set()
 
 
+def _suggest_model(unknown: str, candidates: set[str], n: int = 3) -> list[str]:
+    """Suggest closest matching model names using fuzzy matching.
+
+    Returns up to n suggestions, sorted by similarity (best first).
+    """
+    # Filter out internal model names (deepseek-ai/, Qwen/, etc.)
+    user_facing = [m for m in candidates if "/" not in m]
+    matches = difflib.get_close_matches(unknown.lower(), [m.lower() for m in user_facing], n=n, cutoff=0.4)
+    # Map back to original case
+    lower_to_orig = {m.lower(): m for m in user_facing}
+    return [lower_to_orig[m] for m in matches]
+
+
 def _validate_model_request(model: str, body: dict, request: Request) -> None:
     """Validate model request and auto-fix common issues.
 
@@ -93,12 +107,23 @@ def _validate_model_request(model: str, body: dict, request: Request) -> None:
     """
     messages = body.get("messages", [])
 
-    # 0. Reject empty messages — crashes some providers
+    # 0a. Handle string messages — common agent mistake
+    # Agents often pass messages="prompt" instead of messages=[{"role": "user", "content": "prompt"}]
+    if isinstance(messages, str):
+        logger.warning(
+            "Auto-wrapping string messages as list — caller passed string instead of array. "
+            "Correct format: messages=[{\"role\": \"user\", \"content\": \"...\"}]"
+        )
+        body["messages"] = [{"role": "user", "content": messages}]
+        messages = body["messages"]
+
+    # 0b. Reject empty messages — crashes some providers
     if not messages:
         raise ProxyError(
             400,
             "messages is required and cannot be empty. "
-            "Provide at least one message: [{\"role\": \"user\", \"content\": \"...\"}]",
+            "Provide at least one message: [{\"role\": \"user\", \"content\": \"...\"}]. "
+            "scillm is an HTTP API — call via httpx, not import.",
             "invalid_request_error",
         )
 
@@ -110,17 +135,16 @@ def _validate_model_request(model: str, body: dict, request: Request) -> None:
             "invalid_request_error",
         )
 
-    # 2. Reject unknown models with helpful error
+    # 2. Reject unknown models with helpful error + suggestions
     # Only check if we have loaded valid aliases (after startup)
     if _VALID_MODEL_ALIASES and model not in _VALID_MODEL_ALIASES:
-        available = ", ".join(sorted(m for m in _VALID_MODEL_ALIASES if not m.startswith("deepseek-ai/")))
-        raise ProxyError(
-            400,
-            f"Unknown model '{model}'. scillm is an HTTP API, not an importable package. "
-            f"Available models: {available}. "
-            f"Usage: POST http://localhost:4001/v1/chat/completions with model='text'",
-            "invalid_request_error",
-        )
+        suggestions = _suggest_model(model, _VALID_MODEL_ALIASES)
+        available = ", ".join(sorted(m for m in _VALID_MODEL_ALIASES if "/" not in m))
+        msg = f"Unknown model '{model}'."
+        if suggestions:
+            msg += f" Did you mean: {', '.join(suggestions)}?"
+        msg += f" Available: {available}."
+        raise ProxyError(400, msg, "invalid_request_error")
 
     # 3. Warn on direct model names (log only, don't block)
     model_lower = model.lower()
@@ -175,6 +199,40 @@ def _validate_model_request(model: str, body: dict, request: Request) -> None:
             f"Very long prompt ({total_chars:,} chars, ~{total_chars//4:,} tokens). "
             f"May timeout on some providers."
         )
+
+    # 8. Detect empty content in messages — crashes some providers
+    for i, msg in enumerate(messages):
+        content = msg.get("content")
+        if content is None or (isinstance(content, str) and not content.strip()):
+            logger.warning(
+                f"Message {i} has empty content — may crash some providers. "
+                f"Ensure all messages have non-empty content."
+            )
+
+    # 9. Detect inlineData with non-Gemini model — silent failure
+    # inlineData only works with Gemini's native API
+    has_inline_data = any(
+        isinstance(msg.get("content"), list) and
+        any(isinstance(p, dict) and "inlineData" in p for p in msg.get("content", []))
+        for msg in messages
+    )
+    if has_inline_data and not model_lower.startswith(("gemini", "text-gemini")):
+        raise ProxyError(
+            400,
+            f"inlineData parts only work with Gemini models (text-gemini, text-gemini-3). "
+            f"You used model='{model}'. For images with other models, use image_url format. "
+            f"For PDFs with Claude, use document blocks. See SKILL.md 'Sending Multiple Files'.",
+            "invalid_request_error",
+        )
+
+    # 10. Detect tool_choice: "required" with Codex — Codex rejects it
+    tool_choice = body.get("tool_choice")
+    if tool_choice == "required" and model_lower.startswith(("gpt-", "codex")):
+        logger.warning(
+            f"tool_choice='required' not supported by Codex — forcing to 'auto'. "
+            f"Codex always uses auto tool selection."
+        )
+        body["tool_choice"] = "auto"
 
 
 # ---------------------------------------------------------------------------

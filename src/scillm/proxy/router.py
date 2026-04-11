@@ -640,6 +640,16 @@ class Router:
                 ):
                     _trigger_chutes_warmup(dep.model)
 
+                # Chutes cold model: "No instances available" — skip retries, cascade to fallback
+                exc_msg = str(exc).lower()
+                if "no instances available" in exc_msg or "no workers available" in exc_msg:
+                    logger.warning(
+                        "Cold model {} — skipping retries, cascading to fallback: {}",
+                        dep.model,
+                        str(exc)[:100],
+                    )
+                    raise
+
                 allowed = _max_retries_for(exc, policy)
                 if attempt >= allowed:
                     logger.warning(

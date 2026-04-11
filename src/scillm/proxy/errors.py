@@ -84,9 +84,32 @@ _RETRYABLE_TYPES = (
     openai.APIConnectionError,
 )
 
+# Chutes-specific: 503 "No instances available" means cold model, don't retry
+# (retrying won't help — miners need minutes to spin up, cascade to fallback instead)
+_COLD_MODEL_PATTERNS = (
+    "no instances available",
+    "no workers available",
+    "model not loaded",
+)
+
+
+def _is_cold_model_error(exc: Exception) -> bool:
+    """Detect Chutes cold model errors that should skip retries."""
+    msg = str(exc).lower()
+    return any(pattern in msg for pattern in _COLD_MODEL_PATTERNS)
+
 
 def is_retryable(exc: Exception) -> bool:
-    """Return True if the error is worth retrying (5xx, 429, timeout, connection)."""
+    """Return True if the error is worth retrying (5xx, 429, timeout, connection).
+
+    Exception: Chutes "No instances available" (503) is NOT retryable because
+    miners need minutes to spin up. Better to cascade to fallback immediately.
+    """
+    # Fast-fail cold model errors — cascade to fallback instead of retrying
+    if _is_cold_model_error(exc):
+        logger.warning("Cold model detected ({}), skipping retries → fallback", str(exc)[:80])
+        return False
+
     if isinstance(exc, _RETRYABLE_TYPES):
         return True
     if isinstance(exc, openai.APIStatusError):
