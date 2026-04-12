@@ -47,7 +47,7 @@ def _get_arango_client() -> httpx.AsyncClient:
 # Override any provider via env: SCILLM_CONCURRENCY_<PROVIDER>=N
 # e.g. SCILLM_CONCURRENCY_GEMINI=5
 _DEFAULT_LIMITS: Dict[str, int] = {
-    "chutes": 1,  # Serialize Chutes calls - concurrent causes timeouts
+    "chutes": 4,  # Chutes allows 5 concurrent, use 4 with margin
     "ollama": 1,
     "moonshot": 3,
     "deepseek": 8,
@@ -83,7 +83,7 @@ PROVIDER_LIMITS: Dict[str, int] = _load_provider_limits()
 
 # ── Queue safety bounds ──────────────────────────────────────────────────
 MAX_QUEUE_PER_PROVIDER = 0    # 0 = unlimited queue depth (no rejection)
-QUEUE_TIMEOUT_S = 300.0       # Queued requests time out after 5min (ZIP+thinking models need more)
+QUEUE_TIMEOUT_S = 60.0        # Queued requests time out after 60s (fail fast, let agents retry)
 
 # ── Batch abuse detection ────────────────────────────────────────────────
 # Detect when callers fire too many requests at once (common agent mistake).
@@ -358,17 +358,18 @@ class ConcurrencyMiddleware(BaseMiddleware):
             _queue_depth[provider] = max(0, _queue_depth.get(provider, 0) - 1)
             current_queued = _queue_depth.get(provider, 0)
             logger.warning(
-                "concurrency_guard: {} queue timeout after {:.0f}s (still {} queued)",
+                "concurrency_guard: {} queue timeout after {:.0f}s (still {} queued) — "
+                "proceeding without slot (will let router try fallbacks)",
                 provider, QUEUE_TIMEOUT_S, current_queued,
             )
-            raise MiddlewareReject(
-                f"QUEUE TIMEOUT: Request waited {QUEUE_TIMEOUT_S}s for a {provider} slot "
-                f"(limit {limit} concurrent, {current_queued} still queued). "
-                f"This usually means you fired too many requests at once. "
-                f"Use chunked batching: process {limit} requests, wait, then send more. "
-                f"See SKILL.md 'Batch Calls' section.",
-                status_code=429,
-            )
+            # DON'T REJECT — proceed without semaphore slot, let router try fallbacks.
+            # The router's retry/fallback logic handles provider overload better than
+            # blocking here. If the provider is truly overloaded, it will 429/503 and
+            # the fallback cascade will kick in.
+            request["_concurrency_bypassed"] = True
+            request["_concurrency_queue_wait_ms"] = int((time.monotonic() - queue_start) * 1000)
+            return request
+
         queue_wait_ms = int((time.monotonic() - queue_start) * 1000)
         _queue_depth[provider] = max(0, _queue_depth.get(provider, 0) - 1)
 
@@ -385,6 +386,9 @@ class ConcurrencyMiddleware(BaseMiddleware):
         return request
 
     async def post_call(self, request: dict, response: Any) -> Any:
+        # Don't release if we bypassed the semaphore (queue timeout)
+        if request.get("_concurrency_bypassed"):
+            return response
         provider = request.get("_concurrency_provider")
         if provider:
             _release(provider)
@@ -418,6 +422,9 @@ class ConcurrencyMiddleware(BaseMiddleware):
         return response
 
     async def on_error(self, request: dict, error: Exception) -> None:
+        # Don't release if we bypassed the semaphore (queue timeout)
+        if request.get("_concurrency_bypassed"):
+            return
         provider = request.get("_concurrency_provider")
         if provider:
             _release(provider)
