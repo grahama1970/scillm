@@ -78,7 +78,8 @@ async def parallel_acompletions_simple_env(
     """Env-configured simple wrapper."""
     base = (_os.environ.get("SCILLM_API_BASE") or _os.environ.get("CHUTES_API_BASE") or "").strip()
     key = (_os.environ.get("SCILLM_PROXY_KEY") or _os.environ.get("CHUTES_API_KEY") or "").strip()
-    model_default = _os.environ.get("CHUTES_MODEL_ID") or _os.environ.get("CHUTES_TEXT_MODEL")
+    # Default to proxy alias "text" if no env var set
+    model_default = _os.environ.get("CHUTES_MODEL_ID") or _os.environ.get("CHUTES_TEXT_MODEL") or "text"
     reqs: List[Dict] = []
     for r in requests:
         rr = dict(r or {})

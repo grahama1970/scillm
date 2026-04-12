@@ -565,8 +565,16 @@ class Router:
         kwargs = dict(kwargs)
         override = kwargs.pop("_max_retries_override", None)
 
+        # Dynamic timeout from TimeoutEstimatorMiddleware (ms -> seconds)
+        dynamic_timeout_ms = kwargs.pop("_dynamic_timeout_ms", None)
+        timeout_sec = (
+            float(dynamic_timeout_ms) / 1000.0
+            if dynamic_timeout_ms is not None
+            else float(dep.timeout or 120)
+        )
+
         if self._bifrost_client is not None:
-            return await self._call_bifrost(dep, messages, **kwargs)
+            return await self._call_bifrost(dep, messages, timeout=timeout_sec, **kwargs)
 
         client = self._client_for(dep)
         policy = self._config.retry_policy
@@ -590,15 +598,15 @@ class Router:
         if dep.custom_llm_provider == "anthropic-oauth":
             if kwargs.get("stream", False):
                 stream_kwargs = {k: v for k, v in kwargs.items() if k != "stream"}
-                return claude_completion_stream(dep.model, messages, timeout=dep.timeout, **stream_kwargs)
-            return await claude_completion(dep.model, messages, timeout=dep.timeout, **kwargs)
+                return claude_completion_stream(dep.model, messages, timeout=timeout_sec, **stream_kwargs)
+            return await claude_completion(dep.model, messages, timeout=timeout_sec, **kwargs)
 
         # Codex OAuth path: uses OpenAI Responses API with SSE streaming.
         if dep.custom_llm_provider == "codex-oauth":
             if kwargs.get("stream", False):
                 stream_kwargs = {k: v for k, v in kwargs.items() if k != "stream"}
-                return codex_completion_stream(dep.model, messages, timeout=dep.timeout, **stream_kwargs)
-            return await codex_completion(dep.model, messages, timeout=dep.timeout, **kwargs)
+                return codex_completion_stream(dep.model, messages, timeout=timeout_sec, **stream_kwargs)
+            return await codex_completion(dep.model, messages, timeout=timeout_sec, **kwargs)
 
         # We do one initial attempt + up to max_retries retries.
         # _max_retries_override caps retries when multiple models share a group
@@ -618,6 +626,7 @@ class Router:
                 resp = await client.chat.completions.create(
                     model=dep.model,
                     messages=messages,
+                    timeout=timeout_sec,
                     **kwargs,
                 )
                 return resp
@@ -679,15 +688,17 @@ class Router:
         self,
         dep: Deployment,
         messages: list[dict[str, Any]],
+        timeout: float | None = None,
         **kwargs: Any,
     ) -> Any:
         assert self._bifrost_client is not None
         bifrost_model = self._bifrost.format_model(dep.model)
-        logger.debug("Bifrost route: %s → %s", dep.model, bifrost_model)
+        timeout_sec = timeout if timeout is not None else float(dep.timeout or 120)
+        logger.debug("Bifrost route: %s → %s (timeout=%.1fs)", dep.model, bifrost_model, timeout_sec)
         return await self._bifrost_client.chat.completions.create(
             model=bifrost_model,
             messages=messages,
-            timeout=float(dep.timeout or 120),
+            timeout=timeout_sec,
             **kwargs,
         )
 

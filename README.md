@@ -79,6 +79,7 @@ Every provider scillm targets speaks OpenAI-compatible API (`/v1/chat/completion
 - **Gemini free-to-paid key rotation** — Gemini free and paid keys are separate groups. A 429 on the free key cascades immediately to the paid key — no wasted retries on an exhausted quota.
 - **Cold-start warmup** — Chutes models that return 503 (cold) trigger a background warmup API call that posts a bounty for miners. The proxy falls through to the next deployment immediately. On startup, configured Chutes models are pre-warmed.
 - **Bounded concurrency queue** — Chutes.ai has a 5-connection limit. Exceed it and you get a 429 with a 90-second penalty. scillm queues overflow instead of rejecting it.
+- **Automatic timeout estimation** — No more guessing timeouts. scillm queries historical latency data (p95 from `llm_call_log`) and sets per-call provider timeouts automatically. Response headers (`x-scillm-timeout-ms`, `x-scillm-timeout-source`) show what was used.
 - **Source grounding verification** — Pass source text, scillm verifies the response is grounded using fuzzy matching, retries with progressive prompts if not.
 - **Fallback cascade with circuit breaker** — `text` → `text-gemini` (free) → `text-gemini-paid` → `text-deepseek`. VLM: `vlm` (free) → `vlm-paid` → `vlm-claude` → `vlm-codex`. 3 failures trigger a 20-second cooldown per group.
 - **Non-TEE fast-fail routing** — Multi-model Chutes groups try non-TEE first (better throughput) with 1 retry, then fall through to TEE. No 8-retry stall on cold non-TEE models.

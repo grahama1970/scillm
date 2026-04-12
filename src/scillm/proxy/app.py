@@ -68,6 +68,32 @@ _DEPRECATED_MODELS = {
     "deepseek-ai/DeepSeek-V3-0324-TEE": "Model deprecated. Use 'text' alias instead.",
 }
 
+# Env vars that agents might set with model names — validate at startup
+_MODEL_ENV_VARS = [
+    "CHUTES_TEXT_MODEL",
+    "CHUTES_VLM_MODEL",
+    "CHUTES_MODEL_ID",
+    "CHUTES_MODEL",
+]
+
+
+def _check_env_for_deprecated_models() -> None:
+    """Warn at startup if env vars reference deprecated models."""
+    for var in _MODEL_ENV_VARS:
+        val = os.environ.get(var, "").strip()
+        if val in _DEPRECATED_MODELS:
+            logger.error(
+                "ENV VAR DEPRECATED: {}='{}' — {}. "
+                "Update .env to use 'text' or 'vlm' proxy aliases.",
+                var, val, _DEPRECATED_MODELS[val],
+            )
+        elif val and val not in _VALID_MODEL_ALIASES and "/" in val:
+            # Direct provider model name — warn but don't block
+            logger.warning(
+                "ENV VAR DIRECT MODEL: {}='{}' — consider using proxy alias 'text' or 'vlm' instead",
+                var, val,
+            )
+
 # Direct provider model names that should use aliases instead
 _DIRECT_MODEL_PATTERNS = {
     "claude-": "Use 'text' or 'vlm-claude' alias for Claude models (has fallbacks).",
@@ -240,24 +266,52 @@ def _validate_model_request(model: str, body: dict, request: Request) -> None:
 # ---------------------------------------------------------------------------
 
 
-def _load_middleware(config: ProxyConfig) -> list[BaseMiddleware]:
+async def _load_middleware(config: ProxyConfig) -> list[BaseMiddleware]:
     """Instantiate middleware from config.
 
     Order matters:
-      1. VlmRouter — rewrites model before routing (pre_call)
-      2. ConcurrencyMiddleware — acquires provider semaphore (pre_call), releases (post_call/on_error)
-      3. JsonGuard — validates JSON responses, repairs or raises (post_call)
-      4. BudgetMiddleware — tracks spend, exposes via headers (post_call)
-      5. CostHeaderMiddleware — injects x-cost-usd headers (post_call)
-      6. RequestLogMiddleware — logs to Redis/JSONL (post_call, on_error) — MUST be last
+      1. AbuseGuard — blocks clients after repeated 4xx errors (pre_call)
+      2. CacheMiddleware — returns cached responses, dedupes in-flight (pre_call) — BEFORE concurrency
+      3. TimeoutEstimator — queries /latency-stats, sets _dynamic_timeout_ms (pre_call)
+      4. VlmRouter — rewrites model before routing (pre_call)
+      5. ConcurrencyMiddleware — acquires provider semaphore (pre_call), releases (post_call/on_error)
+      6. JsonGuard — validates JSON responses, repairs or raises (post_call)
+      7. BudgetMiddleware — tracks spend, exposes via headers (post_call)
+      8. CostHeaderMiddleware — injects x-cost-usd headers (post_call)
+      9. ArangoLogMiddleware — logs to ArangoDB llm_call_log (post_call, on_error) — LAST
+
+    All persistence uses ArangoDB (no Redis):
+      - CacheMiddleware → scillm_response_cache
+      - ConcurrencyMiddleware → scillm_concurrency_state
+      - ArangoLogMiddleware → llm_call_log
     """
     from chutes.middleware.vlm_router import VlmRouter
     from chutes.middleware.concurrency_guard import ConcurrencyMiddleware
     from chutes.middleware.json_guard import JsonGuard
     from chutes.middleware.abuse_guard import AbuseGuardMiddleware
 
-    # AbuseGuard FIRST - blocks clients after repeated 4xx errors
-    middlewares: list[BaseMiddleware] = [AbuseGuardMiddleware(), VlmRouter(), ConcurrencyMiddleware(), JsonGuard()]
+    middlewares: list[BaseMiddleware] = [AbuseGuardMiddleware()]
+
+    # Cache middleware — returns cached responses, dedupes in-flight requests
+    # Must be BEFORE ConcurrencyMiddleware so cache hits don't consume concurrency slots
+    try:
+        from chutes.middleware.cache_init import CacheMiddleware
+        cache_mw = CacheMiddleware()
+        await cache_mw.initialize()
+        middlewares.append(cache_mw)
+        logger.info("CacheMiddleware loaded (backend: {})", cache_mw._backend)
+    except (ImportError, Exception) as exc:
+        logger.debug("CacheMiddleware not loaded: {}", exc)
+
+    # Timeout estimator — queries /latency-stats, sets _dynamic_timeout_ms
+    try:
+        from chutes.middleware.timeout_estimator import TimeoutEstimatorMiddleware
+        middlewares.append(TimeoutEstimatorMiddleware())
+        logger.info("TimeoutEstimatorMiddleware loaded")
+    except (ImportError, Exception) as exc:
+        logger.debug("TimeoutEstimatorMiddleware not loaded: {}", exc)
+
+    middlewares.extend([VlmRouter(), ConcurrencyMiddleware(), JsonGuard()])
 
     # Budget guard is optional — only loads if chutes env vars are set
     try:
@@ -274,14 +328,6 @@ def _load_middleware(config: ProxyConfig) -> list[BaseMiddleware]:
         logger.info("CostHeaderMiddleware loaded")
     except (ImportError, Exception) as exc:
         logger.debug("CostHeaderMiddleware not loaded: {}", exc)
-
-    # Request logging — reads cost headers set by CostHeaderMiddleware
-    try:
-        from chutes.middleware.request_log import RequestLogMiddleware
-        middlewares.append(RequestLogMiddleware())
-        logger.info("RequestLogMiddleware loaded")
-    except (ImportError, Exception) as exc:
-        logger.debug("RequestLogMiddleware not loaded: {}", exc)
 
     # ArangoDB logging — writes to llm_call_log for /learn-timeout and /orchestrate
     try:
@@ -356,7 +402,7 @@ async def lifespan(app: FastAPI):
     logger.info("Loading config from {}", config_path)
     _config = load_config(config_path)
     _router = Router(_config)
-    _middleware_chain = MiddlewareChain(_load_middleware(_config))
+    _middleware_chain = MiddlewareChain(await _load_middleware(_config))
     _embedding_client = httpx.AsyncClient(base_url=EMBEDDING_SERVICE_URL, timeout=30.0)
     _start_time = time.monotonic()
 
@@ -365,6 +411,13 @@ async def lifespan(app: FastAPI):
     _VALID_MODEL_ALIASES.update(_config.model_groups.keys())
     _VALID_MODEL_ALIASES.update(_config.aliases.keys())
     logger.debug("Valid model aliases: {}", sorted(_VALID_MODEL_ALIASES))
+
+    # Validate env vars don't reference deprecated models
+    _check_env_for_deprecated_models()
+
+    # Load persisted concurrency backoff state from ArangoDB (survives restarts)
+    from chutes.middleware.concurrency_guard import load_state_from_arango
+    await load_state_from_arango()
 
     logger.info(
         "scillm proxy started — {} model groups, {} aliases, {} fallback chains",
@@ -491,6 +544,10 @@ async def chat_completions(request: Request):
             kwargs[key] = body[key]
     kwargs["stream"] = stream
 
+    # Pass dynamic timeout from TimeoutEstimatorMiddleware to router
+    if "_dynamic_timeout_ms" in body:
+        kwargs["_dynamic_timeout_ms"] = body["_dynamic_timeout_ms"]
+
     start = time.monotonic()
 
     try:
@@ -547,12 +604,15 @@ async def chat_completions(request: Request):
 
             # Extract cost headers stashed by CostHeaderMiddleware
             cost_headers = response_dict.pop("_cost_headers", {})
+            # Extract timeout headers stashed by TimeoutEstimatorMiddleware
+            timeout_headers = response_dict.pop("_timeout_headers", {})
 
             resp_headers = {
                 "x-request-id": request_id,
                 "x-latency-ms": str(int(elapsed * 1000)),
             }
             resp_headers.update(cost_headers)
+            resp_headers.update(timeout_headers)
 
             return JSONResponse(
                 content=response_dict,

@@ -233,9 +233,10 @@ async def parallel_acompletions(
         except Exception:
             _router = None
 
-    # Default models from env if missing on a request
-    text_default = _os.environ.get("CHUTES_MODEL_ID") or _os.environ.get("CHUTES_TEXT_MODEL")
-    vlm_default = _os.environ.get("CHUTES_VLM_MODEL")
+    # Default models: prefer proxy aliases, fall back to env vars for backward compat
+    # "text" and "vlm" are proxy-resolved aliases with fallback chains
+    text_default = _os.environ.get("CHUTES_MODEL_ID") or _os.environ.get("CHUTES_TEXT_MODEL") or "text"
+    vlm_default = _os.environ.get("CHUTES_VLM_MODEL") or "vlm"
     strict_env = str(_os.environ.get("SCILLM_JSON_STRICT", "0")).lower() in {"1", "true", "yes", "on"}
     env_repair_default = str(_os.environ.get("SCILLM_REPAIR_INVALID_JSON", "0")).lower() in {"1", "true", "yes", "on"}
     effective_repair = env_repair_default if repair_invalid_json is None else bool(repair_invalid_json)
@@ -508,7 +509,7 @@ async def parallel_acompletions_env(
     """
     base = (_os.environ.get("SCILLM_API_BASE") or _os.environ.get("CHUTES_API_BASE") or "").strip()
     key = (_os.environ.get("SCILLM_PROXY_KEY") or _os.environ.get("CHUTES_API_KEY") or "").strip()
-    model_default = _os.environ.get("CHUTES_MODEL_ID") or _os.environ.get("CHUTES_TEXT_MODEL")
+    model_default = _os.environ.get("CHUTES_MODEL_ID") or _os.environ.get("CHUTES_TEXT_MODEL") or "text"
     reqs: List[Dict] = []
     for r in requests:
         rr = dict(r or {})
@@ -584,8 +585,9 @@ async def parallel_acompletions_iter(
         except Exception:
             _router = None
 
-    text_default = _os.environ.get("CHUTES_MODEL_ID") or _os.environ.get("CHUTES_TEXT_MODEL")
-    vlm_default = _os.environ.get("CHUTES_VLM_MODEL")
+    # Default models: prefer proxy aliases, fall back to env vars for backward compat
+    text_default = _os.environ.get("CHUTES_MODEL_ID") or _os.environ.get("CHUTES_TEXT_MODEL") or "text"
+    vlm_default = _os.environ.get("CHUTES_VLM_MODEL") or "vlm"
     strict_env = str(_os.environ.get("SCILLM_JSON_STRICT", "0")).lower() in {"1", "true", "yes", "on"}
     env_repair_default = str(_os.environ.get("SCILLM_REPAIR_INVALID_JSON", "0")).lower() in {"1", "true", "yes", "on"}
     effective_repair = env_repair_default if repair_invalid_json is None else bool(repair_invalid_json)

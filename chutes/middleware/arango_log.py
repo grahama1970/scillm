@@ -51,6 +51,9 @@ class ArangoLogMiddleware(BaseMiddleware):
         return request
 
     async def post_call(self, request: dict, response: Any) -> Any:
+        # Skip cache hits — they're not real provider calls, would skew timeout estimates
+        if request.get("_cache_hit"):
+            return response
         try:
             await self._write(request, response, error=None)
         except Exception as exc:
@@ -103,7 +106,7 @@ class ArangoLogMiddleware(BaseMiddleware):
             "total_tokens": usage.get("total_tokens", 0),
             "cost_usd": cost_usd,
             "stream": bool(request.get("stream")),
-            "cache_hit": bool(request.get("_cache_hit")),
+            # cache_hit field removed — cache hits are not logged (they skip _write)
             "status": "error" if error else "ok",
             "error": error,
             "caller": request.get("_caller_skill", "") or request.get("_headers", {}).get("x-caller-skill", ""),
