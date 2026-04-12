@@ -60,8 +60,9 @@ def _check_auth(request: Request) -> str | None:
 # Request Validation (fail loudly on common mistakes)
 # ---------------------------------------------------------------------------
 
-# Deprecated models that no longer exist — reject immediately with helpful error
-_DEPRECATED_MODELS = {
+# Deprecated models — also added to alias map for auto-remap
+# This dict provides error messages for startup env var warnings
+_DEPRECATED_MODELS: dict[str, str] = {
     "deepseek-ai/DeepSeek-V3": "Model removed from Chutes. Use 'text' alias instead.",
     "deepseek-ai/DeepSeek-V3.1-TEE": "Model deprecated. Use 'text' alias instead.",
     "deepseek-ai/DeepSeek-V3-0324": "Model deprecated. Use 'text' alias instead.",
@@ -341,11 +342,121 @@ async def _load_middleware(config: ProxyConfig) -> list[BaseMiddleware]:
 
 
 # ---------------------------------------------------------------------------
-# Chutes cold-start warmup
+# Chutes warm model auto-detection
 # ---------------------------------------------------------------------------
 
 CHUTES_API_BASE = os.environ.get("CHUTES_API_BASE", "https://llm.chutes.ai")
 CHUTES_MGMT_API = "https://api.chutes.ai"
+
+
+async def _find_warm_chutes_variant(model: str, client: httpx.AsyncClient, headers: dict) -> str | None:
+    """Find a hot variant in the same model family.
+
+    E.g., if model is deepseek-ai/DeepSeek-V3.1-TEE and V3.2-TEE is hot, return V3.2-TEE.
+    Returns None if no better variant found or on error.
+    """
+    import re
+
+    try:
+        logger.debug("Checking warm variants for {}", model)
+        # Get all available models from inference API
+        resp = await client.get(f"{CHUTES_API_BASE}/v1/models", headers=headers)
+        if resp.status_code != 200:
+            logger.warning("Chutes /v1/models returned {}: {}", resp.status_code, resp.text[:200])
+            return None
+        data = resp.json()
+        all_models = data.get("data", [])
+        logger.debug("Got {} models from Chutes API", len(all_models))
+
+        # Find the family using the same logic as ops-chutes find_family()
+        org = model.split("/")[0]
+        # Strip TEE suffix and version qualifiers to get core family
+        base = re.sub(r"-TEE$", "", model)
+        base_name = base.split("/")[-1]
+        # Strip version suffixes: .1, .2, -0528, -Speciale, -Terminus, -FP8, -Instruct-2507
+        core = re.sub(r"[-.](\\d+|Speciale|Terminus|FP8|Instruct|Thinking)(-\\d{4})?$", "", base_name)
+        core = re.sub(r"\\.\\d+$", "", core)
+
+        family = []
+        for m in all_models:
+            mid = m.get("id", "")
+            if not mid.startswith(org + "/"):
+                continue
+            m_name = mid.split("/")[-1]
+            m_stripped = re.sub(r"-TEE$", "", m_name)
+            m_core = re.sub(r"[-.](\\d+|Speciale|Terminus|FP8|Instruct|Thinking)(-\\d{4})?$", "", m_stripped)
+            m_core = re.sub(r"\\.\\d+$", "", m_core)
+            if m_core == core:
+                family.append(m)
+
+        logger.debug("Found {} models in {} family", len(family), core)
+        if not family:
+            return None
+
+        # Check each variant's hot status via management API
+        hot_variants = []
+        for m in family:
+            mid = m["id"]
+            chute_id = m.get("chute_id", "")
+            if not chute_id:
+                continue
+            try:
+                detail_resp = await client.get(f"{CHUTES_MGMT_API}/chutes/{chute_id}", headers=headers)
+                if detail_resp.status_code == 200:
+                    detail = detail_resp.json()
+                    is_hot = detail.get("hot")
+                    logger.debug("Model {} chute_id={} hot={}", mid, chute_id, is_hot)
+                    if is_hot:
+                        hot_variants.append(mid)
+            except Exception as exc:
+                logger.debug("Failed to get chute details for {}: {}", mid, exc)
+                continue
+
+        if not hot_variants:
+            logger.debug("No hot variants found for family {}", core)
+            return None
+
+        # Prefer the originally requested model if it's hot
+        if model in hot_variants:
+            logger.debug("Configured model {} is already hot", model)
+            return None  # Already using the right one
+
+        # Return first hot variant (could add latency ranking later)
+        logger.info("Found hot Chutes variant: {} (configured: {})", hot_variants[0], model)
+        return hot_variants[0]
+
+    except Exception as exc:
+        logger.warning("Warm variant check failed: {}", exc)
+        return None
+
+
+async def _auto_select_warm_models(config: ProxyConfig, router) -> None:
+    """Check Chutes models and switch to hot variants if available.
+
+    Modifies router deployments in-place to use warm models.
+    """
+    logger.info("Checking for warm Chutes model variants...")
+    chutes_base = os.environ.get("CHUTES_API_BASE", CHUTES_API_BASE)
+    chutes_key = os.environ.get("CHUTES_API_KEY") or os.environ.get("CHUTES_API_TOKEN")
+    if not chutes_key:
+        logger.debug("No CHUTES_API_KEY — skipping warm model check")
+        return
+
+    headers = {"Authorization": f"Bearer {chutes_key}"}
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        for group_name, group in config.model_groups.items():
+            for dep in group.deployments:
+                if not dep.api_base or chutes_base not in dep.api_base:
+                    continue
+
+                warm = await _find_warm_chutes_variant(dep.model, client, headers)
+                if warm and warm != dep.model:
+                    old_model = dep.model
+                    dep.model = warm
+                    logger.warning(
+                        "AUTO-SWITCH: {} deployment {} → {} (hot)",
+                        group_name, old_model, warm,
+                    )
 
 
 async def _warmup_chutes_models(config: ProxyConfig) -> None:
@@ -425,6 +536,9 @@ async def lifespan(app: FastAPI):
         len(_config.aliases),
         len(_config.fallbacks),
     )
+
+    # Auto-detect warm Chutes models and switch to them (runs at startup, blocks briefly)
+    await _auto_select_warm_models(_config, _router)
 
     # Background warmup: fire cheap requests to cold-start-prone providers
     asyncio.create_task(_warmup_chutes_models(_config))
