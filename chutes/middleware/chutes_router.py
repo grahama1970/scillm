@@ -17,10 +17,24 @@ from __future__ import annotations
 
 import os
 import time
+from datetime import datetime
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import httpx
 from loguru import logger
+
+# Time-based routing: Claude during day, Chutes at night
+_ET_TIMEZONE = ZoneInfo("America/New_York")
+_DAYTIME_START = 7   # 7 AM ET
+_DAYTIME_END = 22    # 10 PM ET
+_DAYTIME_MODEL = "claude-sonnet-4-6"  # Reliable model for daytime
+
+
+def _is_daytime() -> bool:
+    """Check if current time is daytime (7AM-10PM ET)."""
+    now = datetime.now(_ET_TIMEZONE)
+    return _DAYTIME_START <= now.hour < _DAYTIME_END
 
 from scillm.proxy.middleware import BaseMiddleware
 
@@ -295,22 +309,39 @@ def _is_chutes_model(model: str) -> bool:
 
 
 class ChutesRouter(BaseMiddleware):
-    """Routes Chutes requests to the least saturated model variant."""
+    """Routes Chutes requests to the least saturated model variant.
+
+    Time-based routing:
+    - Daytime (7AM-10PM ET): Route to Claude Sonnet (reliable)
+    - Nighttime (10PM-7AM ET): Use Chutes with utilization-aware selection
+    """
 
     async def pre_call(self, request: dict) -> dict | None:
         model = (request.get("model") or "").strip()
         if not model:
             return request
 
-        # Only process Chutes models
-        if not _is_chutes_model(model):
+        # Only process Chutes models and text alias
+        is_text_alias = model.lower() in ("text", "text-research")
+        if not is_text_alias and not _is_chutes_model(model):
             return request
 
+        # Daytime: route to Claude Sonnet for reliability
+        if _is_daytime():
+            if is_text_alias or _is_chutes_model(model):
+                request["model"] = _DAYTIME_MODEL
+                logger.info(
+                    "chutes_router: daytime routing '{}' -> '{}' (7AM-10PM ET)",
+                    model,
+                    _DAYTIME_MODEL,
+                )
+                return request
+
+        # Nighttime: use Chutes with utilization-aware selection
         # Get family for this model
         family = _get_family_for_model(model)
         if not family:
-            # For "text" alias, default to deepseek-large family
-            if model.lower() in ("text", "text-research"):
+            if is_text_alias:
                 family = "deepseek-large"
             else:
                 logger.debug("chutes_router: no family for '{}', passing through", model)
