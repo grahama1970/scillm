@@ -87,7 +87,9 @@ class AbuseGuardMiddleware(BaseMiddleware):
                 )
                 raise MiddlewareReject(
                     f"Too many invalid requests. Blocked for {remaining}s. "
-                    "Fix your request and try again later.",
+                    "Common causes: (1) invalid model name - use 'text', 'text-gemini', or 'vlm'; "
+                    "(2) deprecated model in env var - scillm handles model selection now; "
+                    "(3) malformed request body. Check /v1/scillm/health for available models.",
                     status_code=429,
                 )
             else:
@@ -154,7 +156,9 @@ def check_client_blocked(auth: str, client_ip: str) -> None:
             )
             raise MiddlewareReject(
                 f"Too many invalid requests. Blocked for {remaining}s. "
-                "Fix your request and try again later.",
+                "Common causes: (1) invalid model name - use 'text', 'text-gemini', or 'vlm'; "
+                "(2) deprecated model in env var - scillm handles model selection now; "
+                "(3) malformed request body. Check /v1/scillm/health for available models.",
                 status_code=429,
             )
         else:
