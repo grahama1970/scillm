@@ -33,8 +33,9 @@ _CACHE_TTL_SEC = 300  # 5 minutes
 _utilization_cache: dict | None = None
 _cache_timestamp: float = 0
 
-# Rate limit threshold - don't use models with >10% rate limiting
-_RATE_LIMIT_THRESHOLD = 0.10
+# Rate limit threshold - avoid models with high rate limiting
+# 25% threshold balances avoiding saturated models vs having options
+_RATE_LIMIT_THRESHOLD = 0.25
 
 # Utilization threshold - prefer models under 80% utilization
 _UTILIZATION_PREFERRED = 0.80
@@ -58,17 +59,13 @@ def _get_client() -> httpx.AsyncClient:
 # ---------------------------------------------------------------------------
 
 MODEL_FAMILIES: dict[str, list[str]] = {
-    # DeepSeek V3.x family - general text (best quality)
-    "deepseek-v3": [
+    # All large DeepSeek models (671B) - V3 + R1 in one pool
+    "deepseek-large": [
         "deepseek-ai/DeepSeek-V3.2-TEE",
         "deepseek-ai/DeepSeek-V3.1-TEE",
         "deepseek-ai/DeepSeek-V3-0324-TEE",
-    ],
-    # DeepSeek R1 family - 671B reasoning models only
-    "deepseek-r1": [
         "deepseek-ai/DeepSeek-R1-0528-TEE",
         "deepseek-ai/DeepSeek-R1-0528",
-        "tngtech/DeepSeek-TNG-R1T2-Chimera-TEE",
     ],
     # Qwen3 large family - 235B+ models
     "qwen3-large": [
@@ -185,7 +182,13 @@ def _score_model(stats: dict) -> float:
     if util > _UTILIZATION_MAX:
         return 90.0 + (util * 10)
 
+    # Avoid models with 0% utilization - likely cold/no miners serving
+    # A warm model with light load would still show some utilization
+    if util < 0.01:
+        return 95.0  # Avoid but not as bad as rate-limited
+
     # Score based on utilization (0-80 range)
+    # Prefer models in 10-70% range (warm but not saturated)
     return util * 80
 
 
@@ -251,10 +254,8 @@ def _get_family_for_model(model: str) -> str | None:
 
     # Try pattern matching for common Chutes patterns
     if "deepseek" in model_lower:
-        if "v3" in model_lower:
-            return "deepseek-v3"
-        if "r1" in model_lower:
-            return "deepseek-r1"
+        # All large DeepSeek models (V3 + R1) in one pool
+        return "deepseek-large"
 
     if "qwen3" in model_lower:
         # Check size indicators
@@ -308,9 +309,9 @@ class ChutesRouter(BaseMiddleware):
         # Get family for this model
         family = _get_family_for_model(model)
         if not family:
-            # For "text" alias, default to deepseek-v3 family
+            # For "text" alias, default to deepseek-large family
             if model.lower() in ("text", "text-research"):
-                family = "deepseek-v3"
+                family = "deepseek-large"
             else:
                 logger.debug("chutes_router: no family for '{}', passing through", model)
                 return request
