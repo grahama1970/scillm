@@ -23,6 +23,7 @@ from scillm.proxy.config import ProxyConfig, load_config
 from scillm.proxy.errors import ProxyError, proxy_error_handler
 from scillm.proxy.middleware import BaseMiddleware, MiddlewareChain, MiddlewareReject
 from scillm.proxy.router import Router
+from scillm.proxy.router import ProxyError as RouterProxyError
 from scillm.proxy.streaming import SSE_HEADERS, collect_response, stream_response
 from starlette.responses import StreamingResponse
 
@@ -154,12 +155,12 @@ def _validate_model_request(model: str, body: dict, request: Request) -> None:
             "invalid_request_error",
         )
 
-    # 1. Reject deprecated models immediately
+    # 1. Log deprecated models but let alias map handle the remap
     if model in _DEPRECATED_MODELS:
-        raise ProxyError(
-            400,
-            f"Model '{model}' is deprecated. {_DEPRECATED_MODELS[model]}",
-            "invalid_request_error",
+        caller = request.headers.get("x-caller-skill", "unknown")
+        logger.info(
+            "Deprecated model '{}' requested by '{}' — auto-remapping via alias. {}",
+            model, caller, _DEPRECATED_MODELS[model],
         )
 
     # 2. Reject unknown models with helpful error + suggestions
@@ -274,12 +275,13 @@ async def _load_middleware(config: ProxyConfig) -> list[BaseMiddleware]:
       1. AbuseGuard — blocks clients after repeated 4xx errors (pre_call)
       2. CacheMiddleware — returns cached responses, dedupes in-flight (pre_call) — BEFORE concurrency
       3. TimeoutEstimator — queries /latency-stats, sets _dynamic_timeout_ms (pre_call)
-      4. VlmRouter — rewrites model before routing (pre_call)
-      5. ConcurrencyMiddleware — acquires provider semaphore (pre_call), releases (post_call/on_error)
-      6. JsonGuard — validates JSON responses, repairs or raises (post_call)
-      7. BudgetMiddleware — tracks spend, exposes via headers (post_call)
-      8. CostHeaderMiddleware — injects x-cost-usd headers (post_call)
-      9. ArangoLogMiddleware — logs to ArangoDB llm_call_log (post_call, on_error) — LAST
+      4. ChutesRouter — selects least saturated Chutes model variant (pre_call)
+      5. VlmRouter — rewrites model before routing (pre_call)
+      6. ConcurrencyMiddleware — acquires provider semaphore (pre_call), releases (post_call/on_error)
+      7. JsonGuard — validates JSON responses, repairs or raises (post_call)
+      8. BudgetMiddleware — tracks spend, exposes via headers (post_call)
+      9. CostHeaderMiddleware — injects x-cost-usd headers (post_call)
+      10. ArangoLogMiddleware — logs to ArangoDB llm_call_log (post_call, on_error) — LAST
 
     All persistence uses ArangoDB (no Redis):
       - CacheMiddleware → scillm_response_cache
@@ -290,6 +292,7 @@ async def _load_middleware(config: ProxyConfig) -> list[BaseMiddleware]:
     from chutes.middleware.concurrency_guard import ConcurrencyMiddleware
     from chutes.middleware.json_guard import JsonGuard
     from chutes.middleware.abuse_guard import AbuseGuardMiddleware
+    from chutes.middleware.chutes_router import ChutesRouter
 
     middlewares: list[BaseMiddleware] = [AbuseGuardMiddleware()]
 
@@ -312,7 +315,9 @@ async def _load_middleware(config: ProxyConfig) -> list[BaseMiddleware]:
     except (ImportError, Exception) as exc:
         logger.debug("TimeoutEstimatorMiddleware not loaded: {}", exc)
 
-    middlewares.extend([VlmRouter(), ConcurrencyMiddleware(), JsonGuard()])
+    # ChutesRouter selects best model variant based on utilization (before VlmRouter)
+    middlewares.extend([ChutesRouter(), VlmRouter(), ConcurrencyMiddleware(), JsonGuard()])
+    logger.info("ChutesRouter loaded (utilization-aware routing)")
 
     # Budget guard is optional — only loads if chutes env vars are set
     try:
@@ -337,6 +342,14 @@ async def _load_middleware(config: ProxyConfig) -> list[BaseMiddleware]:
         logger.info("ArangoLogMiddleware loaded")
     except (ImportError, Exception) as exc:
         logger.debug("ArangoLogMiddleware not loaded: {}", exc)
+
+    # Active calls tracking — exposes in-flight requests for live monitoring
+    try:
+        from chutes.middleware.active_calls import ActiveCallsMiddleware
+        middlewares.insert(0, ActiveCallsMiddleware())  # First in chain to track all calls
+        logger.info("ActiveCallsMiddleware loaded")
+    except (ImportError, Exception) as exc:
+        logger.debug("ActiveCallsMiddleware not loaded: {}", exc)
 
     return middlewares
 
@@ -638,16 +651,20 @@ async def chat_completions(request: Request):
     if _middleware_chain is None or _router is None:
         raise ProxyError(503, "Proxy not ready — startup incomplete", "service_unavailable")
 
+    # Inject headers for middleware (arango_log.py uses x-caller-skill)
+    body["_headers"] = dict(request.headers)
+
     # Pre-call middleware (can modify request or reject)
     body = await _middleware_chain.run_pre_call(body)
     model = body.get("model", model)
     messages = body.get("messages", messages)
 
-    # Opaque metadata: stripped before routing (LLM never sees it),
-    # echoed back in the response for caller-side correlation.
-    # Use case: ArangoDB _key round-trip so batch callers can join
-    # responses to source documents without the LLM fabricating keys.
+    # Extract metadata AFTER pre_call but BEFORE routing (LLM never sees it).
+    # Stash under private key so post_call middleware can access it.
     caller_metadata = body.pop("scillm_metadata", None)
+    if caller_metadata is not None:
+        logger.debug("scillm_metadata received: {}", caller_metadata)
+        body["_scillm_metadata"] = caller_metadata  # for arango_log.py
 
     # Extract kwargs for the openai client
     kwargs: dict[str, Any] = {}
@@ -663,6 +680,29 @@ async def chat_completions(request: Request):
         kwargs["_dynamic_timeout_ms"] = body["_dynamic_timeout_ms"]
 
     start = time.monotonic()
+
+    # -------------------------------------------------------------------------
+    # BATCH RESUME: Check if this work item already completed successfully
+    # -------------------------------------------------------------------------
+    # Skills pass scillm_metadata: {"batch_id": "X", "item_id": "123"}
+    # If found in llm_call_log with status=ok, return cached response
+    if caller_metadata and not stream:
+        try:
+            from chutes.middleware.batch_resume import check_batch_resume
+            cached_response = await check_batch_resume(caller_metadata)
+            if cached_response:
+                elapsed = time.monotonic() - start
+                body["_cache_hit"] = True  # Skip arango_log for cache hits
+                return JSONResponse(
+                    content=cached_response,
+                    headers={
+                        "x-request-id": request_id,
+                        "x-latency-ms": str(int(elapsed * 1000)),
+                        "x-batch-resumed": "true",
+                    },
+                )
+        except ImportError:
+            pass  # batch_resume module not available
 
     try:
         result = await _router.complete(model, messages, **kwargs)
@@ -735,6 +775,9 @@ async def chat_completions(request: Request):
 
     except (ProxyError, MiddlewareReject):
         raise
+    except RouterProxyError as exc:
+        # Convert router's ProxyError to enriched ProxyError for LLM analysis
+        raise ProxyError(exc.status_code, exc.message, "router_error")
     except Exception as exc:
         # Import here to avoid circular import at module level
         from chutes.middleware.json_guard import JsonValidationFailed
@@ -796,6 +839,61 @@ async def scillm_health(request: Request):
         "concurrency": concurrency,
         "abuse_guard": abuse_guard,
     }
+
+
+@app.get("/v1/scillm/active-calls")
+async def scillm_active_calls(request: Request):
+    """Return list of currently in-flight LLM calls for live monitoring."""
+    auth_err = _check_auth(request)
+    if auth_err:
+        raise ProxyError(401, auth_err, "authentication_error")
+
+    try:
+        from chutes.middleware.active_calls import get_active_calls
+        return {"active": get_active_calls()}
+    except ImportError:
+        return {"active": [], "error": "ActiveCallsMiddleware not loaded"}
+
+
+@app.get("/v1/scillm/activity")
+async def scillm_activity(request: Request):
+    """Return activity graph data (last 5 minutes, bucketed for charting)."""
+    auth_err = _check_auth(request)
+    if auth_err:
+        raise ProxyError(401, auth_err, "authentication_error")
+
+    try:
+        from chutes.middleware.active_calls import get_activity_graph
+        return get_activity_graph()
+    except ImportError:
+        return {"buckets": [], "error": "ActiveCallsMiddleware not loaded"}
+
+
+@app.get("/v1/scillm/concurrency")
+async def scillm_concurrency(request: Request, model: str = "text"):
+    """Get concurrency info for a model (for batch sizing).
+
+    Skills call this to determine optimal chunk_size for batch processing.
+    Returns effective_limit accounting for adaptive backoff from 429s.
+
+    Example: GET /v1/scillm/concurrency?model=text
+    Response: {"model": "text", "provider": "chutes", "chunk_size": 4, ...}
+    """
+    auth_err = _check_auth(request)
+    if auth_err:
+        raise ProxyError(401, auth_err, "authentication_error")
+
+    try:
+        from chutes.middleware.concurrency_guard import get_concurrency_for_model
+        return get_concurrency_for_model(model)
+    except ImportError:
+        # Fallback if concurrency guard not loaded
+        return {
+            "model": model,
+            "provider": "unknown",
+            "chunk_size": 4,  # Safe default
+            "error": "ConcurrencyGuard not loaded",
+        }
 
 
 @app.get("/v1/scillm/models")
@@ -1050,6 +1148,108 @@ async def budget_snapshot(request: Request):
         return get_budget_snapshot()
     except (ImportError, AttributeError):
         return {"status": "budget_guard_not_loaded"}
+
+
+@app.get("/v1/scillm/debug/{call_id}")
+async def debug_call_by_id(request: Request, call_id: str):
+    """Analyze a specific call by its ID and return diagnosis with best practices.
+
+    Returns structured JSON with:
+    - analysis: LLM-generated diagnosis
+    - call details (caller, model, status, timestamp)
+    - best_practices_included: true
+
+    Usage: GET /v1/scillm/debug/abc123
+    """
+    auth_err = _check_auth(request)
+    if auth_err:
+        raise ProxyError(401, auth_err, "authentication_error")
+
+    try:
+        from chutes.middleware.request_log import get_log_by_key, analyze_call
+
+        log = await get_log_by_key(call_id)
+        if not log:
+            raise ProxyError(404, f"Call {call_id} not found", "not_found")
+
+        return await analyze_call(log)
+    except ProxyError:
+        raise
+    except Exception as exc:
+        return {"success": False, "error": f"Debug failed: {exc}"}
+
+
+@app.get("/v1/scillm/debug")
+async def debug_recent_calls(request: Request, caller: str = "", limit: int = 1):
+    """Analyze recent calls for a caller.
+
+    Usage: GET /v1/scillm/debug?caller=pdf_oxide.clone&limit=3
+
+    Returns analysis for the most recent `limit` calls from the specified caller.
+    If caller is empty, returns instructions for usage.
+    """
+    auth_err = _check_auth(request)
+    if auth_err:
+        raise ProxyError(401, auth_err, "authentication_error")
+
+    if not caller:
+        return {
+            "usage": "GET /v1/scillm/debug?caller=YOUR_SKILL_NAME&limit=1",
+            "example": "GET /v1/scillm/debug?caller=pdf_oxide.clone&limit=3",
+            "or": "GET /v1/scillm/debug/{call_id} for specific call",
+        }
+
+    try:
+        from chutes.middleware.request_log import get_recent_logs_by_caller, analyze_call
+
+        logs = await get_recent_logs_by_caller(caller, limit=min(limit, 10))
+        if not logs:
+            return {"caller": caller, "message": "No recent calls found", "analyses": []}
+
+        analyses = []
+        for log in logs:
+            result = await analyze_call(log)
+            analyses.append(result)
+
+        return {"caller": caller, "count": len(analyses), "analyses": analyses}
+    except Exception as exc:
+        return {"success": False, "error": f"Debug failed: {exc}"}
+
+
+# ---------------------------------------------------------------------------
+# Batch status (for resume/retry workflows)
+# ---------------------------------------------------------------------------
+
+
+@app.get("/v1/scillm/batch/{batch_id}")
+async def batch_status(request: Request, batch_id: str):
+    """Get status of a batch job: success/failure counts and failed item IDs.
+
+    Usage: GET /v1/scillm/batch/create-qras-cwe-20260413-123456
+
+    Returns:
+    {
+        "batch_id": "...",
+        "total": 969,
+        "success": 950,
+        "failed": 19,
+        "failed_items": ["CWE-79", "CWE-89", ...]
+    }
+
+    Callers can use failed_items to retry only failed work items.
+    """
+    auth_err = _check_auth(request)
+    if auth_err:
+        raise ProxyError(401, auth_err, "authentication_error")
+
+    try:
+        from chutes.middleware.batch_resume import get_batch_status
+        status = await get_batch_status(batch_id)
+        return status
+    except ImportError:
+        return {"error": "batch_resume module not available"}
+    except Exception as exc:
+        return {"error": f"Failed to get batch status: {exc}"}
 
 
 # ---------------------------------------------------------------------------

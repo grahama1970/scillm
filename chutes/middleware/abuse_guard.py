@@ -45,6 +45,8 @@ def _get_client_id_from_headers(auth: str, client_ip: str) -> str:
 
 def _track_client_error(auth: str, client_ip: str, status_code: int) -> None:
     """Track a 4xx error for a client (called from error handler)."""
+    if status_code == 429:
+        return  # Rate limits are provider-side, don't blame the client
     if not (400 <= status_code < 500):
         return
 
@@ -112,8 +114,10 @@ class AbuseGuardMiddleware(BaseMiddleware):
         if not client_id:
             return
 
-        # Check if this is a client error (4xx)
+        # Check if this is a client error (4xx) - but NOT 429 (rate limits aren't client's fault)
         status = getattr(error, "status_code", 0) or getattr(error, "status", 0)
+        if status == 429:
+            return  # Rate limits are provider-side, don't blame the client
         if not (400 <= status < 500):
             return  # Only track client errors
 
