@@ -26,11 +26,7 @@ services:
       CONFIG_FILE_PATH: /app/config.yaml
       SCILLM_MASTER_KEY: ${SCILLM_MASTER_KEY:-sk-dev-proxy-123}
       METRICS_ENV: ${METRICS_ENV:-dev}
-      REDIS_HOST: ${REDIS_HOST:-127.0.0.1}
-      REDIS_PORT: ${REDIS_PORT:-6379}
-      BIFROST_ENABLED: ${BIFROST_ENABLED:-false}
-      BIFROST_URL: ${BIFROST_URL:-http://127.0.0.1:4002}
-      BIFROST_CLIENT_KEY: ${BIFROST_CLIENT_KEY:-}
+      # Bifrost removed — direct provider routing, ArangoDB for logging/monitoring
     restart: unless-stopped
     network_mode: host
     depends_on:
@@ -41,6 +37,8 @@ services:
       - "${HOME}/.pi/agent/auth.json:/root/.pi/agent/auth.json:ro"
       - "${HOME}/.claude/.credentials.json:/root/.claude/.credentials.json:ro"
       - "${HOME}/.codex/auth.json:/root/.codex/auth.json:ro"
+      # Gemini CLI needs write access for history/sessions
+      - "${HOME}/.gemini:/root/.gemini"
     healthcheck:
       test: ["CMD", "curl", "-sf", "-H", "Authorization: Bearer $${SCILLM_MASTER_KEY:-sk-dev-proxy-123}", "http://127.0.0.1:4001/health/liveliness"]
       interval: 15s

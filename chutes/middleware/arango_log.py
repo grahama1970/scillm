@@ -4,8 +4,7 @@ Creates documents in the `llm_call_log` collection via /upsert, enabling:
 - /learn-timeout to estimate p95 latency per model/provider
 - /orchestrate to diagnose failures and self-correct
 - /analytics to track cost and token trends
-
-No message content is stored — only metadata.
+- Debugging failed batches via raw request/response content
 """
 from __future__ import annotations
 
@@ -37,9 +36,11 @@ def _get_client() -> httpx.AsyncClient:
     return _client
 
 
+import uuid as _uuid
+
 def _make_key(ts_iso: str, model: str) -> str:
-    """Deterministic _key from timestamp + model."""
-    raw = f"{ts_iso}:{model}"
+    """Unique _key per request — includes UUID suffix to avoid batch collisions."""
+    raw = f"{ts_iso}:{model}:{_uuid.uuid4().hex[:8]}"
     return hashlib.sha256(raw.encode()).hexdigest()[:16]
 
 
@@ -62,7 +63,9 @@ class ArangoLogMiddleware(BaseMiddleware):
 
     async def on_error(self, request: dict, error: Exception) -> None:
         try:
-            await self._write(request, {}, error=type(error).__name__)
+            # Include both error type and message for debugging
+            error_str = f"{type(error).__name__}: {str(error)[:500]}"
+            await self._write(request, {}, error=error_str)
         except Exception as exc:
             logger.debug("arango_log: on_error write failed: {}", exc)
 
@@ -80,6 +83,7 @@ class ArangoLogMiddleware(BaseMiddleware):
         usage = {}
         model_served = request.get("model", "")
         cost_usd = None
+        response_content = None
 
         if isinstance(response, dict) and not response.get("stream"):
             usage = response.get("usage", {})
@@ -91,6 +95,41 @@ class ArangoLogMiddleware(BaseMiddleware):
                     cost_usd = float(raw_cost)
                 except ValueError:
                     pass
+            # Extract raw response content for debugging
+            choices = response.get("choices", [])
+            if choices and isinstance(choices[0], dict):
+                msg = choices[0].get("message", {})
+                if isinstance(msg, dict):
+                    response_content = msg.get("content")
+
+        # Extract request messages (last message only to limit size)
+        messages = request.get("messages", [])
+        last_user_message = None
+        if messages:
+            for m in reversed(messages):
+                if m.get("role") == "user":
+                    content = m.get("content", "")
+                    # Truncate very long messages
+                    if isinstance(content, str) and len(content) > 4000:
+                        content = content[:4000] + "...[truncated]"
+                    last_user_message = content
+                    break
+
+        # Extract caller identity — prefer x-caller-skill, fall back to other headers
+        headers = request.get("_headers", {})
+        caller_skill = request.get("_caller_skill", "") or headers.get("x-caller-skill", "")
+
+        # Build caller_info dict for debugging when x-caller-skill missing
+        caller_info = {}
+        if not caller_skill:
+            # Capture any identifying info when skill header missing
+            user_agent = headers.get("user-agent", "")
+            if user_agent:
+                caller_info["user_agent"] = user_agent[:200]  # Truncate long UAs
+            # Check for custom headers that might identify the caller
+            for h in ["x-request-id", "x-client-id", "x-correlation-id"]:
+                if headers.get(h):
+                    caller_info[h] = headers[h][:100]
 
         doc = {
             "_key": _make_key(now.isoformat(), model_served),
@@ -109,7 +148,14 @@ class ArangoLogMiddleware(BaseMiddleware):
             # cache_hit field removed — cache hits are not logged (they skip _write)
             "status": "error" if error else "ok",
             "error": error,
-            "caller": request.get("_caller_skill", "") or request.get("_headers", {}).get("x-caller-skill", ""),
+            "caller": caller_skill,
+            "caller_info": caller_info if caller_info else None,  # Only include if we have fallback info
+            # scillm_metadata for work item correlation (skill passes batch_id, doc_key, etc.)
+            # Stashed as _scillm_metadata by app.py to survive routing
+            "metadata": request.get("_scillm_metadata", {}),
+            # Raw content for debugging (can prune later)
+            "request_prompt": last_user_message,
+            "response_content": response_content,
         }
 
         client = _get_client()

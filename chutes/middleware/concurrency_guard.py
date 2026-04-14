@@ -7,6 +7,7 @@ when exceeding their 5-connection limit.
 Safety bounds:
   - MAX_QUEUE_PER_PROVIDER: reject with 429 when queue exceeds this depth.
   - QUEUE_TIMEOUT_S: queued requests time out after this many seconds.
+  - SLOT_MAX_AGE_S: slots held longer than this are considered stale and released.
 
 Persistence:
   - Backoff state (effective limits, 429 history) persists to ArangoDB
@@ -47,7 +48,7 @@ def _get_arango_client() -> httpx.AsyncClient:
 # Override any provider via env: SCILLM_CONCURRENCY_<PROVIDER>=N
 # e.g. SCILLM_CONCURRENCY_GEMINI=5
 _DEFAULT_LIMITS: Dict[str, int] = {
-    "chutes": 4,  # Chutes allows 5 concurrent, use 4 with margin
+    "chutes": 4,  # Chutes allows 5 concurrent; 429s now trigger pause + backoff
     "ollama": 1,
     "moonshot": 3,
     "deepseek": 8,
@@ -85,6 +86,12 @@ PROVIDER_LIMITS: Dict[str, int] = _load_provider_limits()
 MAX_QUEUE_PER_PROVIDER = 0    # 0 = unlimited queue depth (no rejection)
 QUEUE_TIMEOUT_S = 60.0        # Queued requests time out after 60s (fail fast, let agents retry)
 
+# ── Slot age tracking (zombie slot protection) ───────────────────────────
+# If upstream hangs past timeout without raising an exception, slots stay
+# occupied forever. Track acquire time and release stale slots.
+SLOT_MAX_AGE_S = 300.0        # Release slots held longer than 5 minutes
+_STALE_CHECK_INTERVAL_S = 30.0  # How often to check for stale slots
+
 # ── Batch abuse detection ────────────────────────────────────────────────
 # Detect when callers fire too many requests at once (common agent mistake).
 # These thresholds trigger warnings/rejections with helpful guidance.
@@ -94,19 +101,27 @@ QUEUE_REJECT_THRESHOLD = 100   # Reject with helpful 429 when queue exceeds this
 # ── Adaptive backpressure ─────────────────────────────────────────────────
 # When upstream returns 429, reduce effective concurrency. Recover slowly.
 _BACKOFF_WINDOW_S = 60.0      # Count 429s within this window
-_BACKOFF_THRESHOLD = 3        # 3 429s in window → halve concurrency
+_BACKOFF_THRESHOLD = 3        # 3 429s in window → halve concurrency (legacy, now immediate)
 _RECOVERY_INTERVAL_S = 120.0  # Try restoring 1 slot every 2 minutes
 _MIN_CONCURRENCY = 1          # Never go below 1
+_DEFAULT_PAUSE_S = 90.0       # Default pause duration on 429 (Chutes penalty is 90s)
 
 _effective_limits: Dict[str, int] = {}  # Current adaptive limit per provider
 _rate_limit_hits: Dict[str, list] = {}  # Timestamps of recent 429s
 _last_recovery: Dict[str, float] = {}   # Last time we restored a slot
 _state_loaded: bool = False             # Whether we've loaded from ArangoDB
+_paused_until: Dict[str, float] = {}    # Provider → monotonic timestamp when pause ends
 
 # ── State ────────────────────────────────────────────────────────────────
 _semaphores: Dict[str, asyncio.Semaphore] = {}
 _in_flight: Dict[str, int] = {}
 _queue_depth: Dict[str, int] = {}
+
+# ── Slot age tracking ────────────────────────────────────────────────────
+# Track when each slot was acquired: provider → {request_id → acquire_time}
+_slot_acquired_at: Dict[str, Dict[str, float]] = {}
+_last_stale_check: float = 0.0  # Monotonic time of last stale slot check
+_request_counter: int = 0  # Simple counter for unique request IDs
 
 
 # ── Persistence functions ────────────────────────────────────────────────
@@ -214,6 +229,8 @@ def _resolve_provider(model: str) -> str:
         return "chutes"
     if model_lower.startswith("local"):
         return "ollama"
+    if model_lower.startswith("vlm"):
+        return "gemini"  # VLM cascade starts with Gemini
     return "default"
 
 
@@ -228,34 +245,77 @@ def _get_semaphore(provider: str) -> asyncio.Semaphore:
     return _semaphores[provider]
 
 
-def _record_429(provider: str) -> None:
-    """Record a 429 hit and reduce concurrency if threshold exceeded."""
+def _record_429(provider: str, retry_after: int | None = None) -> None:
+    """Record a 429 hit: immediately pause provider and halve concurrency.
+
+    Args:
+        provider: Provider key (e.g., "chutes", "gemini")
+        retry_after: Seconds to wait (from Retry-After header), or None for default
+    """
     now = time.monotonic()
+
+    # Track hit for recovery logic
     hits = _rate_limit_hits.setdefault(provider, [])
     hits.append(now)
-    # Prune old hits outside the window
     cutoff = now - _BACKOFF_WINDOW_S
     _rate_limit_hits[provider] = [t for t in hits if t > cutoff]
 
-    recent = len(_rate_limit_hits[provider])
-    reduced = False
-    if recent >= _BACKOFF_THRESHOLD:
-        configured = PROVIDER_LIMITS.get(provider, DEFAULT_LIMIT)
-        current = _effective_limits.get(provider, configured)
-        new_limit = max(_MIN_CONCURRENCY, current // 2)
-        if new_limit < current:
-            _effective_limits[provider] = new_limit
-            _last_recovery[provider] = now
-            reduced = True
-            logger.warning(
-                "concurrency_guard: {} adaptive backoff — {} 429s in {:.0f}s, reducing {} → {}",
-                provider, recent, _BACKOFF_WINDOW_S, current, new_limit,
-            )
-            # Recreate semaphore with lower limit (existing in-flight will drain)
-            _semaphores[provider] = asyncio.Semaphore(new_limit)
-    # Persist state change to ArangoDB (fire-and-forget via background task)
-    if reduced:
+    # ── Immediate pause ───────────────────────────────────────────────────
+    # Block all new requests to this provider until pause expires
+    pause_duration = retry_after if retry_after else _DEFAULT_PAUSE_S
+    pause_until = now + pause_duration
+
+    # Only extend pause if new pause is longer
+    existing_pause = _paused_until.get(provider, 0)
+    if pause_until > existing_pause:
+        _paused_until[provider] = pause_until
+        logger.warning(
+            "concurrency_guard: {} PAUSED for {:.0f}s (until {:+.0f}s from now)",
+            provider, pause_duration, pause_duration,
+        )
+
+    # ── Immediate concurrency reduction ───────────────────────────────────
+    # Don't wait for threshold — halve on first 429
+    configured = PROVIDER_LIMITS.get(provider, DEFAULT_LIMIT)
+    current = _effective_limits.get(provider, configured)
+    new_limit = max(_MIN_CONCURRENCY, current // 2)
+
+    if new_limit < current:
+        _effective_limits[provider] = new_limit
+        _last_recovery[provider] = now
+        logger.warning(
+            "concurrency_guard: {} concurrency reduced {} → {} (will recover after pause)",
+            provider, current, new_limit,
+        )
+        # Recreate semaphore with lower limit (existing in-flight will drain)
+        _semaphores[provider] = asyncio.Semaphore(new_limit)
+        # Persist state change to ArangoDB
         asyncio.create_task(_persist_state())
+
+
+async def _wait_for_pause(provider: str) -> float:
+    """Wait if provider is paused. Returns seconds waited (0 if not paused)."""
+    now = time.monotonic()
+    pause_until = _paused_until.get(provider, 0)
+
+    if pause_until <= now:
+        # Not paused (or pause expired)
+        if provider in _paused_until:
+            del _paused_until[provider]
+        return 0.0
+
+    remaining = pause_until - now
+    logger.info(
+        "concurrency_guard: {} is PAUSED — waiting {:.1f}s before proceeding",
+        provider, remaining,
+    )
+    await asyncio.sleep(remaining)
+
+    # Clear pause after waiting
+    if provider in _paused_until:
+        del _paused_until[provider]
+    logger.info("concurrency_guard: {} pause expired, resuming", provider)
+    return remaining
 
 
 def _maybe_recover(provider: str) -> None:
@@ -289,12 +349,70 @@ def _maybe_recover(provider: str) -> None:
     asyncio.create_task(_persist_state())
 
 
-def _release(provider: str) -> None:
+def _generate_request_id() -> str:
+    """Generate a unique request ID for slot tracking."""
+    global _request_counter
+    _request_counter += 1
+    return f"req_{_request_counter}_{time.monotonic():.3f}"
+
+
+def _release_stale_slots() -> int:
+    """Release slots held longer than SLOT_MAX_AGE_S. Returns count released."""
+    global _last_stale_check
+    now = time.monotonic()
+
+    # Rate limit checks to avoid overhead
+    if now - _last_stale_check < _STALE_CHECK_INTERVAL_S:
+        return 0
+    _last_stale_check = now
+
+    released = 0
+    cutoff = now - SLOT_MAX_AGE_S
+
+    for provider, slots in list(_slot_acquired_at.items()):
+        stale_ids = [req_id for req_id, acquired in slots.items() if acquired < cutoff]
+        for req_id in stale_ids:
+            del slots[req_id]
+            # Release the semaphore slot
+            sem = _semaphores.get(provider)
+            if sem:
+                sem.release()
+                _in_flight[provider] = max(0, _in_flight.get(provider, 1) - 1)
+            released += 1
+            logger.warning(
+                "concurrency_guard: {} released STALE slot {} (held {:.0f}s > {:.0f}s limit)",
+                provider, req_id, now - cutoff + SLOT_MAX_AGE_S, SLOT_MAX_AGE_S,
+            )
+
+    if released:
+        logger.warning(
+            "concurrency_guard: released {} stale slots total (zombie request cleanup)",
+            released,
+        )
+    return released
+
+
+def _track_slot_acquire(provider: str, request_id: str) -> None:
+    """Track when a slot was acquired for stale detection."""
+    if provider not in _slot_acquired_at:
+        _slot_acquired_at[provider] = {}
+    _slot_acquired_at[provider][request_id] = time.monotonic()
+
+
+def _track_slot_release(provider: str, request_id: str) -> None:
+    """Remove slot from age tracking on release."""
+    if provider in _slot_acquired_at and request_id in _slot_acquired_at[provider]:
+        del _slot_acquired_at[provider][request_id]
+
+
+def _release(provider: str, request_id: str | None = None) -> None:
     """Release a semaphore slot and attempt recovery."""
     sem = _semaphores.get(provider)
     if sem:
         sem.release()
         _in_flight[provider] = max(0, _in_flight.get(provider, 1) - 1)
+    if request_id:
+        _track_slot_release(provider, request_id)
     _maybe_recover(provider)
 
 
@@ -304,6 +422,17 @@ class ConcurrencyMiddleware(BaseMiddleware):
     async def pre_call(self, request: dict) -> dict | None:
         model = request.get("model", "")
         provider = _resolve_provider(model)
+
+        # ── Cleanup stale slots (zombie request protection) ───────────────
+        # Releases slots held longer than SLOT_MAX_AGE_S (hung requests)
+        _release_stale_slots()
+
+        # ── Check for pause (429 backoff in progress) ─────────────────────
+        # If provider is paused due to recent 429, wait before proceeding
+        pause_waited = await _wait_for_pause(provider)
+        if pause_waited > 0:
+            request["_concurrency_pause_wait_s"] = pause_waited
+
         sem = _get_semaphore(provider)
         limit = PROVIDER_LIMITS.get(provider, DEFAULT_LIMIT)
 
@@ -357,24 +486,31 @@ class ConcurrencyMiddleware(BaseMiddleware):
         except asyncio.TimeoutError:
             _queue_depth[provider] = max(0, _queue_depth.get(provider, 0) - 1)
             current_queued = _queue_depth.get(provider, 0)
+            effective = _effective_limits.get(provider, limit)
             logger.warning(
-                "concurrency_guard: {} queue timeout after {:.0f}s (still {} queued) — "
-                "proceeding without slot (will let router try fallbacks)",
-                provider, QUEUE_TIMEOUT_S, current_queued,
+                "concurrency_guard: {} queue timeout after {:.0f}s ({} still queued, {} in-flight, limit {})",
+                provider, QUEUE_TIMEOUT_S, current_queued, _in_flight.get(provider, 0), effective,
             )
-            # DON'T REJECT — proceed without semaphore slot, let router try fallbacks.
-            # The router's retry/fallback logic handles provider overload better than
-            # blocking here. If the provider is truly overloaded, it will 429/503 and
-            # the fallback cascade will kick in.
-            request["_concurrency_bypassed"] = True
-            request["_concurrency_queue_wait_ms"] = int((time.monotonic() - queue_start) * 1000)
-            return request
+            # REJECT — bypassing the semaphore causes connection drops when we exceed
+            # the provider's actual concurrency limit. Clean 429 rejection lets callers
+            # retry with backoff instead of silent "server disconnected" failures.
+            raise MiddlewareReject(
+                f"Queue timeout: {provider} has {_in_flight.get(provider, 0)} in-flight requests "
+                f"(limit {effective}). Request waited {QUEUE_TIMEOUT_S:.0f}s for a slot. "
+                f"Reduce batch concurrency or increase QUEUE_TIMEOUT_S.",
+                status_code=429,
+            )
 
         queue_wait_ms = int((time.monotonic() - queue_start) * 1000)
         _queue_depth[provider] = max(0, _queue_depth.get(provider, 0) - 1)
 
+        # Track slot acquisition for stale detection
+        request_id = _generate_request_id()
+        _track_slot_acquire(provider, request_id)
+
         _in_flight[provider] = _in_flight.get(provider, 0) + 1
         request["_concurrency_provider"] = provider
+        request["_concurrency_request_id"] = request_id
         request["_concurrency_queue_wait_ms"] = queue_wait_ms
 
         # Compute backoff status for response headers
@@ -390,8 +526,42 @@ class ConcurrencyMiddleware(BaseMiddleware):
         if request.get("_concurrency_bypassed"):
             return response
         provider = request.get("_concurrency_provider")
+        request_id = request.get("_concurrency_request_id")
         if provider:
-            _release(provider)
+            _release(provider, request_id)
+
+            # ── Detect 429 in response and trigger pause ──────────────────────
+            # 429s come as HTTP responses, not exceptions, so check here
+            status = None
+            retry_after = None
+            if isinstance(response, dict):
+                # Check for error status in response dict
+                status = response.get("status_code") or response.get("status")
+                if not status and response.get("error"):
+                    err = response.get("error", {})
+                    if isinstance(err, dict):
+                        status = err.get("status_code") or err.get("code")
+                    elif "429" in str(err):
+                        status = 429
+            elif hasattr(response, "status_code"):
+                status = response.status_code
+            elif hasattr(response, "status"):
+                status = response.status
+
+            if status == 429:
+                # Extract Retry-After if available
+                if hasattr(response, "headers"):
+                    ra = response.headers.get("Retry-After") or response.headers.get("retry-after")
+                    if ra:
+                        try:
+                            retry_after = int(ra)
+                        except ValueError:
+                            pass
+                _record_429(provider, retry_after)
+                logger.warning(
+                    "concurrency_guard: {} got 429 in response — triggering pause",
+                    provider,
+                )
 
         # Add concurrency info headers to response for agent visibility
         queue_wait_ms = request.get("_concurrency_queue_wait_ms", 0)
@@ -426,13 +596,24 @@ class ConcurrencyMiddleware(BaseMiddleware):
         if request.get("_concurrency_bypassed"):
             return
         provider = request.get("_concurrency_provider")
+        request_id = request.get("_concurrency_request_id")
         if provider:
-            _release(provider)
+            _release(provider, request_id)
             # Detect 429 from upstream and trigger adaptive backoff
             err_str = str(error).lower()
             status = getattr(error, "status_code", 0) or getattr(error, "status", 0)
             if status == 429 or "rate" in err_str and "limit" in err_str or "429" in err_str:
-                _record_429(provider)
+                # Try to extract Retry-After header from error
+                retry_after = None
+                headers = getattr(error, "headers", None) or getattr(error, "response_headers", None)
+                if headers:
+                    ra = headers.get("Retry-After") or headers.get("retry-after")
+                    if ra:
+                        try:
+                            retry_after = int(ra)
+                        except ValueError:
+                            pass
+                _record_429(provider, retry_after)
 
 
 # ── Status function (for /v1/scillm/health) ─────────────────────────────
@@ -448,6 +629,22 @@ def get_concurrency_status() -> Dict[str, Any]:
         queued = _queue_depth.get(provider, 0)
         hits = _rate_limit_hits.get(provider, [])
         recent_429s = len([t for t in hits if t > now - _BACKOFF_WINDOW_S])
+
+        # Pause info
+        pause_until = _paused_until.get(provider, 0)
+        paused = pause_until > now
+        pause_remaining = max(0, pause_until - now) if paused else 0
+
+        # Slot age info (zombie detection)
+        slots = _slot_acquired_at.get(provider, {})
+        oldest_slot_age_s = 0.0
+        stale_warning_count = 0  # Slots > 80% of SLOT_MAX_AGE_S
+        if slots:
+            ages = [now - acquired for acquired in slots.values()]
+            oldest_slot_age_s = max(ages)
+            stale_warning_threshold = SLOT_MAX_AGE_S * 0.8
+            stale_warning_count = len([a for a in ages if a > stale_warning_threshold])
+
         status[provider] = {
             "configured_limit": configured,
             "effective_limit": effective,
@@ -457,5 +654,46 @@ def get_concurrency_status() -> Dict[str, Any]:
             "max_queue": MAX_QUEUE_PER_PROVIDER,
             "recent_429s": recent_429s,
             "backoff_active": effective < configured,
+            "paused": paused,
+            "pause_remaining_s": round(pause_remaining, 1),
+            "oldest_slot_age_s": round(oldest_slot_age_s, 1),
+            "stale_warning_count": stale_warning_count,
         }
     return status
+
+
+def get_concurrency_for_model(model: str) -> Dict[str, Any]:
+    """Return concurrency info for a specific model (for batch sizing).
+
+    Skills call this to determine optimal chunk_size for batch processing.
+    Returns effective_limit (accounting for adaptive backoff) as chunk_size.
+    If provider is paused, chunk_size = 0 and pause_remaining_s indicates wait time.
+    """
+    now = time.monotonic()
+    provider = _resolve_provider(model)
+    configured = PROVIDER_LIMITS.get(provider, DEFAULT_LIMIT)
+    effective = _effective_limits.get(provider, configured)
+    current = _in_flight.get(provider, 0)
+    queued = _queue_depth.get(provider, 0)
+
+    # Pause info
+    pause_until = _paused_until.get(provider, 0)
+    paused = pause_until > now
+    pause_remaining = max(0, pause_until - now) if paused else 0
+
+    # If paused, report chunk_size = 0 so skills know to wait
+    chunk_size = 0 if paused else effective
+
+    return {
+        "model": model,
+        "provider": provider,
+        "chunk_size": chunk_size,  # 0 if paused, else effective limit
+        "configured_limit": configured,
+        "effective_limit": effective,
+        "in_flight": current,
+        "queued": queued,
+        "available": max(0, effective - current),
+        "backoff_active": effective < configured,
+        "paused": paused,
+        "pause_remaining_s": round(pause_remaining, 1),
+    }

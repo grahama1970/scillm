@@ -63,8 +63,8 @@ services:
       CONFIG_FILE_PATH: /app/config.yaml
       LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY:-sk-dev-proxy-123}
       METRICS_ENV: ${METRICS_ENV:-dev}
-      REDIS_HOST: 127.0.0.1
-      REDIS_PORT: "6379"
+      # Redis removed from scillm — all logging via ArangoDB
+      # Redis service kept for codeworld-bridge only
     network_mode: host
     volumes:
       - "../../local/proxy_server_config.yaml:/app/config.yaml:ro"

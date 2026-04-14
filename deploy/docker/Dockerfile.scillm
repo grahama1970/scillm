@@ -1,43 +1,26 @@
-# Stage 1: Build Bifrost from our fork (fixes gemini thinking-only null choices)
-FROM node:22-slim AS bifrost-ui
-WORKDIR /build
-RUN apt-get update && apt-get install -y git && rm -rf /var/lib/apt/lists/*
-RUN git clone --depth 1 -b fix/gemini-thinking-only-null-choices https://github.com/grahama1970/bifrost.git .
-RUN cd ui && npm ci && npm run build && npm run copy-build
-
-FROM golang:1.26 AS bifrost-build
-RUN apt-get update && apt-get install -y gcc musl-dev && rm -rf /var/lib/apt/lists/*
-COPY --from=bifrost-ui /build /build
-WORKDIR /build/transports/bifrost-http
-RUN GOWORK=off go mod download
-RUN GOWORK=off CGO_ENABLED=1 go build -ldflags="-w -s" -o /build/bifrost .
-
-# Stage 2: Python scillm image
+# Single-stage Python scillm image (no Bifrost)
 FROM python:3.12-slim
 ENV PYTHONUNBUFFERED=1
 WORKDIR /app
 
-RUN apt-get update && apt-get install -y build-essential git curl supervisor && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y build-essential git curl && rm -rf /var/lib/apt/lists/*
 
-# Install uv via installer script (avoids ghcr rate limits)
+# Install Node.js (for Gemini CLI OAuth)
+RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
+    && apt-get install -y nodejs \
+    && npm install -g @google/gemini-cli \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install uv via installer script
 RUN curl -LsSf https://astral.sh/uv/install.sh | sh && cp /root/.local/bin/uv /usr/local/bin/uv
-
-# Copy Bifrost binary from build stage
-COPY --from=bifrost-build /build/bifrost /usr/local/bin/bifrost
-RUN chmod +x /usr/local/bin/bifrost
 
 # Copy scillm source and install
 COPY . /app
 RUN uv pip install --system -e ".[proxy]"
 
-# Bifrost data directory
-RUN mkdir -p /app/bifrost/data/logs
-
-# Copy config files
-COPY deploy/docker/supervisord.conf /etc/supervisor/conf.d/scillm.conf
 COPY deploy/docker/entrypoint.sh /app/entrypoint.sh
 RUN chmod +x /app/entrypoint.sh
 
 ENV PYTHONPATH=/app/src
-EXPOSE 4001 4002
+EXPOSE 4001
 CMD ["/app/entrypoint.sh"]

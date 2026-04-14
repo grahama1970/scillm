@@ -407,6 +407,28 @@ Test files: `tests/test_proxy_e2e.py` (contract tests), `tests/test_proxy_advers
 | `GET /v1/scillm/logs` | Cost summary by model for a given date |
 | `GET /metrics` | Prometheus counters (requests, errors, latency by group) |
 
+## Logging
+
+All LLM calls are logged to ArangoDB (`llm_call_log` collection) via the memory service. **No Redis for logging** — Redis is only for optional caching.
+
+Each log entry includes:
+- `ts`, `date` — timestamp and date partition
+- `model_requested`, `model_served` — what caller asked for vs what served
+- `provider` — inferred provider (chutes, gemini, anthropic, etc.)
+- `duration_ms`, `prompt_tokens`, `completion_tokens`, `cost_usd` — performance and cost
+- `request_prompt` — last user message (truncated to 4000 chars)
+- `response_content` — raw LLM response for debugging
+- `status`, `error` — ok/error with error type if failed
+
+Query logs via memory service:
+```bash
+curl -X POST http://localhost:8601/query -H "Content-Type: application/json" -d '{
+  "aql": "FOR doc IN llm_call_log FILTER doc.date == \"2026-04-13\" SORT doc.ts DESC LIMIT 10 RETURN doc"
+}'
+```
+
+**Silent batch failures are forbidden.** If a batch reports "0 stored" without explanation, check `llm_call_log` for raw `response_content` — it will reveal schema mismatches (e.g., LLM returns `abstain_reason` but code checks `reason`).
+
 ## License
 
 MIT License.

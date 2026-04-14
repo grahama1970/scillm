@@ -32,9 +32,12 @@ _DAYTIME_MODEL = "claude-sonnet-4-6"  # Reliable model for daytime
 
 
 def _is_daytime() -> bool:
-    """Check if current time is daytime (7AM-10PM ET)."""
-    now = datetime.now(_ET_TIMEZONE)
-    return _DAYTIME_START <= now.hour < _DAYTIME_END
+    """Check if current time is daytime (7AM-10PM ET).
+
+    DISABLED: Always use Chutes with dynamic routing to find least saturated model.
+    Claude OAuth should not be used for batch processing (ToS risk).
+    """
+    return False  # Disabled - use Chutes dynamic routing instead
 
 from scillm.proxy.middleware import BaseMiddleware
 
@@ -69,46 +72,88 @@ def _get_client() -> httpx.AsyncClient:
 
 
 # ---------------------------------------------------------------------------
-# Model families - groups of equivalent capability models
+# Model family patterns - dynamically match models from utilization API
 # ---------------------------------------------------------------------------
 
-MODEL_FAMILIES: dict[str, list[str]] = {
-    # All large DeepSeek models (671B) - V3 + R1 in one pool
-    "deepseek-large": [
-        "deepseek-ai/DeepSeek-V3.2-TEE",
-        "deepseek-ai/DeepSeek-V3.1-TEE",
-        "deepseek-ai/DeepSeek-V3-0324-TEE",
-        "deepseek-ai/DeepSeek-R1-0528-TEE",
-        "deepseek-ai/DeepSeek-R1-0528",
-    ],
-    # Qwen3 large family - 235B+ models
-    "qwen3-large": [
-        "Qwen/Qwen3-235B-A22B-Instruct-2507-TEE",
-        "Qwen/Qwen3-235B-A22B-Instruct-2507",
-        "Qwen/Qwen3.5-397B-A17B-TEE",
-    ],
-    # Qwen3 small family - 30-32B models
-    "qwen3-small": [
-        "Qwen/Qwen3-32B-TEE",
-        "Qwen/Qwen3-30B-A3B",
-    ],
-    # Kimi/Moonshot family
-    "kimi": [
-        "moonshotai/Kimi-K2-Instruct-0905",
-        "moonshotai/Kimi-K2.5-TEE",
-    ],
+# Pattern matchers for 671B DeepSeek models (V3, R1, Chimera variants)
+_DEEPSEEK_671B_PATTERNS = [
+    "deepseek-v3",
+    "deepseek-r1",
+    "deepseek-tng",
+    "chimera",
+]
+
+# Family pattern definitions: family_name -> (include_patterns, exclude_patterns)
+# Models matching include AND not matching exclude are added to the family
+FAMILY_PATTERNS: dict[str, tuple[list[str], list[str]]] = {
+    # DeepSeek 671B: V3, R1, Chimera variants (exclude distilled/small)
+    "deepseek-large": (
+        ["deepseek"],
+        ["distill", "7b", "8b", "14b", "32b", "70b", "lite"],
+    ),
+    # Qwen3 large: 235B+ models
+    "qwen3-large": (
+        ["qwen3", "235b", "397b"],
+        ["7b", "8b", "14b", "30b", "32b", "72b"],
+    ),
+    # Qwen3 small: 30-32B models
+    "qwen3-small": (
+        ["qwen3", "30b", "32b"],
+        ["235b", "397b"],
+    ),
+    # Kimi/Moonshot
+    "kimi": (
+        ["kimi", "moonshot"],
+        [],
+    ),
 }
 
-# Reverse lookup: model -> family
-_MODEL_TO_FAMILY: dict[str, str] = {}
-for family, models in MODEL_FAMILIES.items():
-    for model in models:
-        _MODEL_TO_FAMILY[model] = family
-        # Also index lowercase and without org prefix
-        _MODEL_TO_FAMILY[model.lower()] = family
-        if "/" in model:
-            _MODEL_TO_FAMILY[model.split("/")[1]] = family
-            _MODEL_TO_FAMILY[model.split("/")[1].lower()] = family
+
+def _matches_family(model_name: str, family: str) -> bool:
+    """Check if model matches family patterns."""
+    patterns = FAMILY_PATTERNS.get(family)
+    if not patterns:
+        return False
+    include, exclude = patterns
+    name_lower = model_name.lower()
+
+    # Must match at least one include pattern
+    if not any(p in name_lower for p in include):
+        return False
+
+    # Must not match any exclude pattern
+    if any(p in name_lower for p in exclude):
+        return False
+
+    return True
+
+
+def _build_dynamic_families(util_data: list[dict]) -> dict[str, list[str]]:
+    """Build model families dynamically from utilization API data."""
+    families: dict[str, list[str]] = {f: [] for f in FAMILY_PATTERNS}
+
+    for entry in util_data:
+        name = entry.get("name", "")
+        if not name or name.startswith("[private"):
+            continue
+
+        for family in FAMILY_PATTERNS:
+            if _matches_family(name, family):
+                families[family].append(name)
+                break  # Model belongs to first matching family only
+
+    # Log discovered families
+    for family, models in families.items():
+        if models:
+            logger.debug("chutes_router: {} family has {} models: {}",
+                        family, len(models), [m.split("/")[-1] for m in models])
+
+    return families
+
+
+# Dynamic family cache (populated from utilization API)
+_dynamic_families: dict[str, list[str]] = {}
+_families_timestamp: float = 0
 
 
 # ---------------------------------------------------------------------------
@@ -144,8 +189,9 @@ async def _get_utilization() -> dict[str, dict]:
     """Get cached utilization data, refreshing if stale.
 
     Returns dict mapping model name -> utilization stats.
+    Also rebuilds dynamic model families from the API data.
     """
-    global _utilization_cache, _cache_timestamp
+    global _utilization_cache, _cache_timestamp, _dynamic_families, _families_timestamp
 
     now = time.monotonic()
     if _utilization_cache is not None and now - _cache_timestamp < _CACHE_TTL_SEC:
@@ -172,9 +218,15 @@ async def _get_utilization() -> dict[str, dict]:
 
     _utilization_cache = cache
     _cache_timestamp = now
+
+    # Build dynamic families from the API data
+    _dynamic_families = _build_dynamic_families(raw)
+    _families_timestamp = now
+
     logger.info(
-        "chutes_router: refreshed utilization cache ({} models)",
+        "chutes_router: refreshed utilization cache ({} models, {} in deepseek-large family)",
         len(cache) // 2,  # Divide by 2 because we index twice
+        len(_dynamic_families.get("deepseek-large", [])),
     )
     return cache
 
@@ -210,9 +262,13 @@ async def _select_best_variant(family: str, util_cache: dict[str, dict]) -> str 
     """Select the best model variant from a family based on utilization.
 
     Returns the model name with lowest score, or None if no good options.
+    Uses dynamically discovered families from the utilization API.
     """
-    candidates = MODEL_FAMILIES.get(family, [])
+    # Use dynamic families (populated by _get_utilization)
+    candidates = _dynamic_families.get(family, [])
     if not candidates:
+        logger.debug("chutes_router: no candidates for family '{}' (families: {})",
+                    family, list(_dynamic_families.keys()))
         return None
 
     scored = []
@@ -256,31 +312,11 @@ async def _select_best_variant(family: str, util_cache: dict[str, dict]) -> str 
 
 
 def _get_family_for_model(model: str) -> str | None:
-    """Get the family for a model string."""
-    # Direct lookup
-    if model in _MODEL_TO_FAMILY:
-        return _MODEL_TO_FAMILY[model]
-
-    # Try lowercase
-    model_lower = model.lower()
-    if model_lower in _MODEL_TO_FAMILY:
-        return _MODEL_TO_FAMILY[model_lower]
-
-    # Try pattern matching for common Chutes patterns
-    if "deepseek" in model_lower:
-        # All large DeepSeek models (V3 + R1) in one pool
-        return "deepseek-large"
-
-    if "qwen3" in model_lower:
-        # Check size indicators
-        if any(x in model_lower for x in ["235b", "397b"]):
-            return "qwen3-large"
-        if any(x in model_lower for x in ["30b", "32b"]):
-            return "qwen3-small"
-
-    if "kimi" in model_lower or "moonshot" in model_lower:
-        return "kimi"
-
+    """Get the family for a model string using pattern matching."""
+    # Check against all family patterns
+    for family in FAMILY_PATTERNS:
+        if _matches_family(model, family):
+            return family
     return None
 
 

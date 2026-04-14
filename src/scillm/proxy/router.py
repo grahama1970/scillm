@@ -28,10 +28,13 @@ import openai
 from loguru import logger
 
 from scillm.proxy.config import Deployment, ModelGroup, ProxyConfig, RetryPolicy
-from chutes.middleware.bifrost_forwarder import get_bifrost_forwarder
+# Bifrost removed — direct provider routing via openai SDK
 from scillm.proxy.providers.auth import is_anthropic_available, is_codex_available
 from scillm.proxy.providers.claude import claude_completion, claude_completion_stream
 from scillm.proxy.providers.codex import codex_completion, codex_completion_stream
+
+# Gemini OAuth: uses Gemini CLI for headless calls (bypasses 20 RPD API limit)
+from chutes.middleware.gemini_oauth import complete_messages as gemini_oauth_complete, is_available as is_gemini_oauth_available
 
 # Chutes warmup: called when a Chutes model returns 5xx (cold start)
 _CHUTES_API_BASE = os.environ.get("CHUTES_API_BASE", "https://llm.chutes.ai")
@@ -218,18 +221,6 @@ class Router:
         self._config = config
         self._clients: dict[int, openai.AsyncOpenAI] = {}
         self._circuits: dict[str, _CircuitState] = {}
-        self._bifrost = get_bifrost_forwarder()
-        self._bifrost_client: openai.AsyncOpenAI | None = None
-        if self._bifrost.enabled:
-            self._bifrost_client = openai.AsyncOpenAI(
-                api_key=self._bifrost.client_key,
-                base_url=self._bifrost.api_base,
-                timeout=120.0,
-            )
-            logger.info(
-                "Router configured to route completions via Bifrost at {}",
-                self._bifrost.base_url,
-            )
         logger.info(
             "Router initialised — {} group(s), {} alias(es), {} fallback chain(s), "
             "circuit_breaker(allowed_fails={}, cooldown={}s)",
@@ -575,9 +566,6 @@ class Router:
         else:
             timeout_sec = config_timeout
 
-        if self._bifrost_client is not None:
-            return await self._call_bifrost(dep, messages, timeout=timeout_sec, **kwargs)
-
         client = self._client_for(dep)
         policy = self._config.retry_policy
         base_delay = self._config.retry_after
@@ -609,6 +597,13 @@ class Router:
                 stream_kwargs = {k: v for k, v in kwargs.items() if k != "stream"}
                 return codex_completion_stream(dep.model, messages, timeout=timeout_sec, **stream_kwargs)
             return await codex_completion(dep.model, messages, timeout=timeout_sec, **kwargs)
+
+        # Gemini OAuth path: uses Gemini CLI for headless calls (bypasses 20 RPD API limit).
+        # Best for long-context tasks (1M tokens). No streaming support yet.
+        if dep.custom_llm_provider == "gemini-oauth":
+            if kwargs.get("stream", False):
+                logger.warning("gemini-oauth: streaming not supported, falling back to non-streaming")
+            return await gemini_oauth_complete(messages, model=dep.model, timeout=timeout_sec)
 
         # We do one initial attempt + up to max_retries retries.
         # _max_retries_override caps retries when multiple models share a group
@@ -685,24 +680,6 @@ class Router:
         # Should not reach here, but satisfy the type checker
         assert last_exc is not None  # noqa: S101
         raise last_exc
-
-    async def _call_bifrost(
-        self,
-        dep: Deployment,
-        messages: list[dict[str, Any]],
-        timeout: float | None = None,
-        **kwargs: Any,
-    ) -> Any:
-        assert self._bifrost_client is not None
-        bifrost_model = self._bifrost.format_model(dep.model)
-        timeout_sec = timeout if timeout is not None else float(dep.timeout or 120)
-        logger.debug("Bifrost route: %s → %s (timeout=%.1fs)", dep.model, bifrost_model, timeout_sec)
-        return await self._bifrost_client.chat.completions.create(
-            model=bifrost_model,
-            messages=messages,
-            timeout=timeout_sec,
-            **kwargs,
-        )
 
     # ------------------------------------------------------------------
     # Group-level attempt (shuffle deployments, try each)
@@ -847,7 +824,4 @@ class Router:
         for client in self._clients.values():
             await client.close()
         self._clients.clear()
-        if self._bifrost_client is not None:
-            await self._bifrost_client.close()
-            self._bifrost_client = None
         logger.info("Router closed — all clients released")
