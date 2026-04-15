@@ -1,0 +1,486 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Dynamic Fallback Chain Walkthrough | scillm</title>
+    <script src="https://cdn.jsdelivr.net/npm/mermaid/dist/mermaid.min.js"></script>
+    <style>
+        :root {
+            --bg: #1a1a2e;
+            --surface: #16213e;
+            --surface-alt: #0f3460;
+            --text: #e8e8e8;
+            --text-muted: #a0a0a0;
+            --accent: #00d9ff;
+            --accent-dim: #0097b2;
+            --success: #4ade80;
+            --warning: #fbbf24;
+            --error: #f87171;
+            --code-bg: #0d1117;
+        }
+
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+
+        body {
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+            background: var(--bg);
+            color: var(--text);
+            line-height: 1.6;
+            padding: 2rem;
+            max-width: 1000px;
+            margin: 0 auto;
+        }
+
+        h1 {
+            color: var(--accent);
+            font-size: 2rem;
+            margin-bottom: 0.5rem;
+            border-bottom: 2px solid var(--accent-dim);
+            padding-bottom: 0.5rem;
+        }
+
+        h2 {
+            color: var(--accent);
+            font-size: 1.4rem;
+            margin: 2rem 0 1rem;
+            padding-left: 0.5rem;
+            border-left: 3px solid var(--accent);
+        }
+
+        h3 {
+            color: var(--text);
+            font-size: 1.1rem;
+            margin: 1.5rem 0 0.75rem;
+        }
+
+        .meta {
+            color: var(--text-muted);
+            font-size: 0.9rem;
+            margin-bottom: 2rem;
+        }
+
+        .meta span {
+            display: inline-block;
+            margin-right: 1.5rem;
+        }
+
+        .meta code {
+            background: var(--surface);
+            padding: 0.2rem 0.4rem;
+            border-radius: 3px;
+            font-size: 0.85rem;
+        }
+
+        p { margin-bottom: 1rem; }
+
+        code {
+            font-family: 'JetBrains Mono', 'Fira Code', monospace;
+            background: var(--code-bg);
+            padding: 0.15rem 0.35rem;
+            border-radius: 3px;
+            font-size: 0.9em;
+        }
+
+        pre {
+            background: var(--code-bg);
+            padding: 1rem;
+            border-radius: 6px;
+            overflow-x: auto;
+            margin: 1rem 0;
+            border: 1px solid var(--surface-alt);
+        }
+
+        pre code {
+            background: none;
+            padding: 0;
+        }
+
+        .mermaid-container {
+            background: var(--surface);
+            border-radius: 8px;
+            padding: 1.5rem;
+            margin: 1.5rem 0;
+            border: 1px solid var(--surface-alt);
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 1rem 0;
+            font-size: 0.95rem;
+        }
+
+        th, td {
+            padding: 0.75rem;
+            text-align: left;
+            border: 1px solid var(--surface-alt);
+        }
+
+        th {
+            background: var(--surface-alt);
+            color: var(--accent);
+            font-weight: 600;
+        }
+
+        tr:nth-child(even) { background: var(--surface); }
+
+        .callout {
+            background: var(--surface);
+            border-left: 4px solid var(--accent);
+            padding: 1rem;
+            margin: 1rem 0;
+            border-radius: 0 6px 6px 0;
+        }
+
+        .callout.warning {
+            border-left-color: var(--warning);
+        }
+
+        .callout.success {
+            border-left-color: var(--success);
+        }
+
+        .step-number {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            width: 1.75rem;
+            height: 1.75rem;
+            background: var(--accent);
+            color: var(--bg);
+            border-radius: 50%;
+            font-weight: 700;
+            font-size: 0.9rem;
+            margin-right: 0.5rem;
+        }
+
+        .component {
+            background: var(--surface);
+            border-radius: 6px;
+            padding: 1rem;
+            margin: 1rem 0;
+            border: 1px solid var(--surface-alt);
+        }
+
+        .component h4 {
+            color: var(--accent);
+            margin-bottom: 0.5rem;
+            font-family: 'JetBrains Mono', monospace;
+        }
+
+        .log-output {
+            background: #000;
+            color: #0f0;
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 0.8rem;
+            padding: 1rem;
+            border-radius: 6px;
+            overflow-x: auto;
+        }
+
+        .log-output .highlight { color: var(--accent); }
+        .log-output .warning { color: var(--warning); }
+        .log-output .dim { color: #666; }
+
+        .badge {
+            display: inline-block;
+            padding: 0.2rem 0.6rem;
+            border-radius: 4px;
+            font-size: 0.8rem;
+            font-weight: 600;
+        }
+
+        .badge.success { background: var(--success); color: #000; }
+        .badge.warning { background: var(--warning); color: #000; }
+
+        footer {
+            margin-top: 3rem;
+            padding-top: 1rem;
+            border-top: 1px solid var(--surface-alt);
+            color: var(--text-muted);
+            font-size: 0.85rem;
+        }
+    </style>
+</head>
+<body>
+    <h1>Dynamic Fallback Chain Walkthrough</h1>
+
+    <div class="meta">
+        <span><strong>Date:</strong> 2026-04-15</span>
+        <span><strong>Commit:</strong> <code>4d181ca</code></span>
+        <span><strong>Status:</strong> <span class="badge success">Deployed</span></span>
+    </div>
+
+    <h2>The Problem It Solves</h2>
+
+    <div class="callout warning">
+        <strong>Before:</strong> Static fallback chains in <code>proxy_server_config.yaml</code>.
+        When chutes_router dynamically discovered a new model (like <code>Chimera-TEE</code>),
+        that model had <strong>no fallback chain</strong> &rarr; 429s reached the client.
+    </div>
+
+    <div class="callout success">
+        <strong>After:</strong> The entire fallback chain is built dynamically from real-time
+        Chutes utilization data. Every model gets a full 8-model chain, sorted best-to-worst.
+    </div>
+
+    <h2>Data Flow</h2>
+
+    <div class="mermaid-container">
+        <pre class="mermaid">
+flowchart TD
+    subgraph Client
+        REQ["POST /v1/chat/completions
+        model: 'text'"]
+    end
+
+    subgraph MW["chutes_router.py"]
+        FETCH[Fetch Chutes Utilization API
+        cached 5 min]
+        SCORE[Score each model
+        util% + rate_limit%]
+        SORT[Sort by score
+        lowest = best]
+        BUILD[Build chain:
+        Chutes + static fallbacks]
+        INJECT[Inject _dynamic_fallback_chain
+        into request body]
+    end
+
+    subgraph APP["app.py"]
+        PASS[Pass chain to
+        router kwargs]
+    end
+
+    subgraph RTR["router.py"]
+        CHECK{dynamic chain?}
+        USE_DYN[Use dynamic chain]
+        USE_STATIC[Use static config]
+        TRY[Try models in order
+        until success]
+    end
+
+    subgraph Provider
+        CHUTES[Chutes API]
+    end
+
+    REQ --> FETCH
+    FETCH --> SCORE
+    SCORE --> SORT
+    SORT --> BUILD
+    BUILD --> INJECT
+    INJECT --> PASS
+    PASS --> CHECK
+    CHECK -->|Yes| USE_DYN
+    CHECK -->|No| USE_STATIC
+    USE_DYN --> TRY
+    USE_STATIC --> TRY
+    TRY --> CHUTES
+
+    style REQ fill:#0097b2,color:#fff
+    style INJECT fill:#4ade80,color:#000
+    style PASS fill:#4ade80,color:#000
+    style CHECK fill:#fbbf24,color:#000
+        </pre>
+    </div>
+
+    <h2>How Each Component Works</h2>
+
+    <div class="component">
+        <h4><span class="step-number">1</span> chutes_router.py &mdash; Build the Chain</h4>
+
+        <p><strong><code>_get_utilization()</code></strong> &mdash; Fetches utilization data, cached 5 minutes:</p>
+        <pre><code># Cache check
+if _utilization_cache is not None and now - _cache_timestamp < 300:
+    return _utilization_cache
+
+# Fetch fresh: GET https://api.chutes.ai/chutes/utilization
+raw = await _fetch_utilization()</code></pre>
+
+        <p><strong><code>_score_model()</code></strong> &mdash; Lower score = better:</p>
+        <pre><code>def _score_model(stats: dict) -> float:
+    util = stats.get("utilization_current", 1.0)
+    rate_limit = stats.get("rate_limit_ratio_5m", 0.0)
+
+    if rate_limit > 0.25:  return 100.0  # Avoid rate-limited
+    if util > 0.95:        return 90.0   # Avoid saturated
+    if util < 0.01:        return 95.0   # Avoid cold (0% = no miners)
+
+    return util * 80  # Score 0-80 based on utilization</code></pre>
+
+        <p><strong><code>_build_dynamic_chain()</code></strong> &mdash; Returns sorted list:</p>
+        <pre><code># Score and sort all models in family
+scored.sort(key=lambda x: x[0])  # Lowest first
+chain = [model for _, model, _, _ in scored]
+
+# Append static fallbacks
+chain.extend(["text-kimi", "text-qwen3", "text-qwen3-large"])
+return chain</code></pre>
+
+        <p><strong><code>pre_call()</code></strong> &mdash; Injects chain into request:</p>
+        <pre><code>chain = await _build_dynamic_chain(family, util_cache)
+request["_dynamic_fallback_chain"] = chain  # Key injection
+request["model"] = chain[0]  # Route to best model</code></pre>
+    </div>
+
+    <div class="component">
+        <h4><span class="step-number">2</span> app.py &mdash; Pass Through</h4>
+        <pre><code># Line 683-684
+if "_dynamic_fallback_chain" in body:
+    kwargs["_dynamic_fallback_chain"] = body["_dynamic_fallback_chain"]</code></pre>
+    </div>
+
+    <div class="component">
+        <h4><span class="step-number">3</span> router.py &mdash; Use the Chain</h4>
+        <pre><code># Line 758-766
+dynamic_chain = kwargs.pop("_dynamic_fallback_chain", None)
+if dynamic_chain:
+    chain = dynamic_chain  # Use utilization-sorted chain
+else:
+    chain = self._fallback_chain(group_name)  # Fall back to static config
+
+# Then iterate through chain until success
+for model in chain:
+    try:
+        return await self._call_provider(model, ...)
+    except RateLimitError:
+        continue  # Try next in chain</code></pre>
+    </div>
+
+    <h2>Example: What Actually Happens</h2>
+
+    <p>Request: <code>{"model": "text", "messages": [...]}</code></p>
+
+    <div class="log-output">
+<span class="dim">chutes_router:</span> DeepSeek-TNG-R1T2-Chimera-TEE <span class="highlight">score=20.0</span> (util=25.0%, rl=0.0%)
+<span class="dim">chutes_router:</span> DeepSeek-V3.1-TEE <span class="highlight">score=29.3</span> (util=36.6%, rl=0.0%)
+<span class="dim">chutes_router:</span> DeepSeek-R1-0528-TEE <span class="highlight">score=71.7</span> (util=89.6%, rl=5.9%)
+<span class="dim">chutes_router:</span> DeepSeek-V3.2-TEE <span class="warning">score=100.0</span> (util=99.6%, rl=93.1%) <span class="warning">&larr; saturated</span>
+<span class="dim">chutes_router:</span> DeepSeek-V3-0324-TEE <span class="warning">score=100.0</span> (util=91.4%, rl=48.6%) <span class="warning">&larr; rate-limited</span>
+
+<span class="dim">chutes_router:</span> <span class="highlight">'text' -> 'DeepSeek-TNG-R1T2-Chimera-TEE'</span> (util=25%, chain_len=8)
+
+<span class="dim">router:</span> chain=[<span class="highlight">'Chimera-TEE'</span>, 'V3.1-TEE', 'R1-0528-TEE', 'V3.2-TEE',
+               'V3-0324-TEE', 'text-kimi', 'text-qwen3', 'text-qwen3-large'] <span class="highlight">(dynamic)</span>
+    </div>
+
+    <h2>Why This Fixes 429s</h2>
+
+    <table>
+        <thead>
+            <tr>
+                <th>Before</th>
+                <th>After</th>
+            </tr>
+        </thead>
+        <tbody>
+            <tr>
+                <td>Chimera-TEE discovered dynamically</td>
+                <td>Same</td>
+            </tr>
+            <tr>
+                <td>Chimera-TEE has <strong>no fallback chain</strong> in static config</td>
+                <td>Chain built dynamically with 8 models</td>
+            </tr>
+            <tr>
+                <td>429 &rarr; returned to client</td>
+                <td>429 &rarr; try V3.1-TEE &rarr; try R1-0528 &rarr; ... &rarr; text-qwen3-large</td>
+            </tr>
+        </tbody>
+    </table>
+
+    <h2>Key Design Decisions</h2>
+
+    <table>
+        <thead>
+            <tr>
+                <th>Decision</th>
+                <th>Why</th>
+            </tr>
+        </thead>
+        <tbody>
+            <tr>
+                <td>5-minute cache</td>
+                <td>Balance freshness vs API overhead</td>
+            </tr>
+            <tr>
+                <td>Score 0-100</td>
+                <td>Simple sort, lower = better</td>
+            </tr>
+            <tr>
+                <td>25% rate-limit threshold</td>
+                <td>Avoid models actively rejecting requests</td>
+            </tr>
+            <tr>
+                <td>Static fallbacks at end</td>
+                <td>Kimi/Qwen3 don't have utilization data, but are reliable last resorts</td>
+            </tr>
+            <tr>
+                <td>Inject via request body</td>
+                <td>Middleware can't call router directly; body is the transport</td>
+            </tr>
+        </tbody>
+    </table>
+
+    <h2>Files Changed</h2>
+
+    <table>
+        <thead>
+            <tr>
+                <th>File</th>
+                <th>Changes</th>
+                <th>Purpose</th>
+            </tr>
+        </thead>
+        <tbody>
+            <tr>
+                <td><code>chutes/middleware/chutes_router.py</code></td>
+                <td>+58 -34</td>
+                <td>Build dynamic chain, inject into request</td>
+            </tr>
+            <tr>
+                <td><code>src/scillm/proxy/router.py</code></td>
+                <td>+12</td>
+                <td>Accept and use dynamic chain</td>
+            </tr>
+            <tr>
+                <td><code>src/scillm/proxy/app.py</code></td>
+                <td>+4</td>
+                <td>Pass chain through to router</td>
+            </tr>
+        </tbody>
+    </table>
+
+    <footer>
+        <p>Generated 2026-04-15 | scillm dynamic fallback chain documentation</p>
+    </footer>
+
+    <script>
+        mermaid.initialize({
+            startOnLoad: true,
+            theme: 'dark',
+            themeVariables: {
+                primaryColor: '#0097b2',
+                primaryTextColor: '#fff',
+                primaryBorderColor: '#00d9ff',
+                lineColor: '#00d9ff',
+                secondaryColor: '#16213e',
+                tertiaryColor: '#0f3460',
+                background: '#1a1a2e',
+                mainBkg: '#16213e',
+                nodeBorder: '#00d9ff',
+                clusterBkg: '#0f3460',
+                clusterBorder: '#00d9ff',
+                titleColor: '#00d9ff',
+                edgeLabelBackground: '#16213e'
+            },
+            flowchart: {
+                useMaxWidth: true,
+                htmlLabels: true,
+                curve: 'basis'
+            }
+        });
+    </script>
+</body>
+</html>

@@ -1,6 +1,6 @@
 # Project Knowledge: scillm
 
-**Last updated:** 2026-04-14 15:10 by agent
+**Last updated:** 2026-04-15 12:45 by agent
 **Status:** Active development
 
 ## Current Understanding
@@ -11,20 +11,30 @@
 - Redis is ONLY for optional caching
 - Silent batch failures are forbidden — must log raw responses for debugging
 
-### CWE Batch Model Fallback Chain (Chutes only)
+### Dynamic Fallback Chain (2026-04-15)
 
-All models verified for 100% grounding accuracy on QRA task:
+The ENTIRE fallback chain is now built dynamically from real-time Chutes utilization data.
 
-| # | Model Alias | Chutes Model ID | Notes |
-|---|-------------|-----------------|-------|
-| 1 | `text` | DeepSeek-* (dynamic) | chutes_router selects least saturated 671B variant |
-| 2 | `deepseek-ai/DeepSeek-V3.1-TEE` | DeepSeek-V3.1-TEE | Fallback DeepSeek |
-| 3 | `deepseek-ai/DeepSeek-R1-0528-TEE` | DeepSeek-R1-0528-TEE | Fallback DeepSeek |
-| 4 | `text-kimi` | moonshotai/Kimi-K2.5-TEE | ~81s latency |
-| 5 | `text-qwen3` | Qwen/Qwen3-235B-A22B-Thinking-2507 | Faster Qwen3 |
-| 6 | `text-qwen3-large` | Qwen/Qwen3.5-397B-A17B-TEE | Slowest, last resort |
+**How it works:**
+1. `chutes_router.py` fetches utilization from Chutes API (cached 5 min)
+2. Scores each model: `util% * 80` (lower = better), penalizes >25% rate-limit or >95% util
+3. Sorts all discovered models by score (best first)
+4. Appends static fallbacks: `text-kimi`, `text-qwen3`, `text-qwen3-large`
+5. Injects full chain via `_dynamic_fallback_chain` → `app.py` → `router.py`
 
-**NOT in batch chain:** OAuth providers (Codex, Claude), external DeepSeek API, Gemini
+**Example chain** (actual output 2026-04-15):
+```
+['DeepSeek-TNG-R1T2-Chimera-TEE',  # score=20, util=25%
+ 'DeepSeek-V3.1-TEE',              # score=29, util=37%
+ 'DeepSeek-R1-0528-TEE',           # score=72, util=90%
+ 'DeepSeek-V3.2-TEE',              # score=100, saturated
+ 'DeepSeek-V3-0324-TEE',           # score=100, rate-limited
+ 'text-kimi', 'text-qwen3', 'text-qwen3-large']  # static fallbacks
+```
+
+**Why this matters:** Previously, dynamically discovered models (like Chimera-TEE) had NO fallback chain in static config → 429s reached clients. Now every call gets a full 8-model chain.
+
+**NOT in batch chain:** OAuth providers (Codex, Claude) — risk of account ban
 
 ## Recent Decisions
 
@@ -57,6 +67,7 @@ All models verified for 100% grounding accuracy on QRA task:
 | `chutes/middleware/json_guard.py` | JSON validation and repair |
 | `chutes/middleware/concurrency_guard.py` | Provider-aware semaphore (chutes=4, ollama=1) |
 | `local/proxy_server_config.yaml` | Single source of truth for models/providers |
+| `docs/dynamic-fallback-chain-walkthrough.html` | Visual walkthrough of dynamic fallback chain architecture |
 | `deploy/docker/compose.scillm.core.yml` | Production compose (scillm + utls-proxy) |
 | `deploy/docker/Dockerfile.scillm` | Single-stage Python image (Bifrost removed) |
 | `~/.pi/skills/scillm/SKILL.md` | Skill documentation with misuse patterns |
