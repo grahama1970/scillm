@@ -1,6 +1,6 @@
 # Project Knowledge: scillm
 
-**Last updated:** 2026-04-15 12:45 by agent
+**Last updated:** 2026-04-15 13:30 by agent
 **Status:** Active development
 
 ## Current Understanding
@@ -36,10 +36,49 @@ The ENTIRE fallback chain is now built dynamically from real-time Chutes utiliza
 
 **NOT in batch chain:** OAuth providers (Codex, Claude) — risk of account ban
 
+### Docker Deployment Strategy (2026-04-15)
+
+**Target audience:** Power users only — engineers who need deep LLM proxy customization. Not for average users.
+
+**Two deployment modes:**
+
+| Mode | Compose File | Use Case |
+|------|--------------|----------|
+| **Standalone** | `compose.scillm.standalone.yml` | External users — self-contained, includes all services |
+| **Core** | `compose.scillm.core.yml` | Internal use — assumes memory service on host |
+
+**Services in standalone:**
+- `arangodb` (:8529) — Database
+- `memory` (:8601) — Logging, batch resume, latency stats
+- `embedding` (:8602) — Sentence embeddings for `/v1/embeddings`
+- `utls-proxy` (:8444) — TLS fingerprint for Codex
+- `scillm-proxy` (:4001) — Main LLM gateway
+
+**Source management (decided 2026-04-15):**
+- Memory service source lives at `/workspace/experiments/memory/` (active development)
+- Copy to `scillm/services/memory/` when releasing (manual sync)
+- **Why not published images:** Both projects under active development — CI overhead and version coordination friction slow iteration
+- **Why not git submodule:** Clone complexity, detached HEAD headaches
+- **When to revisit:** Move to published images when memory API stabilizes (<1 change/month)
+
+**Sync workflow:**
+```
+/workspace/experiments/memory/  →  (manual sync)  →  scillm/services/memory/
+         (source of truth)                              (distribution snapshot)
+```
+
+**Key files:**
+- `services/memory/` — Copy of memory service for standalone deploy
+- `services/embedding/` — Embedding service (PyTorch + sentence-transformers)
+- `deploy/docker/compose.scillm.standalone.yml` — Full stack compose
+- `deploy/docker/compose.scillm.core.yml` — Minimal compose (proxy only)
+
 ## Recent Decisions
 
 | Date | Decision | Why |
 |------|----------|-----|
+| 2026-04-15 | Standalone Docker deployment with bundled services | Power users get self-contained `docker compose up`. Memory service copied (not published image) because both projects under active development. |
+| 2026-04-15 | Dynamic fallback chains from Chutes utilization | Entire chain built at runtime, sorted by utilization score. Fixes 429s reaching clients from dynamically discovered models. |
 | 2026-04-14 | CWE batch uses 6 Chutes models only | No OAuth (ban risk), no external DeepSeek (paid), no Gemini. All models verified 100% QRA grounding. Qwen3.5-397B is slowest last resort. |
 | 2026-04-13 | Remove Bifrost gateway | Was never enabled (BIFROST_ENABLED=false). Direct openai SDK routing is simpler. ArangoDB llm_call_log provides all monitoring data. |
 | 2026-04-13 | Build scillm batch dashboard in ux-lab | React components using EmbryStyle/NVIS tokens, queries ArangoDB for batch progress, per-skill usage, error rates |
@@ -68,8 +107,11 @@ The ENTIRE fallback chain is now built dynamically from real-time Chutes utiliza
 | `chutes/middleware/concurrency_guard.py` | Provider-aware semaphore (chutes=4, ollama=1) |
 | `local/proxy_server_config.yaml` | Single source of truth for models/providers |
 | `docs/dynamic-fallback-chain-walkthrough.html` | Visual walkthrough of dynamic fallback chain architecture |
-| `deploy/docker/compose.scillm.core.yml` | Production compose (scillm + utls-proxy) |
+| `deploy/docker/compose.scillm.standalone.yml` | Self-contained compose (all services bundled) |
+| `deploy/docker/compose.scillm.core.yml` | Minimal compose (assumes services on host) |
 | `deploy/docker/Dockerfile.scillm` | Single-stage Python image (Bifrost removed) |
+| `services/memory/` | Memory service copy for standalone deploy |
+| `services/embedding/` | Embedding service (sentence-transformers) |
 | `~/.pi/skills/scillm/SKILL.md` | Skill documentation with misuse patterns |
 | `.archive/bifrost/` | Archived Bifrost code (removed 2026-04-13) |
 
@@ -87,8 +129,16 @@ The ENTIRE fallback chain is now built dynamically from real-time Chutes utiliza
 
 ## Infrastructure State
 
+**Internal (core compose):**
 - **scillm proxy:** localhost:4001 (Docker, network_mode: host, direct provider routing)
 - **utls-proxy:** localhost:8444 (TLS fingerprint for Codex)
-- **ArangoDB logging:** llm_call_log collection via memory service :8601
-- **Redis:** NOT used by scillm (embry-redis is for PCP system metrics only, see embry-os/docs/REDIS_PCP_USAGE.md)
-- **Dashboard:** React components in ux-lab (planned), queries ArangoDB for batch monitoring
+- **Memory service:** localhost:8601 (external, from `/workspace/experiments/memory/`)
+- **Embedding service:** localhost:8602 (external)
+- **ArangoDB:** localhost:8529 (external)
+
+**External users (standalone compose):**
+- All services bundled in one `docker compose up`
+- Services communicate via Docker network (service names as hostnames)
+- ArangoDB data persisted in named volume
+
+**Redis:** NOT used by scillm (embry-redis is for PCP system metrics only)
