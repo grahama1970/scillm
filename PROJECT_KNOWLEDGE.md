@@ -1,6 +1,6 @@
 # Project Knowledge: scillm
 
-**Last updated:** 2026-04-15 13:30 by agent
+**Last updated:** 2026-04-15 14:00 by agent
 **Status:** Active development
 
 ## Current Understanding
@@ -35,6 +35,24 @@ The ENTIRE fallback chain is now built dynamically from real-time Chutes utiliza
 **Why this matters:** Previously, dynamically discovered models (like Chimera-TEE) had NO fallback chain in static config → 429s reached clients. Now every call gets a full 8-model chain.
 
 **NOT in batch chain:** OAuth providers (Codex, Claude) — risk of account ban
+
+### Concurrency Guard Semaphore Fix (2026-04-15)
+
+**Bug fixed:** Race condition causing "9/8 slots in use" errors during batch operations.
+
+**Root cause:** When adaptive backoff triggered (429 from provider), `_record_429()` created a new semaphore with reduced slots, but the `_in_flight` counter still reflected requests on the old semaphore. New requests acquired slots on the fresh semaphore → counter exceeded limit.
+
+**Fix:** Pre-acquire slots on new semaphore for in-flight requests:
+```python
+current_in_flight = _in_flight.get(provider, 0)
+slots_to_reserve = min(current_in_flight, new_limit)
+new_sem = asyncio.Semaphore(new_limit)
+for _ in range(slots_to_reserve):
+    new_sem.acquire_nowait()
+_semaphores[provider] = new_sem
+```
+
+Applied to both `_record_429()` (backoff) and `_maybe_recover()` (recovery).
 
 ### Docker Deployment Strategy (2026-04-15)
 
@@ -77,6 +95,7 @@ The ENTIRE fallback chain is now built dynamically from real-time Chutes utiliza
 
 | Date | Decision | Why |
 |------|----------|-----|
+| 2026-04-15 | Fix semaphore race condition in concurrency_guard.py | Pre-acquire slots for in-flight requests when creating new semaphore during backoff. Fixes "9/8 slots" error causing cascading batch failures. |
 | 2026-04-15 | Standalone Docker deployment with bundled services | Power users get self-contained `docker compose up`. Memory service copied (not published image) because both projects under active development. |
 | 2026-04-15 | Dynamic fallback chains from Chutes utilization | Entire chain built at runtime, sorted by utilization score. Fixes 429s reaching clients from dynamically discovered models. |
 | 2026-04-14 | CWE batch uses 6 Chutes models only | No OAuth (ban risk), no external DeepSeek (paid), no Gemini. All models verified 100% QRA grounding. Qwen3.5-397B is slowest last resort. |

@@ -283,12 +283,25 @@ def _record_429(provider: str, retry_after: int | None = None) -> None:
     if new_limit < current:
         _effective_limits[provider] = new_limit
         _last_recovery[provider] = now
+
+        # CRITICAL: Pre-acquire slots for requests still in flight
+        # Without this, new semaphore has all slots available, allowing
+        # _in_flight to exceed the limit (race condition causing "9/8 slots" errors)
+        current_in_flight = _in_flight.get(provider, 0)
+        slots_to_reserve = min(current_in_flight, new_limit)
+
         logger.warning(
-            "concurrency_guard: {} concurrency reduced {} → {} (will recover after pause)",
-            provider, current, new_limit,
+            "concurrency_guard: {} concurrency reduced {} → {} (reserving {} slots for {} in-flight)",
+            provider, current, new_limit, slots_to_reserve, current_in_flight,
         )
-        # Recreate semaphore with lower limit (existing in-flight will drain)
-        _semaphores[provider] = asyncio.Semaphore(new_limit)
+
+        # Create new semaphore and immediately reserve slots for in-flight requests
+        new_sem = asyncio.Semaphore(new_limit)
+        for _ in range(slots_to_reserve):
+            # Non-blocking acquire since we just created the semaphore
+            new_sem.acquire_nowait()
+        _semaphores[provider] = new_sem
+
         # Persist state change to ArangoDB
         asyncio.create_task(_persist_state())
 
@@ -340,10 +353,18 @@ def _maybe_recover(provider: str) -> None:
     new_limit = min(configured, current + 1)
     _effective_limits[provider] = new_limit
     _last_recovery[provider] = now
-    _semaphores[provider] = asyncio.Semaphore(new_limit)
+
+    # Reserve slots for in-flight requests (same fix as _record_429)
+    current_in_flight = _in_flight.get(provider, 0)
+    slots_to_reserve = min(current_in_flight, new_limit)
+    new_sem = asyncio.Semaphore(new_limit)
+    for _ in range(slots_to_reserve):
+        new_sem.acquire_nowait()
+    _semaphores[provider] = new_sem
+
     logger.info(
-        "concurrency_guard: {} recovery — no 429s for {:.0f}s, restoring {} → {}",
-        provider, _RECOVERY_INTERVAL_S, current, new_limit,
+        "concurrency_guard: {} recovery — no 429s for {:.0f}s, restoring {} → {} (reserved {} for in-flight)",
+        provider, _RECOVERY_INTERVAL_S, current, new_limit, slots_to_reserve,
     )
     # Persist recovery state
     asyncio.create_task(_persist_state())
@@ -487,19 +508,39 @@ class ConcurrencyMiddleware(BaseMiddleware):
             _queue_depth[provider] = max(0, _queue_depth.get(provider, 0) - 1)
             current_queued = _queue_depth.get(provider, 0)
             effective = _effective_limits.get(provider, limit)
+            in_flight = _in_flight.get(provider, 0)
             logger.warning(
                 "concurrency_guard: {} queue timeout after {:.0f}s ({} still queued, {} in-flight, limit {})",
-                provider, QUEUE_TIMEOUT_S, current_queued, _in_flight.get(provider, 0), effective,
+                provider, QUEUE_TIMEOUT_S, current_queued, in_flight, effective,
             )
             # REJECT — bypassing the semaphore causes connection drops when we exceed
             # the provider's actual concurrency limit. Clean 429 rejection lets callers
             # retry with backoff instead of silent "server disconnected" failures.
-            raise MiddlewareReject(
-                f"Queue timeout: {provider} has {_in_flight.get(provider, 0)} in-flight requests "
-                f"(limit {effective}). Request waited {QUEUE_TIMEOUT_S:.0f}s for a slot. "
-                f"Reduce batch concurrency or increase QUEUE_TIMEOUT_S.",
-                status_code=429,
-            )
+
+            # Build informative message based on queue state
+            if in_flight >= effective and current_queued > 0:
+                # All slots full + others queued = another batch job is running
+                msg = (
+                    f"BUSY: {provider} has {in_flight}/{effective} slots in use with {current_queued} "
+                    f"requests still queued. Another batch job is likely running. "
+                    f"Your request waited {QUEUE_TIMEOUT_S:.0f}s for a slot. "
+                    f"Retry with exponential backoff (e.g., wait 30-60s and retry)."
+                )
+            elif in_flight >= effective:
+                # All slots full, no queue = you're competing with concurrent requests
+                msg = (
+                    f"BUSY: {provider} has {in_flight}/{effective} slots in use. "
+                    f"Your request waited {QUEUE_TIMEOUT_S:.0f}s for a slot. "
+                    f"The proxy is processing other requests. Retry in 30-60s."
+                )
+            else:
+                # Shouldn't happen, but fallback message
+                msg = (
+                    f"Queue timeout: {provider} ({in_flight}/{effective} slots). "
+                    f"Request waited {QUEUE_TIMEOUT_S:.0f}s. Retry with backoff."
+                )
+
+            raise MiddlewareReject(msg, status_code=429)
 
         queue_wait_ms = int((time.monotonic() - queue_start) * 1000)
         _queue_depth[provider] = max(0, _queue_depth.get(provider, 0) - 1)

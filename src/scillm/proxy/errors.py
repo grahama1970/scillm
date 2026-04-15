@@ -98,7 +98,8 @@ _ERROR_ADVICE: dict[str, str] = {
 }
 
 _MESSAGE_ADVICE: list[tuple[str, str]] = [
-    ("queue timeout", "Batch too large. Use CHUNK_SIZE=4 loop instead of firing all requests at once."),
+    ("queue timeout", "All slots busy (likely another batch running). Retry with backoff: await asyncio.sleep(30) then retry."),
+    ("busy:", "Slots busy (batch in progress). Wait and retry with exponential backoff."),
     ("no instances available", "Model cold on Chutes. Proxy will cascade to fallback. Wait 60s for warmup."),
     ("context length", "Prompt too long. Reduce input size or use text-gemini (1M context)."),
     ("content policy", "Content filtered. Rephrase the prompt to avoid policy triggers."),
