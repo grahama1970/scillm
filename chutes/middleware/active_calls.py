@@ -10,7 +10,7 @@ import uuid
 from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from threading import Lock
+import asyncio
 from typing import Any
 
 from scillm.proxy.middleware import BaseMiddleware
@@ -52,7 +52,7 @@ class CompletedCall:
 
 # Global registry of active calls
 _active_calls: dict[str, ActiveCall] = {}
-_lock = Lock()
+_lock = asyncio.Lock()
 
 # Rolling window of completed calls for activity graph (last 5 minutes)
 _completed_calls: deque[CompletedCall] = deque(maxlen=1000)
@@ -61,14 +61,15 @@ _WINDOW_SECONDS = 300  # 5 minutes
 
 def get_active_calls() -> list[dict]:
     """Return list of all active calls (for /v1/scillm/active-calls endpoint)."""
-    with _lock:
-        return [c.to_dict() for c in _active_calls.values()]
+    # Snapshot copy - safe without lock for read-only access
+    calls = list(_active_calls.values())
+    return [c.to_dict() for c in calls]
 
 
 def get_active_count() -> int:
     """Return count of active calls."""
-    with _lock:
-        return len(_active_calls)
+    # Dict len is atomic, no lock needed for read
+    return len(_active_calls)
 
 
 def get_activity_graph(bucket_seconds: int = 10) -> dict:
@@ -99,23 +100,24 @@ def get_activity_graph(bucket_seconds: int = 10) -> dict:
             "latency_sum": 0,
         })
 
-    with _lock:
-        # Prune old entries
-        while _completed_calls and _completed_calls[0].ts < cutoff:
-            _completed_calls.popleft()
+    # Snapshot copy for read-only access - no lock needed
+    # Note: deque iteration is thread-safe for reads
+    completed_snapshot = list(_completed_calls)
 
-        # Bucket the calls
-        for call in _completed_calls:
-            bucket_idx = int((call.ts - (now - _WINDOW_SECONDS)) / bucket_seconds)
-            if 0 <= bucket_idx < num_buckets:
-                buckets[bucket_idx]["total"] += 1
-                if call.success:
-                    buckets[bucket_idx]["success"] += 1
-                else:
-                    buckets[bucket_idx]["error"] += 1
-                buckets[bucket_idx]["latency_sum"] += call.duration_ms
+    # Bucket the calls
+    for call in completed_snapshot:
+        if call.ts < cutoff:
+            continue  # Skip old entries
+        bucket_idx = int((call.ts - (now - _WINDOW_SECONDS)) / bucket_seconds)
+        if 0 <= bucket_idx < num_buckets:
+            buckets[bucket_idx]["total"] += 1
+            if call.success:
+                buckets[bucket_idx]["success"] += 1
+            else:
+                buckets[bucket_idx]["error"] += 1
+            buckets[bucket_idx]["latency_sum"] += call.duration_ms
 
-        active_count = len(_active_calls)
+    active_count = len(_active_calls)
 
     # Compute avg latency
     for b in buckets:
@@ -170,7 +172,7 @@ class ActiveCallsMiddleware(BaseMiddleware):
             stream=bool(request.get("stream")),
         )
 
-        with _lock:
+        async with _lock:
             _active_calls[call_id] = call
 
         return request
@@ -178,7 +180,7 @@ class ActiveCallsMiddleware(BaseMiddleware):
     async def post_call(self, request: dict, response: Any) -> Any:
         call_id = request.get("_active_call_id")
         if call_id:
-            with _lock:
+            async with _lock:
                 active = _active_calls.pop(call_id, None)
                 if active:
                     duration_ms = round((time.monotonic() - active.started_at) * 1000)
@@ -194,7 +196,7 @@ class ActiveCallsMiddleware(BaseMiddleware):
     async def on_error(self, request: dict, error: Exception) -> None:
         call_id = request.get("_active_call_id")
         if call_id:
-            with _lock:
+            async with _lock:
                 active = _active_calls.pop(call_id, None)
                 if active:
                     duration_ms = round((time.monotonic() - active.started_at) * 1000)

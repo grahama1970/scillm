@@ -184,3 +184,19 @@ def get_abuse_status() -> Dict[str, Any]:
         "clients_with_errors": len(_client_errors),
         "blocked": blocked,
     }
+
+
+def reset_abuse_guard() -> Dict[str, Any]:
+    """Clear all blocked clients and error history. Returns stats before reset."""
+    now = time.monotonic()
+    blocked_count = len([c for c, t in _blocked_clients.items() if t > now])
+    error_count = len(_client_errors)
+
+    _blocked_clients.clear()
+    _client_errors.clear()
+
+    return {
+        "ok": True,
+        "clients_unblocked": blocked_count,
+        "error_history_cleared": error_count,
+    }

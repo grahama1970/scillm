@@ -940,6 +940,27 @@ async def scillm_concurrency_reset(request: Request, provider: str = ""):
         return {"ok": False, "error": "ConcurrencyGuard not loaded"}
 
 
+@app.post("/v1/scillm/abuse-guard/reset")
+async def scillm_abuse_guard_reset(request: Request):
+    """Reset abuse guard — unblock all clients and clear error history.
+
+    Use when a failed batch has incorrectly blocked your API key.
+    Abuse guard blocks clients after 5+ 4xx errors in 30 seconds.
+
+    Example: POST /v1/scillm/abuse-guard/reset
+    """
+    auth_err = _check_auth(request)
+    if auth_err:
+        raise ProxyError(401, auth_err, "authentication_error")
+
+    try:
+        from chutes.middleware.abuse_guard import reset_abuse_guard
+        result = reset_abuse_guard()
+        return result
+    except ImportError:
+        return {"ok": False, "error": "AbuseGuard not loaded"}
+
+
 @app.get("/v1/scillm/models")
 async def scillm_models(request: Request):
     """List model groups and aliases."""

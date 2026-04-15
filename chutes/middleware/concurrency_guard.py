@@ -89,7 +89,9 @@ QUEUE_TIMEOUT_S = 60.0        # Queued requests time out after 60s (fail fast, l
 # ── Slot age tracking (zombie slot protection) ───────────────────────────
 # If upstream hangs past timeout without raising an exception, slots stay
 # occupied forever. Track acquire time and release stale slots.
-SLOT_MAX_AGE_S = 300.0        # Release slots held longer than 5 minutes
+# Set to 90s to match QUEUE_TIMEOUT_S (60s) + buffer. Was 300s which caused
+# 4+ minute zombie delays during batch operations.
+SLOT_MAX_AGE_S = 90.0         # Release slots held longer than 90 seconds
 _STALE_CHECK_INTERVAL_S = 30.0  # How often to check for stale slots
 
 # ── Batch abuse detection ────────────────────────────────────────────────
@@ -449,18 +451,31 @@ def _release(provider: str, request_id: str | None = None) -> None:
 
 
 _stale_cleanup_task: asyncio.Task | None = None
+_cleanup_restart_count: int = 0
+_MAX_CLEANUP_RESTARTS = 10  # Max restarts before giving up
 
 
 async def _background_stale_cleanup() -> None:
-    """Background task to release stale slots every 30s, independent of request flow."""
+    """Background task to release stale slots every 30s, independent of request flow.
+
+    If this task dies, start_background_cleanup will restart it on the next request.
+    """
+    global _cleanup_restart_count
     while True:
-        await asyncio.sleep(30.0)
         try:
+            await asyncio.sleep(30.0)
             released = _release_stale_slots_force()
             if released > 0:
                 logger.warning("concurrency_guard: background cleanup released {} stale slots", released)
+            # Reset restart count on successful iteration
+            _cleanup_restart_count = 0
+        except asyncio.CancelledError:
+            logger.info("concurrency_guard: background cleanup task cancelled")
+            raise  # Let the task end cleanly
         except Exception as exc:
-            logger.debug("concurrency_guard: background cleanup error: {}", exc)
+            logger.error("concurrency_guard: background cleanup error (will retry): {}", exc)
+            # Sleep briefly to avoid spin-looping on persistent errors
+            await asyncio.sleep(5.0)
 
 
 def _release_stale_slots_force() -> int:
@@ -486,11 +501,27 @@ def _release_stale_slots_force() -> int:
 
 
 def start_background_cleanup() -> None:
-    """Start the background stale cleanup task. Call once on app startup."""
-    global _stale_cleanup_task
-    if _stale_cleanup_task is None or _stale_cleanup_task.done():
+    """Start the background stale cleanup task. Restarts if it died."""
+    global _stale_cleanup_task, _cleanup_restart_count
+
+    if _stale_cleanup_task is None:
         _stale_cleanup_task = asyncio.create_task(_background_stale_cleanup())
         logger.info("concurrency_guard: started background stale cleanup task")
+    elif _stale_cleanup_task.done():
+        # Task died - check if we should restart
+        _cleanup_restart_count += 1
+        if _cleanup_restart_count <= _MAX_CLEANUP_RESTARTS:
+            # Log the exception that killed it if any
+            exc = _stale_cleanup_task.exception() if not _stale_cleanup_task.cancelled() else None
+            if exc:
+                logger.error("concurrency_guard: cleanup task died (restart {}/{}): {}",
+                            _cleanup_restart_count, _MAX_CLEANUP_RESTARTS, exc)
+            _stale_cleanup_task = asyncio.create_task(_background_stale_cleanup())
+            logger.warning("concurrency_guard: restarted background cleanup task (restart {}/{})",
+                          _cleanup_restart_count, _MAX_CLEANUP_RESTARTS)
+        else:
+            logger.error("concurrency_guard: cleanup task failed {} times, giving up. "
+                        "Zombie slots will not be auto-cleaned!", _MAX_CLEANUP_RESTARTS)
 
 
 class ConcurrencyMiddleware(BaseMiddleware):

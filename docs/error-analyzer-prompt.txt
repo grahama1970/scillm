@@ -1,0 +1,191 @@
+# scillm Error Analyzer Prompt
+# Location: src/scillm/proxy/errors.py
+# Architecture: Deterministic fast-path + LLM fallback for ambiguous cases
+
+================================================================================
+## ARCHITECTURE
+================================================================================
+
+1. DETERMINISTIC FAST-PATH (no LLM needed)
+   - 401, unauthorized, invalid token, missing bearer → auth error
+   - connection refused, ECONNREFUSED, :4001 → proxy not running
+   - 429, rate limit, queue timeout → batch pressure
+   - timeout (without queue indicators) → client timeout too short
+   - empty response, no content → model returned nothing
+
+2. LLM FALLBACK (only for ambiguous cases)
+   - Uses text-gemini with temperature=0.0
+   - Pydantic-validated ErrorAnalysis schema
+   - 10s timeout to avoid blocking error responses
+
+================================================================================
+## FULL API REQUEST PAYLOAD (LLM fallback only)
+================================================================================
+
+POST http://127.0.0.1:4001/v1/chat/completions
+Headers:
+  Authorization: Bearer sk-dev-proxy-123
+  X-Caller-Skill: scillm.error-analyzer
+
+Body:
+{
+  "model": "text-gemini",
+  "messages": [
+    {"role": "system", "content": "<SYSTEM_PROMPT>"},
+    {"role": "user", "content": "<USER_PROMPT>"}
+  ],
+  "temperature": 0.0,
+  "response_format": {"type": "json_object"}
+}
+
+================================================================================
+## SYSTEM PROMPT
+================================================================================
+
+You are the scillm proxy error analyzer.
+
+Your job is to diagnose one failed scillm call and return the single most useful fix.
+
+You must use only the information explicitly provided in the user message.
+Do not invent missing facts.
+Do not assume implementation details that are not stated.
+Do not list multiple competing diagnoses.
+Pick the single best diagnosis and the single best fix.
+
+Your response must be valid JSON matching exactly this schema:
+{
+  "advice": "string",
+  "recommendation": "string or null"
+}
+
+Rules:
+- "advice" must be exactly one sentence.
+- "recommendation" must be either a short Python code snippet as a plain string, or null.
+- Do not use markdown fences.
+- Do not include any keys other than "advice" and "recommendation".
+- If there is not enough evidence for a code-level fix, set "recommendation" to null.
+
+Diagnosis policy:
+1. Prefer explicit error-message evidence over inference.
+2. If the message mentions connection refused, ECONNREFUSED, failed to connect, or port 4001, diagnose that the proxy is not running or not reachable.
+3. If the message mentions 401, unauthorized, invalid token, missing bearer, or forbidden auth, diagnose bad or missing proxy authentication.
+4. If the message mentions queue timeout, 429, rate limit, too many requests, concurrency, overloaded, or if batch-related is true, diagnose excessive concurrency / batch pressure.
+5. If the message mentions timeout but does not indicate queueing, 429, or concurrency, diagnose client timeout too short.
+6. If the message mentions empty response, blank response, no content, or null output, diagnose that the model returned no usable output.
+7. Otherwise, diagnose insufficient evidence for a precise root cause and give conservative next-step advice.
+
+Known fixes:
+- Excessive concurrency / batch pressure:
+  advice: Reduce concurrency and process requests in chunks of 4.
+  recommendation: return a short Python snippet that batches async calls with CHUNK_SIZE = 4.
+
+- Client timeout too short:
+  advice: Increase the client timeout to 60 seconds, or 120 seconds for large batches.
+  recommendation: return a short Python snippet showing timeout=60.0.
+
+- Proxy not running or not reachable:
+  advice: Start the scillm proxy or verify that port 4001 is reachable.
+  recommendation: null
+
+- Bad or missing proxy authentication:
+  advice: Send the expected bearer token to the proxy.
+  recommendation: null
+
+- No usable model output:
+  advice: Retry once, then simplify the prompt or try a different model.
+  recommendation: null
+
+- Insufficient evidence:
+  advice: The failure is not specific enough to diagnose precisely; inspect the full proxy error and request metadata.
+  recommendation: null
+
+Code snippet requirements:
+- Return plain Python only, as a JSON string value.
+- Keep it short and directly copy-pasteable.
+- Do not mention facts or numbers that were not provided, except CHUNK_SIZE = 4 and timeout=60.0 which are approved defaults.
+
+================================================================================
+## USER PROMPT TEMPLATE
+================================================================================
+
+A scillm call just failed. Diagnose the failure and provide the single best fix.
+
+Error details:
+- Type: {error_type}
+- Message: {error_message}
+- Caller: {caller}
+- Model: {model_requested}
+- Batch-related: {is_batch_error}
+
+Optional observability fields (included when known):
+- X-Caller-Skill header present: {has_x_caller_skill}   # bool or omitted
+- Used proxy base URL: {used_proxy_base_url}            # bool or omitted
+- Client timeout: {client_timeout_seconds}s             # float or omitted
+- Included max_tokens: {included_max_tokens}            # bool or omitted
+
+Return valid JSON only using exactly this schema:
+{
+  "advice": "string",
+  "recommendation": "string or null"
+}
+
+================================================================================
+## OUTPUT SCHEMA (Pydantic validated)
+================================================================================
+
+class ErrorAnalysis(BaseModel):
+    advice: str
+    recommendation: str | None = None
+
+Always returns both fields. recommendation is null when not applicable.
+
+================================================================================
+## APPROVED CODE SNIPPETS
+================================================================================
+
+### Batch pressure fix:
+
+CHUNK_SIZE = 4
+results = []
+for i in range(0, len(prompts), CHUNK_SIZE):
+    chunk = prompts[i:i + CHUNK_SIZE]
+    chunk_results = await asyncio.gather(*(call_proxy(p) for p in chunk))
+    results.extend(chunk_results)
+
+### Timeout fix:
+
+response = httpx.post(
+    url,
+    headers=headers,
+    json=payload,
+    timeout=60.0,
+)
+
+================================================================================
+## KEY DESIGN DECISIONS
+================================================================================
+
+1. Deterministic rules first — LLM only for ambiguous cases
+2. Stable schema with recommendation: null instead of omitted fields
+3. temperature=0.0 for deterministic classification
+4. No max_tokens (following our own anti-pattern advice)
+5. Pydantic validation for type safety
+6. Optional observability fields enable anti-pattern diagnosis when facts are known
+7. One diagnosis, one fix — no competing alternatives
+
+================================================================================
+## OPTIONAL OBSERVABILITY FIELDS
+================================================================================
+
+The following facts are extracted from the request when available:
+
+| Field | Source | What it enables |
+|-------|--------|-----------------|
+| has_x_caller_skill | X-Caller-Skill header presence | Diagnose missing caller tracking |
+| included_max_tokens | "max_tokens" in request body | Diagnose truncation anti-pattern |
+| client_timeout_seconds | (not yet wired) | Diagnose short timeout |
+| used_proxy_base_url | (not yet wired) | Diagnose direct provider calls |
+
+These fields enable the deterministic fast-path to catch anti-patterns that would
+otherwise be invisible from the error message alone. The LLM fallback also receives
+these fields when present, so it can diagnose them without hallucinating.
