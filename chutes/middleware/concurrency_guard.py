@@ -84,7 +84,7 @@ PROVIDER_LIMITS: Dict[str, int] = _load_provider_limits()
 
 # ── Queue safety bounds ──────────────────────────────────────────────────
 MAX_QUEUE_PER_PROVIDER = 0    # 0 = unlimited queue depth (no rejection)
-QUEUE_TIMEOUT_S = 60.0        # Queued requests time out after 60s (fail fast, let agents retry)
+QUEUE_TIMEOUT_S = 600.0       # 10 min timeout — let 100+ requests queue and complete without failing
 
 # ── Slot age tracking (zombie slot protection) ───────────────────────────
 # If upstream hangs past timeout without raising an exception, slots stay
@@ -95,10 +95,10 @@ SLOT_MAX_AGE_S = 90.0         # Release slots held longer than 90 seconds
 _STALE_CHECK_INTERVAL_S = 30.0  # How often to check for stale slots
 
 # ── Batch abuse detection ────────────────────────────────────────────────
-# Detect when callers fire too many requests at once (common agent mistake).
-# These thresholds trigger warnings/rejections with helpful guidance.
-QUEUE_WARNING_THRESHOLD = 20   # Add warning header when queue exceeds this
-QUEUE_REJECT_THRESHOLD = 100   # Reject with helpful 429 when queue exceeds this
+# With 10 min timeout, queue can hold ~100 requests without timing out.
+# Disable rejection — let requests queue and scillm handles the rate limiting.
+QUEUE_WARNING_THRESHOLD = 50   # Warn at 50 queued (for debugging)
+QUEUE_REJECT_THRESHOLD = 0     # 0 = disabled — never reject, always queue
 
 # ── Adaptive backpressure ─────────────────────────────────────────────────
 # When upstream returns 429, reduce effective concurrency. Recover slowly.
