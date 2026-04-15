@@ -221,16 +221,27 @@ async def load_state_from_arango() -> None:
 def _resolve_provider(model: str) -> str:
     """Determine provider key from model name."""
     model_lower = model.lower()
-    for provider in PROVIDER_LIMITS:
-        if provider in model_lower:
-            return provider
-    # Common prefix patterns
+
+    # ── Chutes detection FIRST (Org/Model format) ─────────────────────────
+    # Models like "deepseek-ai/DeepSeek-V3.1-TEE" or "Qwen/Qwen3-30B" are Chutes
+    # Must check BEFORE substring matching, otherwise "deepseek" in model_lower
+    # would incorrectly resolve to the "deepseek" provider (direct API, not Chutes)
+    if "/" in model_lower and not model_lower.startswith("http"):
+        return "chutes"
+
+    # ── Common prefix patterns ────────────────────────────────────────────
     if model_lower.startswith("text"):
         return "chutes"
     if model_lower.startswith("local"):
         return "ollama"
     if model_lower.startswith("vlm"):
         return "gemini"  # VLM cascade starts with Gemini
+
+    # ── Substring matching for provider names ─────────────────────────────
+    for provider in PROVIDER_LIMITS:
+        if provider in model_lower:
+            return provider
+
     return "default"
 
 
