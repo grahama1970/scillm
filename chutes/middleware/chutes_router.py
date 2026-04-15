@@ -18,9 +18,6 @@ from __future__ import annotations
 import os
 import re
 import time
-from datetime import datetime
-from typing import Any
-from zoneinfo import ZoneInfo
 
 import httpx
 from loguru import logger
@@ -33,6 +30,49 @@ from loguru import logger
 # Regex to extract parameter count from model names (e.g., "235B", "32B", "0.6B")
 _SIZE_PATTERN = re.compile(r"(\d+(?:\.\d+)?)\s*[Bb]", re.IGNORECASE)
 
+# HuggingFace metadata cache: repo_id -> {"size_b": float, "tags": [...]}
+_hf_cache: dict[str, dict] = {}
+_HF_API_BASE = "https://huggingface.co/api/models"
+
+
+async def _lookup_hf_metadata(repo_id: str) -> dict | None:
+    """Fetch model metadata from HuggingFace API. Cached permanently."""
+    if repo_id in _hf_cache:
+        return _hf_cache[repo_id]
+
+    # Skip non-HF format names
+    if "/" not in repo_id:
+        return None
+
+    try:
+        client = _get_client()
+        resp = await client.get(f"{_HF_API_BASE}/{repo_id}", timeout=5.0)
+        if resp.status_code != 200:
+            logger.debug("hf_lookup: {} returned {}", repo_id, resp.status_code)
+            _hf_cache[repo_id] = {}  # Cache negative result
+            return None
+
+        data = resp.json()
+        # Extract size from safetensors total (bytes → billions)
+        size_b = None
+        if "safetensors" in data and "total" in data["safetensors"]:
+            size_bytes = data["safetensors"]["total"]
+            # Rough: 2 bytes per param (fp16), so bytes/2 = params
+            size_b = size_bytes / 2 / 1e9
+
+        metadata = {
+            "size_b": size_b,
+            "tags": data.get("tags", []),
+            "pipeline_tag": data.get("pipeline_tag"),
+        }
+        _hf_cache[repo_id] = metadata
+        logger.debug("hf_lookup: {} → {:.1f}B, tags={}", repo_id, size_b or 0, metadata["tags"][:3])
+        return metadata
+    except Exception as e:
+        logger.debug("hf_lookup: {} failed: {}", repo_id, e)
+        _hf_cache[repo_id] = {}  # Cache failure
+        return None
+
 
 def _extract_size_b(model_name: str) -> float | None:
     """Extract model size in billions from name. Returns None if not found."""
@@ -42,11 +82,27 @@ def _extract_size_b(model_name: str) -> float | None:
     return None
 
 
-def _is_large_model(model_name: str, threshold_b: float = 100.0) -> bool:
-    """Check if model has >= threshold_b billion parameters."""
+async def _get_size_b(model_name: str) -> float | None:
+    """Get model size: HuggingFace first (authoritative), regex fallback."""
+    # Primary: HuggingFace API (cached after first call)
+    if "/" in model_name:
+        metadata = await _lookup_hf_metadata(model_name)
+        if metadata and metadata.get("size_b"):
+            return metadata["size_b"]
+
+    # Fallback: regex extraction from name (for non-HF models or HF failures)
     size = _extract_size_b(model_name)
+    if size is not None:
+        return size
+
+    return None
+
+
+async def _is_large_model(model_name: str, threshold_b: float = 100.0) -> bool:
+    """Check if model has >= threshold_b billion parameters."""
+    size = await _get_size_b(model_name)
     if size is None:
-        # DeepSeek V3/R1 without explicit size are 671B
+        # DeepSeek V3/R1 without explicit size are 671B (HF may not have safetensors)
         name_lower = model_name.lower()
         if "deepseek" in name_lower and any(x in name_lower for x in ["v3", "r1", "chimera"]):
             return True
@@ -60,20 +116,14 @@ def _is_chat_model(model_name: str) -> bool:
     non_chat = ["embedding", "guard", "coder", "vlm", "vl-", "vision"]
     return not any(x in name_lower for x in non_chat)
 
-# Time-based routing: Claude during day, Chutes at night
-_ET_TIMEZONE = ZoneInfo("America/New_York")
-_DAYTIME_START = 7   # 7 AM ET
-_DAYTIME_END = 22    # 10 PM ET
-_DAYTIME_MODEL = "claude-sonnet-4-6"  # Reliable model for daytime
+# Time-based routing disabled — always use Chutes dynamic routing
+_DAYTIME_MODEL = "claude-sonnet-4-6"  # Fallback if re-enabled
 
 
 def _is_daytime() -> bool:
-    """Check if current time is daytime (7AM-10PM ET).
+    """Disabled — always use Chutes dynamic routing."""
+    return False
 
-    DISABLED: Always use Chutes with dynamic routing to find least saturated model.
-    Claude OAuth should not be used for batch processing (ToS risk).
-    """
-    return False  # Disabled - use Chutes dynamic routing instead
 
 from scillm.proxy.middleware import BaseMiddleware
 
@@ -87,11 +137,7 @@ _utilization_cache: dict | None = None
 _cache_timestamp: float = 0
 
 # Rate limit threshold - avoid models with high rate limiting
-# 25% threshold balances avoiding saturated models vs having options
 _RATE_LIMIT_THRESHOLD = 0.25
-
-# Utilization threshold - prefer models under 80% utilization
-_UTILIZATION_PREFERRED = 0.80
 _UTILIZATION_MAX = 0.95  # Avoid models over 95% utilization
 
 # Lazy-init httpx client
@@ -108,16 +154,8 @@ def _get_client() -> httpx.AsyncClient:
 
 
 # ---------------------------------------------------------------------------
-# Model family patterns - dynamically match models from utilization API
+# Model family matching with dynamic size extraction
 # ---------------------------------------------------------------------------
-
-# Pattern matchers for 671B DeepSeek models (V3, R1, Chimera variants)
-_DEEPSEEK_671B_PATTERNS = [
-    "deepseek-v3",
-    "deepseek-r1",
-    "deepseek-tng",
-    "chimera",
-]
 
 # Alias to family mapping - enables dynamic routing for family-specific aliases
 # When user requests "text-qwen3", they get dynamic routing within the qwen3 family
@@ -131,12 +169,12 @@ ALIAS_TO_FAMILY: dict[str, str] = {
 }
 
 
-def _matches_family(model_name: str, family: str) -> bool:
-    """Check if model matches family using dynamic size extraction.
+async def _matches_family(model_name: str, family: str) -> bool:
+    """Check if model matches family using HuggingFace metadata.
 
     Family matching is now based on:
     1. Model name patterns (deepseek, qwen3, kimi)
-    2. Dynamically extracted size from name (>= 100B for "large" families)
+    2. Size from HuggingFace API (>= 100B for "large" families)
     3. Model type (chat vs embedding/guard/coder)
     """
     name_lower = model_name.lower()
@@ -147,19 +185,19 @@ def _matches_family(model_name: str, family: str) -> bool:
             return False
         if "distill" in name_lower or "lite" in name_lower:
             return False
-        return _is_large_model(model_name) and _is_chat_model(model_name)
+        return await _is_large_model(model_name) and _is_chat_model(model_name)
 
     elif family == "qwen3-large":
         # Must be Qwen3, large (>=100B), and chat model
         if "qwen3" not in name_lower and "qwen/qwen3" not in name_lower:
             return False
-        return _is_large_model(model_name) and _is_chat_model(model_name)
+        return await _is_large_model(model_name) and _is_chat_model(model_name)
 
     elif family == "qwen3-small":
         # Qwen3 under 100B
         if "qwen3" not in name_lower and "qwen/qwen3" not in name_lower:
             return False
-        size = _extract_size_b(model_name)
+        size = await _get_size_b(model_name)
         if size is None:
             return False
         return size < 100 and _is_chat_model(model_name)
@@ -174,11 +212,11 @@ def _matches_family(model_name: str, family: str) -> bool:
 _FAMILIES = ["deepseek-large", "qwen3-large", "qwen3-small", "kimi"]
 
 
-def _build_dynamic_families(util_data: list[dict]) -> dict[str, list[str]]:
+async def _build_dynamic_families(util_data: list[dict]) -> dict[str, list[str]]:
     """Build model families dynamically from utilization API data.
 
-    Discovers all available models and groups them by family using dynamic
-    size extraction from model names.
+    Discovers all available models and groups them by family using
+    HuggingFace metadata for size information.
     """
     families: dict[str, list[str]] = {f: [] for f in _FAMILIES}
 
@@ -188,7 +226,7 @@ def _build_dynamic_families(util_data: list[dict]) -> dict[str, list[str]]:
             continue
 
         for family in _FAMILIES:
-            if _matches_family(name, family):
+            if await _matches_family(name, family):
                 families[family].append(name)
                 break  # Model belongs to first matching family only
 
@@ -269,8 +307,8 @@ async def _get_utilization() -> dict[str, dict]:
     _utilization_cache = cache
     _cache_timestamp = now
 
-    # Build dynamic families from the API data
-    _dynamic_families = _build_dynamic_families(raw)
+    # Build dynamic families from the API data (uses HF API for size lookup)
+    _dynamic_families = await _build_dynamic_families(raw)
     _families_timestamp = now
 
     logger.info(
@@ -306,16 +344,6 @@ def _score_model(stats: dict) -> float:
     # Score based on utilization (0-80 range)
     # Prefer models in 10-70% range (warm but not saturated)
     return util * 80
-
-
-async def _select_best_variant(family: str, util_cache: dict[str, dict]) -> str | None:
-    """Select the best model variant from a family based on utilization.
-
-    Returns the model name with lowest score, or None if no good options.
-    Uses dynamically discovered families from the utilization API.
-    """
-    chain = await _build_dynamic_chain(family, util_cache)
-    return chain[0] if chain else None
 
 
 async def _build_dynamic_chain(family: str, util_cache: dict[str, dict]) -> list[str]:
@@ -502,6 +530,6 @@ def get_router() -> ChutesRouter:
     return _router_instance
 
 
-async def chutes_router(data: dict, *args, **kwargs) -> dict:
+async def chutes_router(data: dict, *_args, **_kwargs) -> dict:
     """Callback-style interface for success_callback."""
     return await get_router().pre_call(data) or data
