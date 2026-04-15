@@ -14,13 +14,17 @@ Single-tenant LLM proxy that unifies your **paid subscriptions** (Claude Max, Co
 
 ## Quick Start
 
+### Option A: Standalone (Recommended for new users)
+
+Self-contained deployment with all services included (ArangoDB, memory service, embedding service).
+
 ```bash
 # 1. Configure API keys
 cp .env.example .env
 # Edit .env — set at minimum: CHUTES_API_KEY, CHUTES_API_BASE
 
-# 2. Build and start
-docker compose -p scillm -f deploy/docker/compose.scillm.core.yml up -d --build
+# 2. Build and start (first run takes ~5 min to download models)
+docker compose -p scillm -f deploy/docker/compose.scillm.standalone.yml up -d --build
 
 # 3. Verify
 curl -s http://localhost:4001/health/liveliness
@@ -30,7 +34,22 @@ curl -s http://localhost:4001/health/liveliness
 curl http://localhost:4001/v1/chat/completions \
   -H "Authorization: Bearer sk-dev-proxy-123" \
   -H "Content-Type: application/json" \
-  -d '{"model":"text","messages":[{"role":"user","content":"hi"}],"max_tokens":16}'
+  -d '{"model":"text","messages":[{"role":"user","content":"hi"}]}'
+```
+
+**Services started:**
+- `scillm-proxy` (:4001) — Main LLM gateway
+- `scillm-memory` (:8601) — Logging, batch resume, latency stats
+- `scillm-embedding` (:8602) — Sentence embeddings
+- `scillm-arangodb` (:8529) — Database
+- `scillm-utls-proxy` (:8444) — TLS fingerprint for Codex
+
+### Option B: Core Only (For existing infrastructure)
+
+Minimal deployment — assumes memory service (:8601) is already running on host.
+
+```bash
+docker compose -p scillm -f deploy/docker/compose.scillm.core.yml up -d --build
 ```
 
 ## Provider Setup

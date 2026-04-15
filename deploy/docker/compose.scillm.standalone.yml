@@ -1,0 +1,164 @@
+# scillm Standalone Deployment
+# Self-contained: includes ArangoDB, memory service, embedding service, and proxy.
+# For external users who want everything in one `docker compose up`.
+#
+# Usage:
+#   docker compose -p scillm -f deploy/docker/compose.scillm.standalone.yml up -d --build
+#
+# Services:
+#   - arangodb     :8529  Database for memory service
+#   - memory       :8601  Memory API (logging, batch resume, latency stats)
+#   - embedding    :8602  Embedding service (sentence-transformers)
+#   - utls-proxy   :8444  TLS fingerprint proxy for Codex
+#   - scillm-proxy :4001  Main LLM proxy
+#
+# Note: For internal/development use where services already run on host,
+# use compose.scillm.core.yml instead.
+
+services:
+  # ---------------------------------------------------------------------------
+  # Infrastructure
+  # ---------------------------------------------------------------------------
+
+  arangodb:
+    image: arangodb:3.12
+    container_name: scillm-arangodb
+    environment:
+      ARANGO_ROOT_PASSWORD: ${ARANGO_PASS:-openSesame}
+    volumes:
+      - arangodb-data:/var/lib/arangodb3
+    ports:
+      - "127.0.0.1:8529:8529"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8529/_api/version"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  # ---------------------------------------------------------------------------
+  # Memory Service (logging, batch resume, latency stats)
+  # ---------------------------------------------------------------------------
+
+  memory:
+    build:
+      context: ../../services/memory
+      dockerfile: Dockerfile
+    container_name: scillm-memory
+    environment:
+      ARANGO_HOST: arangodb
+      ARANGO_PORT: "8529"
+      ARANGO_USER: root
+      ARANGO_PASS: ${ARANGO_PASS:-openSesame}
+      ARANGO_DB: scillm
+    ports:
+      - "127.0.0.1:8601:8601"
+    restart: unless-stopped
+    depends_on:
+      arangodb:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8601/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
+
+  # ---------------------------------------------------------------------------
+  # Embedding Service (sentence-transformers)
+  # ---------------------------------------------------------------------------
+
+  embedding:
+    build:
+      context: ../../services/embedding
+      dockerfile: Dockerfile
+    container_name: scillm-embedding
+    environment:
+      EMBEDDING_MODEL: sentence-transformers/all-MiniLM-L6-v2
+      EMBEDDING_DEVICE: ${EMBEDDING_DEVICE:-cpu}
+      EMBEDDING_DIMENSIONS: "384"
+      EMBEDDING_PORT: "8602"
+    ports:
+      - "127.0.0.1:8602:8602"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import httpx; r=httpx.get('http://127.0.0.1:8602/health',timeout=5); assert r.status_code==200"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 120s
+    # Uncomment for GPU support:
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: 1
+    #           capabilities: [gpu]
+
+  # ---------------------------------------------------------------------------
+  # TLS Fingerprint Proxy (for Codex/ChatGPT)
+  # ---------------------------------------------------------------------------
+
+  utls-proxy:
+    build:
+      context: ../utls-proxy
+      dockerfile: Dockerfile
+    container_name: scillm-utls-proxy
+    environment:
+      UPSTREAM: "https://chatgpt.com"
+      LISTEN: ":8444"
+    ports:
+      - "127.0.0.1:8444:8444"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:8444/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+
+  # ---------------------------------------------------------------------------
+  # scillm Proxy (main LLM gateway)
+  # ---------------------------------------------------------------------------
+
+  scillm-proxy:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile.scillm
+    container_name: scillm-proxy
+    env_file: ["../../.env"]
+    environment:
+      PYTHONPATH: /app/src
+      CONFIG_FILE_PATH: /app/config.yaml
+      SCILLM_MASTER_KEY: ${SCILLM_MASTER_KEY:-sk-dev-proxy-123}
+      METRICS_ENV: ${METRICS_ENV:-dev}
+      # Point to containerized services
+      MEMORY_URL: http://memory:8601
+      EMBEDDING_SERVICE_URL: http://embedding:8602
+    ports:
+      - "4001:4001"
+    restart: unless-stopped
+    depends_on:
+      memory:
+        condition: service_healthy
+      embedding:
+        condition: service_healthy
+      utls-proxy:
+        condition: service_healthy
+    volumes:
+      - "../../local/proxy_server_config.yaml:/app/config.yaml:ro"
+      # OAuth credentials (optional - mount if available)
+      - "${HOME}/.claude/.credentials.json:/root/.claude/.credentials.json:ro"
+      - "${HOME}/.codex/auth.json:/root/.codex/auth.json:ro"
+      - "${HOME}/.gemini:/root/.gemini"
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "-H", "Authorization: Bearer ${SCILLM_MASTER_KEY:-sk-dev-proxy-123}", "http://127.0.0.1:4001/health/liveliness"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+
+volumes:
+  arangodb-data:

@@ -1,0 +1,44 @@
+[project]
+name = "graph-memory"
+version = "0.2.0"
+description = "Graph-based memory system for AI agents"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "python-arango",
+    "typer",
+    "rich",
+    "lean-interact>=0.11.1",
+    "loguru",
+    "httpx",
+    "fastapi",
+    "uvicorn",
+    "python-dotenv",
+    "rapidfuzz>=3.14.3",
+    "numpy",
+    "pyyaml>=6.0",
+    "spacy>=3.8.11",
+    "nltk>=3.9.3",
+    "flashtext>=2.7",
+    "sentence-transformers>=2.6.1",
+    "pyspellchecker>=0.9.0",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["graph_memory*"]
+exclude = ["tests*"]
+
+[project.scripts]
+memory-agent = "graph_memory.agent_cli:app"
+
+[project.optional-dependencies]
+faiss = [
+    "faiss-cpu>=1.8.0"
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
