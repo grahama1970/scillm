@@ -753,13 +753,25 @@ class Router:
                         been exhausted.
         """
         group_name = self._resolve_group(model)
-        chain = self._fallback_chain(group_name)
-        logger.info(
-            "complete model={!r} → group={!r}, chain={}",
-            model,
-            group_name,
-            chain,
-        )
+
+        # Dynamic fallback chain from middleware (e.g., chutes_router utilization-aware)
+        dynamic_chain = kwargs.pop("_dynamic_fallback_chain", None)
+        if dynamic_chain:
+            chain = dynamic_chain
+            logger.info(
+                "complete model={!r} → group={!r}, chain={} (dynamic)",
+                model,
+                group_name,
+                chain,
+            )
+        else:
+            chain = self._fallback_chain(group_name)
+            logger.info(
+                "complete model={!r} → group={!r}, chain={}",
+                model,
+                group_name,
+                chain,
+            )
 
         last_exc: Exception | None = None
         last_status = 502

@@ -128,33 +128,17 @@ def _matches_family(model_name: str, family: str) -> bool:
     return True
 
 
-_ALLOWED_MODELS: set[str] = {
-    # Only models with fallback chains defined in proxy_server_config.yaml
-    # chutes_router will only select from these, ensuring fallback works
-    "deepseek-ai/DeepSeek-V3.2-TEE",
-    "deepseek-ai/DeepSeek-V3.1-TEE",
-    "deepseek-ai/DeepSeek-R1-0528-TEE",
-    "deepseek-ai/DeepSeek-R1-0528",
-    "moonshotai/Kimi-K2.5-TEE",
-    "Qwen/Qwen3-235B-A22B-Thinking-2507",
-    "Qwen/Qwen3.5-397B-A17B-TEE",
-}
-
-
 def _build_dynamic_families(util_data: list[dict]) -> dict[str, list[str]]:
     """Build model families dynamically from utilization API data.
 
-    Only includes models in _ALLOWED_MODELS to ensure fallback chains work.
+    Discovers all available models and groups them by family. The fallback chain
+    is built dynamically from these families, sorted by utilization score.
     """
     families: dict[str, list[str]] = {f: [] for f in FAMILY_PATTERNS}
 
     for entry in util_data:
         name = entry.get("name", "")
         if not name or name.startswith("[private"):
-            continue
-
-        # Only include models that have fallback chains configured
-        if name not in _ALLOWED_MODELS:
             continue
 
         for family in FAMILY_PATTERNS:
@@ -284,12 +268,21 @@ async def _select_best_variant(family: str, util_cache: dict[str, dict]) -> str 
     Returns the model name with lowest score, or None if no good options.
     Uses dynamically discovered families from the utilization API.
     """
+    chain = await _build_dynamic_chain(family, util_cache)
+    return chain[0] if chain else None
+
+
+async def _build_dynamic_chain(family: str, util_cache: dict[str, dict]) -> list[str]:
+    """Build a full fallback chain sorted by utilization score.
+
+    Returns all models in the family sorted best-first, plus static fallbacks.
+    """
     # Use dynamic families (populated by _get_utilization)
     candidates = _dynamic_families.get(family, [])
     if not candidates:
         logger.debug("chutes_router: no candidates for family '{}' (families: {})",
                     family, list(_dynamic_families.keys()))
-        return None
+        return []
 
     scored = []
     for model in candidates:
@@ -313,10 +306,18 @@ async def _select_best_variant(family: str, util_cache: dict[str, dict]) -> str 
             logger.debug("chutes_router: {} score=50.0 (no data)", model)
 
     if not scored:
-        return None
+        return []
 
     # Sort by score (lowest first)
     scored.sort(key=lambda x: x[0])
+
+    # Build chain: sorted Chutes models + static fallbacks (Kimi, Qwen3)
+    chain = [m for _, m, _, _ in scored]
+
+    # Add non-DeepSeek fallbacks at the end (these don't have utilization data)
+    static_fallbacks = ["text-kimi", "text-qwen3", "text-qwen3-large"]
+    chain.extend(static_fallbacks)
+
     best_score, best_model, util, rate_limit = scored[0]
 
     # If best option is still bad, log warning
@@ -328,7 +329,7 @@ async def _select_best_variant(family: str, util_cache: dict[str, dict]) -> str 
             best_score,
         )
 
-    return best_model
+    return chain
 
 
 def _get_family_for_model(model: str) -> str | None:
@@ -409,13 +410,15 @@ class ChutesRouter(BaseMiddleware):
             logger.debug("chutes_router: no utilization data, passing through")
             return request
 
-        # Select best variant
-        best = await _select_best_variant(family, util_cache)
-        if not best:
-            logger.debug("chutes_router: no variant selected for family '{}', passing through", family)
+        # Build dynamic fallback chain sorted by utilization
+        chain = await _build_dynamic_chain(family, util_cache)
+        if not chain:
+            logger.debug("chutes_router: no chain built for family '{}', passing through", family)
             return request
 
-        # Swap model if different
+        best = chain[0]
+
+        # Swap model to best variant
         if best != model:
             original = model
             request["model"] = best
@@ -423,12 +426,17 @@ class ChutesRouter(BaseMiddleware):
             stats = util_cache.get(best) or util_cache.get(best.split("/")[-1] if "/" in best else best)
             util_pct = stats.get("utilization_current", 0) * 100 if stats else 0
             logger.info(
-                "chutes_router: '{}' -> '{}' (util={:.0f}%, family={})",
+                "chutes_router: '{}' -> '{}' (util={:.0f}%, family={}, chain_len={})",
                 original,
                 best.split("/")[-1] if "/" in best else best,
                 util_pct,
                 family,
+                len(chain),
             )
+
+        # Inject dynamic fallback chain for router to use
+        request["_dynamic_fallback_chain"] = chain
+        logger.debug("chutes_router: dynamic chain = {}", [m.split("/")[-1] if "/" in m else m for m in chain])
 
         return request
 

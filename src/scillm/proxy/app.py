@@ -679,6 +679,10 @@ async def chat_completions(request: Request):
     if "_dynamic_timeout_ms" in body:
         kwargs["_dynamic_timeout_ms"] = body["_dynamic_timeout_ms"]
 
+    # Pass dynamic fallback chain from ChutesRouter (utilization-aware ordering)
+    if "_dynamic_fallback_chain" in body:
+        kwargs["_dynamic_fallback_chain"] = body["_dynamic_fallback_chain"]
+
     start = time.monotonic()
 
     # -------------------------------------------------------------------------
