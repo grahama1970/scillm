@@ -16,6 +16,7 @@ request comes in for a Chutes model, it swaps to the best available variant.
 from __future__ import annotations
 
 import os
+import re
 import time
 from datetime import datetime
 from typing import Any
@@ -23,6 +24,41 @@ from zoneinfo import ZoneInfo
 
 import httpx
 from loguru import logger
+
+
+# ---------------------------------------------------------------------------
+# Model size extraction from name
+# ---------------------------------------------------------------------------
+
+# Regex to extract parameter count from model names (e.g., "235B", "32B", "0.6B")
+_SIZE_PATTERN = re.compile(r"(\d+(?:\.\d+)?)\s*[Bb]", re.IGNORECASE)
+
+
+def _extract_size_b(model_name: str) -> float | None:
+    """Extract model size in billions from name. Returns None if not found."""
+    match = _SIZE_PATTERN.search(model_name)
+    if match:
+        return float(match.group(1))
+    return None
+
+
+def _is_large_model(model_name: str, threshold_b: float = 100.0) -> bool:
+    """Check if model has >= threshold_b billion parameters."""
+    size = _extract_size_b(model_name)
+    if size is None:
+        # DeepSeek V3/R1 without explicit size are 671B
+        name_lower = model_name.lower()
+        if "deepseek" in name_lower and any(x in name_lower for x in ["v3", "r1", "chimera"]):
+            return True
+        return False
+    return size >= threshold_b
+
+
+def _is_chat_model(model_name: str) -> bool:
+    """Check if model is a chat/completion model (not embedding/guard/coder)."""
+    name_lower = model_name.lower()
+    non_chat = ["embedding", "guard", "coder", "vlm", "vl-", "vision"]
+    return not any(x in name_lower for x in non_chat)
 
 # Time-based routing: Claude during day, Chutes at night
 _ET_TIMEZONE = ZoneInfo("America/New_York")
@@ -83,65 +119,75 @@ _DEEPSEEK_671B_PATTERNS = [
     "chimera",
 ]
 
-# Family pattern definitions: family_name -> (include_patterns, exclude_patterns)
-# Models matching include AND not matching exclude are added to the family
-FAMILY_PATTERNS: dict[str, tuple[list[str], list[str]]] = {
-    # DeepSeek 671B: V3, R1, Chimera variants (exclude distilled/small)
-    "deepseek-large": (
-        ["deepseek"],
-        ["distill", "7b", "8b", "14b", "32b", "70b", "lite"],
-    ),
-    # Qwen3 large: 235B+ models
-    "qwen3-large": (
-        ["qwen3", "235b", "397b"],
-        ["7b", "8b", "14b", "30b", "32b", "72b"],
-    ),
-    # Qwen3 small: 30-32B models
-    "qwen3-small": (
-        ["qwen3", "30b", "32b"],
-        ["235b", "397b"],
-    ),
-    # Kimi/Moonshot
-    "kimi": (
-        ["kimi", "moonshot"],
-        [],
-    ),
+# Alias to family mapping - enables dynamic routing for family-specific aliases
+# When user requests "text-qwen3", they get dynamic routing within the qwen3 family
+ALIAS_TO_FAMILY: dict[str, str] = {
+    "text": "deepseek-large",           # Default: best available large model
+    "text-research": "deepseek-large",  # Harvard research endpoint
+    "text-qwen3": "qwen3-large",        # Qwen3 family (235B+)
+    "text-qwen3-large": "qwen3-large",  # Explicit large Qwen3
+    "text-kimi": "kimi",                # Kimi/Moonshot family
+    "text-deepseek": "deepseek-large",  # Explicit DeepSeek family
 }
 
 
 def _matches_family(model_name: str, family: str) -> bool:
-    """Check if model matches family patterns."""
-    patterns = FAMILY_PATTERNS.get(family)
-    if not patterns:
-        return False
-    include, exclude = patterns
+    """Check if model matches family using dynamic size extraction.
+
+    Family matching is now based on:
+    1. Model name patterns (deepseek, qwen3, kimi)
+    2. Dynamically extracted size from name (>= 100B for "large" families)
+    3. Model type (chat vs embedding/guard/coder)
+    """
     name_lower = model_name.lower()
 
-    # Must match at least one include pattern
-    if not any(p in name_lower for p in include):
-        return False
+    if family == "deepseek-large":
+        # Must be DeepSeek and large (V3, R1, Chimera are all 671B)
+        if "deepseek" not in name_lower:
+            return False
+        if "distill" in name_lower or "lite" in name_lower:
+            return False
+        return _is_large_model(model_name) and _is_chat_model(model_name)
 
-    # Must not match any exclude pattern
-    if any(p in name_lower for p in exclude):
-        return False
+    elif family == "qwen3-large":
+        # Must be Qwen3, large (>=100B), and chat model
+        if "qwen3" not in name_lower and "qwen/qwen3" not in name_lower:
+            return False
+        return _is_large_model(model_name) and _is_chat_model(model_name)
 
-    return True
+    elif family == "qwen3-small":
+        # Qwen3 under 100B
+        if "qwen3" not in name_lower and "qwen/qwen3" not in name_lower:
+            return False
+        size = _extract_size_b(model_name)
+        if size is None:
+            return False
+        return size < 100 and _is_chat_model(model_name)
+
+    elif family == "kimi":
+        return "kimi" in name_lower or "moonshot" in name_lower
+
+    return False
+
+
+# Known family names for iteration
+_FAMILIES = ["deepseek-large", "qwen3-large", "qwen3-small", "kimi"]
 
 
 def _build_dynamic_families(util_data: list[dict]) -> dict[str, list[str]]:
     """Build model families dynamically from utilization API data.
 
-    Discovers all available models and groups them by family. The fallback chain
-    is built dynamically from these families, sorted by utilization score.
+    Discovers all available models and groups them by family using dynamic
+    size extraction from model names.
     """
-    families: dict[str, list[str]] = {f: [] for f in FAMILY_PATTERNS}
+    families: dict[str, list[str]] = {f: [] for f in _FAMILIES}
 
     for entry in util_data:
         name = entry.get("name", "")
         if not name or name.startswith("[private"):
             continue
 
-        for family in FAMILY_PATTERNS:
+        for family in _FAMILIES:
             if _matches_family(name, family):
                 families[family].append(name)
                 break  # Model belongs to first matching family only
@@ -333,9 +379,8 @@ async def _build_dynamic_chain(family: str, util_cache: dict[str, dict]) -> list
 
 
 def _get_family_for_model(model: str) -> str | None:
-    """Get the family for a model string using pattern matching."""
-    # Check against all family patterns
-    for family in FAMILY_PATTERNS:
+    """Get the family for a model string using dynamic size extraction."""
+    for family in _FAMILIES:
         if _matches_family(model, family):
             return family
     return None
@@ -345,8 +390,8 @@ def _is_chutes_model(model: str) -> bool:
     """Check if model should be routed through Chutes."""
     model_lower = model.lower()
 
-    # Explicit Chutes aliases
-    if model in ("text", "text-research"):
+    # Family-specific aliases get dynamic routing within their family
+    if model_lower in ALIAS_TO_FAMILY:
         return True
 
     # Org/Model format typically means Chutes
@@ -378,14 +423,15 @@ class ChutesRouter(BaseMiddleware):
         if not model:
             return request
 
-        # Only process Chutes models and text alias
-        is_text_alias = model.lower() in ("text", "text-research")
-        if not is_text_alias and not _is_chutes_model(model):
+        # Only process Chutes models and known aliases
+        model_lower = model.lower()
+        is_known_alias = model_lower in ALIAS_TO_FAMILY
+        if not is_known_alias and not _is_chutes_model(model):
             return request
 
         # Daytime: route to Claude Sonnet for reliability
         if _is_daytime():
-            if is_text_alias or _is_chutes_model(model):
+            if is_known_alias or _is_chutes_model(model):
                 request["model"] = _DAYTIME_MODEL
                 logger.info(
                     "chutes_router: daytime routing '{}' -> '{}' (7AM-10PM ET)",
@@ -395,12 +441,13 @@ class ChutesRouter(BaseMiddleware):
                 return request
 
         # Nighttime: use Chutes with utilization-aware selection
-        # Get family for this model
-        family = _get_family_for_model(model)
-        if not family:
-            if is_text_alias:
-                family = "deepseek-large"
-            else:
+        # Get family for this model - check alias mapping first, then pattern matching
+        model_lower = model.lower()
+        if model_lower in ALIAS_TO_FAMILY:
+            family = ALIAS_TO_FAMILY[model_lower]
+        else:
+            family = _get_family_for_model(model)
+            if not family:
                 logger.debug("chutes_router: no family for '{}', passing through", model)
                 return request
 
