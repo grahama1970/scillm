@@ -44,28 +44,33 @@ async def _lookup_hf_metadata(repo_id: str) -> dict | None:
     if "/" not in repo_id:
         return None
 
+    # Strip -TEE suffix (Chutes-specific) before querying HuggingFace
+    hf_repo_id = re.sub(r"-TEE$", "", repo_id)
+
     try:
         client = _get_client()
-        resp = await client.get(f"{_HF_API_BASE}/{repo_id}", timeout=5.0)
+        resp = await client.get(f"{_HF_API_BASE}/{hf_repo_id}", timeout=5.0)
         if resp.status_code != 200:
-            logger.debug("hf_lookup: {} returned {}", repo_id, resp.status_code)
-            _hf_cache[repo_id] = {}  # Cache negative result
+            logger.debug("hf_lookup: {} returned {}", hf_repo_id, resp.status_code)
+            _hf_cache[repo_id] = {}  # Cache negative result (with original key)
             return None
 
         data = resp.json()
-        # Extract size from safetensors total (bytes → billions)
+        # Extract size from safetensors.parameters (max value across precisions)
+        # safetensors.total is FILE SIZE, parameters is PARAM COUNT per precision
         size_b = None
-        if "safetensors" in data and "total" in data["safetensors"]:
-            size_bytes = data["safetensors"]["total"]
-            # Rough: 2 bytes per param (fp16), so bytes/2 = params
-            size_b = size_bytes / 2 / 1e9
+        if data.get("safetensors") and data["safetensors"].get("parameters"):
+            params = data["safetensors"]["parameters"]
+            # params is {"BF16": N, "F8_E4M3": N, ...} — take max as true param count
+            max_params = max(params.values())
+            size_b = max_params / 1e9
 
         metadata = {
             "size_b": size_b,
             "tags": data.get("tags", []),
             "pipeline_tag": data.get("pipeline_tag"),
         }
-        _hf_cache[repo_id] = metadata
+        _hf_cache[repo_id] = metadata  # Cache with original key (including -TEE)
         logger.debug("hf_lookup: {} → {:.1f}B, tags={}", repo_id, size_b or 0, metadata["tags"][:3])
         return metadata
     except Exception as e:
