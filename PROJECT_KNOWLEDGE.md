@@ -36,23 +36,30 @@ The ENTIRE fallback chain is now built dynamically from real-time Chutes utiliza
 
 **NOT in batch chain:** OAuth providers (Codex, Claude) — risk of account ban
 
-### Concurrency Guard Semaphore Fix (2026-04-15)
+### Concurrency Guard Hardening (2026-04-15)
 
-**Bug fixed:** Race condition causing "9/8 slots in use" errors during batch operations.
+**Five fixes deployed:**
 
-**Root cause:** When adaptive backoff triggered (429 from provider), `_record_429()` created a new semaphore with reduced slots, but the `_in_flight` counter still reflected requests on the old semaphore. New requests acquired slots on the fresh semaphore → counter exceeded limit.
+1. **Semaphore race condition** — When 429 backoff created new semaphore, `_in_flight` counter wasn't accounted for. Fix: pre-acquire slots for in-flight requests.
 
-**Fix:** Pre-acquire slots on new semaphore for in-flight requests:
-```python
-current_in_flight = _in_flight.get(provider, 0)
-slots_to_reserve = min(current_in_flight, new_limit)
-new_sem = asyncio.Semaphore(new_limit)
-for _ in range(slots_to_reserve):
-    new_sem.acquire_nowait()
-_semaphores[provider] = new_sem
+2. **Provider resolution** — `deepseek-ai/DeepSeek-V3.1-TEE` was substring-matching "deepseek" → wrong limit (8 vs 4). Fix: check for "/" first → routes to chutes.
+
+3. **Background stale cleanup** — Ran only in `pre_call`. If queue full, no pre_calls, no cleanup → zombies persist forever. Fix: background task runs every 30s independent of request flow.
+
+4. **Mandatory X-Caller-Skill** — Unknown callers created untraceable zombie requests. Fix: 400 error with helpful message if header missing.
+
+5. **Reset endpoint** — `POST /v1/scillm/concurrency/reset` clears stuck queues without restart.
+
+**Usage:**
+```bash
+# Check status
+curl -H "Authorization: Bearer sk-dev-proxy-123" \
+  "http://localhost:4001/v1/scillm/concurrency?model=text"
+
+# Reset if stuck
+curl -X POST -H "Authorization: Bearer sk-dev-proxy-123" \
+  "http://localhost:4001/v1/scillm/concurrency/reset"
 ```
-
-Applied to both `_record_429()` (backoff) and `_maybe_recover()` (recovery).
 
 ### Docker Deployment Strategy (2026-04-15)
 
@@ -95,6 +102,10 @@ Applied to both `_record_429()` (backoff) and `_maybe_recover()` (recovery).
 
 | Date | Decision | Why |
 |------|----------|-----|
+| 2026-04-15 | Mandatory X-Caller-Skill header | Requests without header rejected with 400 + helpful error. Prevents untraceable zombie requests from clogging queue. |
+| 2026-04-15 | Background stale slot cleanup (30s) | Runs independent of request flow. Fixes: when queue full, no pre_calls run, so stale detection never triggered. Now zombies auto-cleaned. |
+| 2026-04-15 | Reset endpoint `/v1/scillm/concurrency/reset` | Clears stuck queues without container restart. Returns slots_cleared, queue_cleared, pauses_cleared. |
+| 2026-04-15 | Fix provider resolution for Org/Model format | `deepseek-ai/DeepSeek-V3.1-TEE` was matching "deepseek" substring → wrong limits (8 vs 4). Now checks "/" first → routes to chutes. |
 | 2026-04-15 | Fix semaphore race condition in concurrency_guard.py | Pre-acquire slots for in-flight requests when creating new semaphore during backoff. Fixes "9/8 slots" error causing cascading batch failures. |
 | 2026-04-15 | Standalone Docker deployment with bundled services | Power users get self-contained `docker compose up`. Memory service copied (not published image) because both projects under active development. |
 | 2026-04-15 | Dynamic fallback chains from Chutes utilization | Entire chain built at runtime, sorted by utilization score. Fixes 429s reaching clients from dynamically discovered models. |

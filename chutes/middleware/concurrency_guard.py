@@ -448,10 +448,57 @@ def _release(provider: str, request_id: str | None = None) -> None:
     _maybe_recover(provider)
 
 
+_stale_cleanup_task: asyncio.Task | None = None
+
+
+async def _background_stale_cleanup() -> None:
+    """Background task to release stale slots every 30s, independent of request flow."""
+    while True:
+        await asyncio.sleep(30.0)
+        try:
+            released = _release_stale_slots_force()
+            if released > 0:
+                logger.warning("concurrency_guard: background cleanup released {} stale slots", released)
+        except Exception as exc:
+            logger.debug("concurrency_guard: background cleanup error: {}", exc)
+
+
+def _release_stale_slots_force() -> int:
+    """Release stale slots unconditionally (no rate limit check)."""
+    now = time.monotonic()
+    cutoff = now - SLOT_MAX_AGE_S
+    released = 0
+
+    for provider, slots in list(_slot_acquired_at.items()):
+        stale_ids = [req_id for req_id, acquired in slots.items() if acquired < cutoff]
+        for req_id in stale_ids:
+            del slots[req_id]
+            sem = _semaphores.get(provider)
+            if sem:
+                sem.release()
+                _in_flight[provider] = max(0, _in_flight.get(provider, 1) - 1)
+            released += 1
+            logger.warning(
+                "concurrency_guard: {} released STALE slot {} (held {:.0f}s)",
+                provider, req_id, now - cutoff + SLOT_MAX_AGE_S,
+            )
+    return released
+
+
+def start_background_cleanup() -> None:
+    """Start the background stale cleanup task. Call once on app startup."""
+    global _stale_cleanup_task
+    if _stale_cleanup_task is None or _stale_cleanup_task.done():
+        _stale_cleanup_task = asyncio.create_task(_background_stale_cleanup())
+        logger.info("concurrency_guard: started background stale cleanup task")
+
+
 class ConcurrencyMiddleware(BaseMiddleware):
     """Limits concurrent requests per provider. Queues excess with bounds."""
 
     async def pre_call(self, request: dict) -> dict | None:
+        # Ensure background cleanup is running
+        start_background_cleanup()
         model = request.get("model", "")
         provider = _resolve_provider(model)
 
@@ -712,6 +759,70 @@ def get_concurrency_status() -> Dict[str, Any]:
             "stale_warning_count": stale_warning_count,
         }
     return status
+
+
+def reset_concurrency(provider: str | None = None) -> Dict[str, Any]:
+    """Reset concurrency state — clears queue, resets semaphores.
+
+    Use when batch failures have corrupted state or queue is stuck.
+    If provider specified, only reset that provider. Otherwise reset all.
+
+    Returns summary of what was cleared.
+    """
+    global _semaphores, _in_flight, _queue_depth, _slot_acquired_at
+    global _effective_limits, _rate_limit_hits, _paused_until
+
+    cleared = {
+        "providers_reset": [],
+        "slots_cleared": 0,
+        "queue_cleared": 0,
+        "pauses_cleared": 0,
+    }
+
+    providers_to_reset = [provider] if provider else list(PROVIDER_LIMITS.keys())
+
+    for p in providers_to_reset:
+        if p not in PROVIDER_LIMITS:
+            continue
+
+        # Clear in-flight count
+        in_flight = _in_flight.get(p, 0)
+        if in_flight > 0:
+            cleared["slots_cleared"] += in_flight
+            _in_flight[p] = 0
+
+        # Clear queue depth
+        queued = _queue_depth.get(p, 0)
+        if queued > 0:
+            cleared["queue_cleared"] += queued
+            _queue_depth[p] = 0
+
+        # Reset semaphore to configured limit
+        configured = PROVIDER_LIMITS.get(p, DEFAULT_LIMIT)
+        _semaphores[p] = asyncio.Semaphore(configured)
+        _effective_limits[p] = configured
+
+        # Clear slot tracking
+        if p in _slot_acquired_at:
+            del _slot_acquired_at[p]
+
+        # Clear rate limit history and pause
+        if p in _rate_limit_hits:
+            del _rate_limit_hits[p]
+        if p in _paused_until:
+            cleared["pauses_cleared"] += 1
+            del _paused_until[p]
+
+        cleared["providers_reset"].append(p)
+        logger.info(
+            "concurrency_guard: RESET {} — cleared {} in-flight, {} queued",
+            p, in_flight, queued,
+        )
+
+    # Persist the reset state
+    asyncio.create_task(_persist_state())
+
+    return cleared
 
 
 def get_concurrency_for_model(model: str) -> Dict[str, Any]:

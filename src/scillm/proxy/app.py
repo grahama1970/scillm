@@ -651,6 +651,20 @@ async def chat_completions(request: Request):
     if _middleware_chain is None or _router is None:
         raise ProxyError(503, "Proxy not ready — startup incomplete", "service_unavailable")
 
+    # ── Caller identification enforcement ─────────────────────────────────────
+    # Require X-Caller-Skill header to identify who's making requests.
+    # Without this, zombie requests can't be traced and queue issues can't be debugged.
+    caller_skill = request.headers.get("x-caller-skill", "").strip()
+    if not caller_skill:
+        raise ProxyError(
+            400,
+            "Missing X-Caller-Skill header. "
+            "Add `headers={'X-Caller-Skill': 'your-skill-name'}` to your request. "
+            "This identifies your caller for debugging and cost tracking. "
+            "Example: httpx.post(..., headers={'X-Caller-Skill': 'my-skill'})",
+            "missing_caller_header",
+        )
+
     # Inject headers for middleware (arango_log.py uses x-caller-skill)
     body["_headers"] = dict(request.headers)
 
@@ -898,6 +912,32 @@ async def scillm_concurrency(request: Request, model: str = "text"):
             "chunk_size": 4,  # Safe default
             "error": "ConcurrencyGuard not loaded",
         }
+
+
+@app.post("/v1/scillm/concurrency/reset")
+async def scillm_concurrency_reset(request: Request, provider: str = ""):
+    """Reset concurrency state for a provider or all providers.
+
+    Use when batch failures have corrupted state or queue is stuck.
+    Clears in-flight counters, queue depth, pauses, and backoff state.
+
+    Example: POST /v1/scillm/concurrency/reset?provider=chutes
+    Example: POST /v1/scillm/concurrency/reset  (reset all)
+    """
+    auth_err = _check_auth(request)
+    if auth_err:
+        raise ProxyError(401, auth_err, "authentication_error")
+
+    try:
+        from chutes.middleware.concurrency_guard import reset_concurrency
+        result = reset_concurrency(provider if provider else None)
+        return {
+            "ok": True,
+            "message": f"Reset concurrency for {len(result['providers_reset'])} providers",
+            **result,
+        }
+    except ImportError:
+        return {"ok": False, "error": "ConcurrencyGuard not loaded"}
 
 
 @app.get("/v1/scillm/models")
