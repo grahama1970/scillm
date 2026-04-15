@@ -128,13 +128,33 @@ def _matches_family(model_name: str, family: str) -> bool:
     return True
 
 
+_ALLOWED_MODELS: set[str] = {
+    # Only models with fallback chains defined in proxy_server_config.yaml
+    # chutes_router will only select from these, ensuring fallback works
+    "deepseek-ai/DeepSeek-V3.2-TEE",
+    "deepseek-ai/DeepSeek-V3.1-TEE",
+    "deepseek-ai/DeepSeek-R1-0528-TEE",
+    "deepseek-ai/DeepSeek-R1-0528",
+    "moonshotai/Kimi-K2.5-TEE",
+    "Qwen/Qwen3-235B-A22B-Thinking-2507",
+    "Qwen/Qwen3.5-397B-A17B-TEE",
+}
+
+
 def _build_dynamic_families(util_data: list[dict]) -> dict[str, list[str]]:
-    """Build model families dynamically from utilization API data."""
+    """Build model families dynamically from utilization API data.
+
+    Only includes models in _ALLOWED_MODELS to ensure fallback chains work.
+    """
     families: dict[str, list[str]] = {f: [] for f in FAMILY_PATTERNS}
 
     for entry in util_data:
         name = entry.get("name", "")
         if not name or name.startswith("[private"):
+            continue
+
+        # Only include models that have fallback chains configured
+        if name not in _ALLOWED_MODELS:
             continue
 
         for family in FAMILY_PATTERNS:
