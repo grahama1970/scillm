@@ -54,7 +54,7 @@ def main() -> int:
     s, body, hdrs = _post(
         f"{base}/v1/chat/completions",
         payload,
-        headers={"Authorization": f"Bearer {master}"},
+        headers={"Authorization": f"Bearer {master}", "X-Caller-Skill": "smoke-chat-headers"},
         timeout=30.0,
     )
 

@@ -602,34 +602,33 @@ class ConcurrencyMiddleware(BaseMiddleware):
                 "concurrency_guard: {} queue timeout after {:.0f}s ({} still queued, {} in-flight, limit {})",
                 provider, QUEUE_TIMEOUT_S, current_queued, in_flight, effective,
             )
-            # REJECT — bypassing the semaphore causes connection drops when we exceed
-            # the provider's actual concurrency limit. Clean 429 rejection lets callers
-            # retry with backoff instead of silent "server disconnected" failures.
+            # REJECT with 503 (Service Unavailable) — semantically correct for capacity
+            # exhaustion. 429 means "you're sending too fast" which isn't true here;
+            # the proxy is simply overloaded processing other requests.
 
             # Build informative message based on queue state
             if in_flight >= effective and current_queued > 0:
                 # All slots full + others queued = another batch job is running
                 msg = (
-                    f"BUSY: {provider} has {in_flight}/{effective} slots in use with {current_queued} "
-                    f"requests still queued. Another batch job is likely running. "
-                    f"Your request waited {QUEUE_TIMEOUT_S:.0f}s for a slot. "
-                    f"Retry with exponential backoff (e.g., wait 30-60s and retry)."
+                    f"SERVICE_BUSY: {provider} capacity exhausted — {in_flight}/{effective} slots in use, "
+                    f"{current_queued} requests still queued. Request waited {QUEUE_TIMEOUT_S:.0f}s. "
+                    f"For large batches (50+), use chunked processing (CHUNK_SIZE=4) to avoid queue buildup. "
+                    f"See SKILL.md 'Large batches (50+)' section."
                 )
             elif in_flight >= effective:
                 # All slots full, no queue = you're competing with concurrent requests
                 msg = (
-                    f"BUSY: {provider} has {in_flight}/{effective} slots in use. "
-                    f"Your request waited {QUEUE_TIMEOUT_S:.0f}s for a slot. "
-                    f"The proxy is processing other requests. Retry in 30-60s."
+                    f"SERVICE_BUSY: {provider} at capacity — {in_flight}/{effective} slots in use. "
+                    f"Request waited {QUEUE_TIMEOUT_S:.0f}s. Retry in 30-60s or use chunked processing."
                 )
             else:
                 # Shouldn't happen, but fallback message
                 msg = (
-                    f"Queue timeout: {provider} ({in_flight}/{effective} slots). "
+                    f"SERVICE_BUSY: {provider} queue timeout ({in_flight}/{effective} slots). "
                     f"Request waited {QUEUE_TIMEOUT_S:.0f}s. Retry with backoff."
                 )
 
-            raise MiddlewareReject(msg, status_code=429)
+            raise MiddlewareReject(msg, status_code=503)
 
         queue_wait_ms = int((time.monotonic() - queue_start) * 1000)
         _queue_depth[provider] = max(0, _queue_depth.get(provider, 0) - 1)

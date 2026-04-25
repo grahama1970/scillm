@@ -39,6 +39,13 @@ services:
       - "${HOME}/.codex/auth.json:/root/.codex/auth.json:ro"
       # Gemini CLI needs write access for history/sessions
       - "${HOME}/.gemini:/root/.gemini"
+      # OpenCode Go model discovery needs the connected provider auth/config.
+      # Cache is writable so `opencode models --refresh opencode-go` can update.
+      - "${HOME}/.local/share/opencode/auth.json:/root/.local/share/opencode/auth.json:ro"
+      - "${HOME}/.config/opencode:/root/.config/opencode:ro"
+      - "${HOME}/.cache/opencode:/root/.cache/opencode"
+      # JSONL backup — independent of DB, survives wipes, append-only
+      - "/mnt/storage12tb/scillm-logs:/mnt/storage12tb/scillm-logs"
     healthcheck:
       test: ["CMD", "curl", "-sf", "-H", "Authorization: Bearer $${SCILLM_MASTER_KEY:-sk-dev-proxy-123}", "http://127.0.0.1:4001/health/liveliness"]
       interval: 15s

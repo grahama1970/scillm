@@ -32,9 +32,21 @@ from scillm.proxy.config import Deployment, ModelGroup, ProxyConfig, RetryPolicy
 from scillm.proxy.providers.auth import is_anthropic_available, is_codex_available
 from scillm.proxy.providers.claude import claude_completion, claude_completion_stream
 from scillm.proxy.providers.codex import codex_completion, codex_completion_stream
+from scillm.proxy.providers.opencode_go import (
+    ENDPOINT_CHAT_COMPLETIONS,
+    ENDPOINT_MESSAGES,
+    OPENCODE_GO_CHAT_TIMEOUT_SEC,
+    OPENCODE_GO_DEFAULT_API_BASE,
+    OPENCODE_GO_MESSAGES_TIMEOUT_SEC,
+    is_opencode_go_model,
+    opencode_go_endpoint_type,
+    opencode_go_messages_completion,
+    opencode_go_messages_stream,
+    opencode_go_model_id,
+)
 
 # Gemini OAuth: uses Gemini CLI for headless calls (bypasses 20 RPD API limit)
-from chutes.middleware.gemini_oauth import complete_messages as gemini_oauth_complete, is_available as is_gemini_oauth_available
+from chutes.middleware.gemini_oauth import complete_messages as gemini_oauth_complete
 
 # Chutes warmup: called when a Chutes model returns 5xx (cold start)
 _CHUTES_API_BASE = os.environ.get("CHUTES_API_BASE", "https://llm.chutes.ai")
@@ -192,6 +204,9 @@ def _max_retries_for(exc: Exception, policy: RetryPolicy) -> int:
 
 def _status_code_for(exc: Exception) -> int:
     """Extract an HTTP status code from an exception."""
+    status_code = getattr(exc, "status_code", None)
+    if isinstance(status_code, int):
+        return status_code
     for exc_type, code in _STATUS_CODE_MAP.items():
         if isinstance(exc, exc_type):
             return code
@@ -498,6 +513,35 @@ class Router:
             logger.info("Auto-created Gemini group for model {!r}", name)
             return group
 
+        # Auto-create OpenCode Go group for provider/model ids.
+        # Important: this must run before Chutes slash detection because the
+        # public model names intentionally use "opencode-go/<model-id>".
+        if is_opencode_go_model(name):
+            model_id = opencode_go_model_id(name)
+            endpoint_type = opencode_go_endpoint_type(model_id)
+            if endpoint_type == ENDPOINT_MESSAGES:
+                custom_provider = "opencode-go-messages"
+            else:
+                custom_provider = None
+            if endpoint_type not in {ENDPOINT_CHAT_COMPLETIONS, ENDPOINT_MESSAGES}:
+                logger.warning("Unknown OpenCode Go model {!r}; defaulting to chat/completions", name)
+            timeout = (
+                OPENCODE_GO_MESSAGES_TIMEOUT_SEC
+                if endpoint_type == ENDPOINT_MESSAGES
+                else OPENCODE_GO_CHAT_TIMEOUT_SEC
+            )
+            dep = Deployment(
+                model=model_id,
+                api_base=self._config.opencode_go_api_base or OPENCODE_GO_DEFAULT_API_BASE,
+                api_key=self._config.opencode_go_api_key or "",
+                timeout=timeout,
+                custom_llm_provider=custom_provider,
+            )
+            group = ModelGroup(name=name, deployments=[dep])
+            self._config.model_groups[name] = group
+            logger.info("Auto-created OpenCode Go group for model {!r} via {}", name, endpoint_type)
+            return group
+
         # Auto-create Chutes group for model names containing "/"
         # (e.g. "Qwen/Qwen3-30B-A3B", "deepseek-ai/DeepSeek-V3").
         chutes_base = self._config.chutes_api_base
@@ -604,6 +648,28 @@ class Router:
             if kwargs.get("stream", False):
                 logger.warning("gemini-oauth: streaming not supported, falling back to non-streaming")
             return await gemini_oauth_complete(messages, model=dep.model, timeout=timeout_sec)
+
+        # OpenCode Go messages path: DeepSeek and MiniMax use an
+        # Anthropic-compatible /messages endpoint, not /chat/completions.
+        if dep.custom_llm_provider == "opencode-go-messages":
+            if kwargs.get("stream", False):
+                stream_kwargs = {k: v for k, v in kwargs.items() if k != "stream"}
+                return opencode_go_messages_stream(
+                    dep.model,
+                    dep.api_base or OPENCODE_GO_DEFAULT_API_BASE,
+                    dep.api_key or "",
+                    messages,
+                    timeout=timeout_sec,
+                    **stream_kwargs,
+                )
+            return await opencode_go_messages_completion(
+                dep.model,
+                dep.api_base or OPENCODE_GO_DEFAULT_API_BASE,
+                dep.api_key or "",
+                messages,
+                timeout=timeout_sec,
+                **kwargs,
+            )
 
         # We do one initial attempt + up to max_retries retries.
         # _max_retries_override caps retries when multiple models share a group

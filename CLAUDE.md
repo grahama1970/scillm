@@ -12,21 +12,19 @@
 **Docker:** `docker compose -p scillm -f deploy/docker/compose.scillm.core.yml up -d --build` (network_mode: host, port 4001)
 **Port 4000 unavailable:** NoMachine NX server (system daemon, UID 135) — all services use port 4001
 
-## Architecture (Bifrost P1+P2)
-**Request flow:** Client → scillm :4001 → Bifrost :4002 → provider (or → utls-proxy :8444 for Codex)
+## Architecture
+**Request flow:** Client → scillm :4001 → Provider API (or → utls-proxy :8444 → chatgpt.com for Codex)
 
 **Components:**
-- **scillm** (Python, :4001): `src/scillm/proxy/` — FastAPI, validation, JSON guard, VLM auto-routing, OAuth injection
-- **Bifrost** (Go, :4002): High-perf routing gateway, built from [fork](https://github.com/grahama1970/bifrost)
+- **scillm** (Python, :4001): `src/scillm/proxy/` — FastAPI, validation, JSON guard, VLM auto-routing, OAuth injection, retries, fallback cascades
 - **utls-proxy** (Go, :8444): Chrome TLS fingerprint for Cloudflare bypass on chatgpt.com
 
 **Key files:**
-- `deploy/docker/Dockerfile.scillm` — multi-stage: builds Bifrost Go + Python scillm
-- `deploy/docker/supervisord.conf` — runs both processes in one container
-- `deploy/docker/generate_bifrost_config.py` — generates bifrost.json from proxy config at startup
+- `deploy/docker/Dockerfile.scillm` — Python image with uvicorn
+- `deploy/docker/entrypoint.sh` — startup script
 - `deploy/utls-proxy/` — TLS fingerprint sidecar for Codex
 - `local/proxy_server_config.yaml` — single source of truth (env var resolution via os.environ/VAR_NAME)
-- `chutes/middleware/` — JSON guard, concurrency guard, VLM router, cache init, budget guard
+- `chutes/middleware/` — JSON guard, concurrency guard, VLM router, cache init, budget guard, abuse guard
 - `src/scillm/batch.py` — parallel completions via openai.AsyncOpenAI
 
 ## Smoke Tests

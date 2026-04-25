@@ -98,7 +98,7 @@ def main() -> int:
     s2, body2, h2 = _post(
         f"{base}/v1/chat/completions",
         payload,
-        headers={"Authorization": f"Bearer {master}"},
+        headers={"Authorization": f"Bearer {master}", "X-Caller-Skill": "smoke-demo-pricing"},
         timeout=15.0,
     )
     if s2 != 200:

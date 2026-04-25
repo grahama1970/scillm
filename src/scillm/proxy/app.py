@@ -15,16 +15,24 @@ from contextlib import asynccontextmanager
 from typing import Any
 
 import httpx
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, WebSocket
 from fastapi.responses import JSONResponse
 from loguru import logger
 
 from scillm.proxy.config import ProxyConfig, load_config
 from scillm.proxy.errors import ProxyError, proxy_error_handler
 from scillm.proxy.middleware import BaseMiddleware, MiddlewareChain, MiddlewareReject
+from scillm.proxy.providers.opencode_go import (
+    OPENCODE_GO_PROVIDER,
+    describe_opencode_go_model,
+    is_opencode_go_model,
+    list_opencode_go_models_from_cli,
+    list_opencode_go_models_from_server,
+    static_opencode_go_models,
+)
 from scillm.proxy.router import Router
 from scillm.proxy.router import ProxyError as RouterProxyError
-from scillm.proxy.streaming import SSE_HEADERS, collect_response, stream_response
+from scillm.proxy.streaming import SSE_HEADERS, stream_response
 from starlette.responses import StreamingResponse
 
 # ---------------------------------------------------------------------------
@@ -55,6 +63,24 @@ def _check_auth(request: Request) -> str | None:
     if token != _config.general.master_key:
         return "Invalid API key"
     return None
+
+
+def _is_empty_length_response(response_dict: dict[str, Any]) -> bool:
+    """Return true when a provider spent its budget without visible output."""
+    choices = response_dict.get("choices", [])
+    if not choices:
+        return False
+    choice = choices[0] if isinstance(choices[0], dict) else {}
+    if choice.get("finish_reason") != "length":
+        return False
+
+    message = choice.get("message") or {}
+    content = message.get("content")
+    if content is None:
+        return True
+    if isinstance(content, str) and not content.strip():
+        return True
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -103,8 +129,118 @@ _DIRECT_MODEL_PATTERNS = {
     "gemini-": "Use 'text-gemini' alias for Gemini models (has fallbacks).",
 }
 
+_CHUTES_PROVIDER_PREFIXES = (
+    "deepseek-ai/",
+    "qwen/",
+    "moonshotai/",
+    "tngtech/",
+    "zai-org/",
+)
+
+_CODEX_OAUTH_PREFIXES = ("codex", "gpt", "o1", "o3", "o4")
+
 # Known good model aliases (checked at startup from config)
 _VALID_MODEL_ALIASES: set[str] = set()
+
+_BATCH_FORWARD_KEYS = (
+    "temperature",
+    "top_p",
+    "frequency_penalty",
+    "presence_penalty",
+    "stop",
+    "n",
+    "response_format",
+    "tools",
+    "tool_choice",
+    "seed",
+    "logprobs",
+    "top_logprobs",
+)
+
+_DEFAULT_MODEL_POOLS: dict[str, dict[str, Any]] = {
+    "qra-deepseek-pool": {
+        "description": "Concurrent QRA extraction across independent Chutes and OpenCode Go DeepSeek lanes.",
+        "strategy": "weighted_round_robin",
+        "lanes": [
+            {
+                "name": "chutes-deepseek",
+                "provider": "chutes",
+                "model": "deepseek-ai/DeepSeek-V3-0324-TEE",
+                "weight": 3,
+                "max_concurrency": 5,
+                "timeout": 420.0,
+            },
+            {
+                "name": "opencode-go-deepseek-v4-flash",
+                "provider": OPENCODE_GO_PROVIDER,
+                "model": "opencode-go/deepseek-v4-flash",
+                "weight": 2,
+                "max_concurrency": 4,
+                "timeout": 620.0,
+            },
+        ],
+    }
+}
+
+
+def _is_direct_chutes_model(model: str) -> bool:
+    """Return true for direct Chutes provider/model ids."""
+    return model.lower().startswith(_CHUTES_PROVIDER_PREFIXES)
+
+
+def _is_codex_oauth_model(model: str) -> bool:
+    """Return true for model ids handled by the Codex OAuth router."""
+    return model.lower().startswith(_CODEX_OAUTH_PREFIXES) and "/" not in model
+
+
+def _codex_oauth_available() -> bool:
+    """Return true when Codex OAuth credentials are available."""
+    try:
+        from scillm.proxy.providers.auth import is_codex_available
+        return is_codex_available()
+    except Exception:
+        return False
+
+
+def _model_pool(pool_name: str) -> dict[str, Any] | None:
+    pool = _DEFAULT_MODEL_POOLS.get(pool_name)
+    if pool is None:
+        return None
+    return {
+        **pool,
+        "lanes": [dict(lane) for lane in pool["lanes"]],
+    }
+
+
+def _weighted_lane_sequence(lanes: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Expand lane weights into a deterministic weighted round-robin sequence."""
+    sequence: list[dict[str, Any]] = []
+    for lane in lanes:
+        weight = int(lane.get("weight") or 1)
+        sequence.extend([lane] * max(1, weight))
+    if not sequence:
+        raise ProxyError(400, "model pool must include at least one lane", "invalid_request_error")
+    return sequence
+
+
+def _lane_for_index(lanes: list[dict[str, Any]], index: int) -> dict[str, Any]:
+    sequence = _weighted_lane_sequence(lanes)
+    return sequence[index % len(sequence)]
+
+
+def _messages_for_batch_item(item: dict[str, Any]) -> list[dict[str, Any]]:
+    messages = item.get("messages")
+    if isinstance(messages, list) and messages:
+        return messages
+    for key in ("prompt", "input", "content"):
+        value = item.get(key)
+        if isinstance(value, str) and value:
+            return [{"role": "user", "content": value}]
+    raise ProxyError(400, "each batch item needs messages, prompt, input, or content", "invalid_request_error")
+
+
+def _item_id(item: dict[str, Any], index: int) -> str:
+    return str(item.get("item_id") or item.get("id") or f"item-{index + 1}")
 
 
 def _suggest_model(unknown: str, candidates: set[str], n: int = 3) -> list[str]:
@@ -165,7 +301,13 @@ def _validate_model_request(model: str, body: dict, request: Request) -> None:
 
     # 2. Reject unknown models with helpful error + suggestions
     # Only check if we have loaded valid aliases (after startup)
-    if _VALID_MODEL_ALIASES and model not in _VALID_MODEL_ALIASES:
+    if (
+        _VALID_MODEL_ALIASES
+        and model not in _VALID_MODEL_ALIASES
+        and not is_opencode_go_model(model)
+        and not _is_direct_chutes_model(model)
+        and not (_is_codex_oauth_model(model) and _codex_oauth_available())
+    ):
         suggestions = _suggest_model(model, _VALID_MODEL_ALIASES)
         available = ", ".join(sorted(m for m in _VALID_MODEL_ALIASES if "/" not in m))
         msg = f"Unknown model '{model}'."
@@ -196,7 +338,9 @@ def _validate_model_request(model: str, body: dict, request: Request) -> None:
     # Reasoning models (DeepSeek-R1, o1, etc) spend tokens on internal reasoning.
     # If max_tokens is set too low, all tokens go to reasoning and output is empty.
     # Better to let the model decide than risk empty responses.
-    if "max_tokens" in body:
+    if body.get("max_tokens") is None:
+        body.pop("max_tokens", None)
+    elif "max_tokens" in body:
         logger.warning(
             f"Stripping max_tokens={body['max_tokens']} — causes empty output on reasoning models. "
             f"See MEMORY.md: 'Never use max_tokens'."
@@ -257,8 +401,8 @@ def _validate_model_request(model: str, body: dict, request: Request) -> None:
     tool_choice = body.get("tool_choice")
     if tool_choice == "required" and model_lower.startswith(("gpt-", "codex")):
         logger.warning(
-            f"tool_choice='required' not supported by Codex — forcing to 'auto'. "
-            f"Codex always uses auto tool selection."
+            "tool_choice='required' not supported by Codex — forcing to 'auto'. "
+            "Codex always uses auto tool selection."
         )
         body["tool_choice"] = "auto"
 
@@ -319,6 +463,24 @@ async def _load_middleware(config: ProxyConfig) -> list[BaseMiddleware]:
     middlewares.extend([ChutesRouter(), VlmRouter(), ConcurrencyMiddleware(), JsonGuard()])
     logger.info("ChutesRouter loaded (utilization-aware routing)")
 
+    # Grounding guard — verifies response is grounded in provided source text
+    # Supports course correction: retries with helpful error messages
+    try:
+        from chutes.middleware.grounding_guard import GroundingGuard
+        middlewares.append(GroundingGuard())
+        logger.info("GroundingGuard loaded (source grounding with course correction)")
+    except (ImportError, Exception) as exc:
+        logger.debug("GroundingGuard not loaded: {}", exc)
+
+    # Schema guard — validates JSON against schema with course correction
+    # Supports course correction: retries with detailed field-level errors
+    try:
+        from chutes.middleware.schema_guard import SchemaGuard
+        middlewares.append(SchemaGuard())
+        logger.info("SchemaGuard loaded (JSON schema validation with course correction)")
+    except (ImportError, Exception) as exc:
+        logger.debug("SchemaGuard not loaded: {}", exc)
+
     # Budget guard is optional — only loads if chutes env vars are set
     try:
         from chutes.middleware.budget_guard import BudgetMiddleware
@@ -350,6 +512,14 @@ async def _load_middleware(config: ProxyConfig) -> list[BaseMiddleware]:
         logger.info("ActiveCallsMiddleware loaded")
     except (ImportError, Exception) as exc:
         logger.debug("ActiveCallsMiddleware not loaded: {}", exc)
+
+    # Batch progress tracking — broadcasts to WebSocket subscribers
+    try:
+        from chutes.middleware.batch_ws import BatchProgressMiddleware
+        middlewares.append(BatchProgressMiddleware())
+        logger.info("BatchProgressMiddleware loaded (WebSocket batch tracking)")
+    except (ImportError, Exception) as exc:
+        logger.debug("BatchProgressMiddleware not loaded: {}", exc)
 
     return middlewares
 
@@ -600,6 +770,16 @@ except ImportError:
 # ---------------------------------------------------------------------------
 
 
+@app.get("/health")
+async def health():
+    """Simple health check — no auth required. Returns status and uptime."""
+    uptime = time.monotonic() - _start_time if _start_time else 0
+    return {
+        "status": "ok" if _config is not None else "starting",
+        "uptime_seconds": round(uptime, 1),
+    }
+
+
 @app.get("/health/liveliness")
 async def health_liveliness():
     """Basic liveness probe for Docker healthcheck."""
@@ -651,18 +831,16 @@ async def chat_completions(request: Request):
     if _middleware_chain is None or _router is None:
         raise ProxyError(503, "Proxy not ready — startup incomplete", "service_unavailable")
 
-    # ── Caller identification enforcement ─────────────────────────────────────
-    # Require X-Caller-Skill header to identify who's making requests.
-    # Without this, zombie requests can't be traced and queue issues can't be debugged.
+    # ── Caller identification (optional but recommended) ────────────────────────
+    # X-Caller-Skill header helps trace requests and debug queue issues.
+    # Warn if missing but don't reject — maintains OpenAI SDK compatibility.
     caller_skill = request.headers.get("x-caller-skill", "").strip()
     if not caller_skill:
-        raise ProxyError(
-            400,
-            "Missing X-Caller-Skill header. "
-            "Add `headers={'X-Caller-Skill': 'your-skill-name'}` to your request. "
-            "This identifies your caller for debugging and cost tracking. "
-            "Example: httpx.post(..., headers={'X-Caller-Skill': 'my-skill'})",
-            "missing_caller_header",
+        caller_skill = "unknown"
+        logger.warning(
+            "[{}] Missing X-Caller-Skill header — add headers={{'X-Caller-Skill': 'your-skill'}} "
+            "for better debugging and cost tracking",
+            request_id,
         )
 
     # Inject headers for middleware (arango_log.py uses x-caller-skill)
@@ -722,97 +900,346 @@ async def chat_completions(request: Request):
         except ImportError:
             pass  # batch_resume module not available
 
-    try:
-        result = await _router.complete(model, messages, **kwargs)
+    # -------------------------------------------------------------------------
+    # COURSE CORRECTION RETRY LOOP
+    # Schema and Grounding guards may request retries with correction prompts.
+    # Max 3 correction attempts to prevent infinite loops.
+    # -------------------------------------------------------------------------
+    MAX_CORRECTION_ATTEMPTS = 3
+    correction_attempt = 0
+    working_messages = list(messages)  # Copy to allow modification
 
-        if stream:
-            # OAuth providers return AsyncIterator[bytes] (already SSE-formatted).
-            # The openai SDK returns its own async stream type.
-            if hasattr(result, "__aiter__") and not hasattr(result, "response"):
-                # Raw byte stream from OAuth providers — pipe directly
-                response = StreamingResponse(
-                    result,
-                    media_type="text/event-stream",
-                    headers=SSE_HEADERS,
-                )
+    while True:
+        try:
+            result = await _router.complete(model, working_messages, **kwargs)
+
+            if stream:
+                # OAuth providers return AsyncIterator[bytes] (already SSE-formatted).
+                # The openai SDK returns its own async stream type.
+                if hasattr(result, "__aiter__") and not hasattr(result, "response"):
+                    # Raw byte stream from OAuth providers — pipe directly
+                    response = StreamingResponse(
+                        result,
+                        media_type="text/event-stream",
+                        headers=SSE_HEADERS,
+                    )
+                else:
+                    # OpenAI SDK async stream — use existing SSE wrapper
+                    response = await stream_response(result, model=model)
+                # Post-call middleware (observe only for streaming)
+                await _middleware_chain.run_post_call(body, {"stream": True})
+                return response
             else:
-                # OpenAI SDK async stream — use existing SSE wrapper
-                response = await stream_response(result, model=model)
-            # Post-call middleware (observe only for streaming)
-            await _middleware_chain.run_post_call(body, {"stream": True})
-            return response
-        else:
-            # Non-streaming: result is a ChatCompletion object
-            response_dict = result.model_dump()
+                # Non-streaming: result is a ChatCompletion object
+                response_dict = result.model_dump()
 
-            # Detect thinking-model token exhaustion:
-            # content=null + completion_tokens=0 + finish_reason="length"
-            # means internal reasoning consumed the entire max_tokens budget.
-            choices = response_dict.get("choices", [])
-            usage = response_dict.get("usage") or {}
-            if (
-                choices
-                and choices[0].get("finish_reason") == "length"
-                and usage.get("completion_tokens", -1) == 0
-                and choices[0].get("message", {}).get("content") is None
-            ):
-                req_max = body.get("max_tokens", "unset")
-                total = usage.get("total_tokens", "?")
+                # Detect thinking-model token exhaustion:
+                # finish_reason="length" with no visible content means the
+                # provider spent its output budget internally without producing
+                # an answer. OpenCode Go DeepSeek V4 can report thousands of
+                # output tokens in this state, so do not require usage=0.
+                usage = response_dict.get("usage") or {}
+                if _is_empty_length_response(response_dict):
+                    req_max = body.get("max_tokens", "unset")
+                    total = usage.get("total_tokens", "?")
+                    completion = usage.get("completion_tokens", "?")
+                    raise ProxyError(
+                        502,
+                        f"Provider exhausted output budget with no visible response "
+                        f"(max_tokens={req_max}, completion_tokens={completion}, "
+                        f"total_tokens={total}). Use a shorter prompt, a stricter "
+                        f"final-only JSON prompt, or a non-thinking model.",
+                        "thinking_budget_exhausted",
+                    )
+
+                response_dict = await _middleware_chain.run_post_call(body, response_dict)
+
+                # Echo opaque metadata back — LLM never saw it, can't fabricate it
+                if caller_metadata is not None:
+                    response_dict["scillm_metadata"] = caller_metadata
+
+                elapsed = time.monotonic() - start
+
+                # Extract cost headers stashed by CostHeaderMiddleware
+                cost_headers = response_dict.pop("_cost_headers", {})
+                # Extract timeout headers stashed by TimeoutEstimatorMiddleware
+                timeout_headers = response_dict.pop("_timeout_headers", {})
+                # Extract grounding headers stashed by GroundingGuard
+                grounding_headers = response_dict.pop("_grounding_headers", {})
+
+                resp_headers = {
+                    "x-request-id": request_id,
+                    "x-latency-ms": str(int(elapsed * 1000)),
+                }
+                resp_headers.update(cost_headers)
+                resp_headers.update(timeout_headers)
+                resp_headers.update(grounding_headers)
+
+                return JSONResponse(
+                    content=response_dict,
+                    headers=resp_headers,
+                )
+
+        except (ProxyError, MiddlewareReject):
+            raise
+        except RouterProxyError as exc:
+            # Convert router's ProxyError to enriched ProxyError for LLM analysis
+            raise ProxyError(exc.status_code, exc.message, "router_error")
+        except Exception as exc:
+            # Import retry exceptions here to avoid circular import at module level
+            from chutes.middleware.json_guard import JsonValidationFailed
+
+            # Check for schema/grounding retry requests (course correction)
+            try:
+                from chutes.middleware.schema_guard import SchemaRetryNeeded, SchemaValidationFailed
+                from chutes.middleware.grounding_guard import GroundingRetryNeeded
+            except ImportError:
+                SchemaRetryNeeded = None
+                SchemaValidationFailed = None
+                GroundingRetryNeeded = None
+
+            # Handle Schema course correction retry
+            if SchemaRetryNeeded and isinstance(exc, SchemaRetryNeeded):
+                correction_attempt += 1
+                if correction_attempt >= MAX_CORRECTION_ATTEMPTS:
+                    logger.error(
+                        "[{}] Schema validation max corrections exceeded ({})",
+                        request_id, correction_attempt,
+                    )
+                    raise ProxyError(
+                        422,
+                        f"Schema validation failed after {correction_attempt} correction attempts. "
+                        f"Last correction hint: {exc.hint[:300]}",
+                        "schema_validation_failed",
+                    )
+                logger.info(
+                    "[{}] Schema validation failed, retrying with correction (attempt {})",
+                    request_id, correction_attempt,
+                )
+                # Append correction prompt and retry
+                working_messages = list(working_messages) + [
+                    {"role": "user", "content": exc.hint}
+                ]
+                body["messages"] = working_messages
+                continue  # Retry the completion
+
+            # Handle Schema validation final failure
+            if SchemaValidationFailed and isinstance(exc, SchemaValidationFailed):
+                error_details = "; ".join(
+                    e.get("message", str(e)) for e in exc.errors[:5]
+                )
+                raise ProxyError(
+                    422,
+                    f"Schema validation failed: {error_details}",
+                    "schema_validation_failed",
+                    advice="Fix your prompt to return JSON matching the schema, or remove json_schema from request.",
+                )
+
+            # Handle Grounding course correction retry
+            if GroundingRetryNeeded and isinstance(exc, GroundingRetryNeeded):
+                correction_attempt += 1
+                if correction_attempt >= MAX_CORRECTION_ATTEMPTS:
+                    logger.error(
+                        "[{}] Grounding max corrections exceeded ({})",
+                        request_id, correction_attempt,
+                    )
+                    raise ProxyError(
+                        422,
+                        f"Grounding verification failed after {correction_attempt} correction attempts. "
+                        f"Response not sufficiently grounded in source text.",
+                        "grounding_failed",
+                    )
+                logger.info(
+                    "[{}] Grounding failed, retrying with correction (attempt {})",
+                    request_id, correction_attempt,
+                )
+                # Append correction prompt and retry
+                working_messages = list(working_messages) + [
+                    {"role": "user", "content": exc.hint}
+                ]
+                body["messages"] = working_messages
+                continue  # Retry the completion
+
+            if isinstance(exc, JsonValidationFailed):
+                logger.warning(
+                    "[{}] JSON validation failed for model={}, signalling upstream error",
+                    request_id,
+                    model,
+                )
                 raise ProxyError(
                     502,
-                    f"Thinking model exhausted token budget — 0 visible tokens "
-                    f"produced (max_tokens={req_max}, total_tokens={total}). "
-                    f"Increase max_tokens or use a non-thinking model.",
-                    "thinking_budget_exhausted",
+                    f"JSON validation failed after repair: {exc.raw_text[:200]}",
+                    "json_validation_error",
                 )
+            await _middleware_chain.run_on_error(body, exc)
+            raise
 
-            response_dict = await _middleware_chain.run_post_call(body, response_dict)
 
-            # Echo opaque metadata back — LLM never saw it, can't fabricate it
-            if caller_metadata is not None:
-                response_dict["scillm_metadata"] = caller_metadata
+@app.get("/v1/scillm/model-pools")
+async def scillm_model_pools(request: Request):
+    """List server-side model pools for concurrent batch routing."""
+    auth_err = _check_auth(request)
+    if auth_err:
+        raise ProxyError(401, auth_err, "authentication_error")
 
-            elapsed = time.monotonic() - start
-
-            # Extract cost headers stashed by CostHeaderMiddleware
-            cost_headers = response_dict.pop("_cost_headers", {})
-            # Extract timeout headers stashed by TimeoutEstimatorMiddleware
-            timeout_headers = response_dict.pop("_timeout_headers", {})
-
-            resp_headers = {
-                "x-request-id": request_id,
-                "x-latency-ms": str(int(elapsed * 1000)),
+    return {
+        "pools": {
+            name: {
+                **pool,
+                "lanes": [dict(lane) for lane in pool["lanes"]],
             }
-            resp_headers.update(cost_headers)
-            resp_headers.update(timeout_headers)
+            for name, pool in _DEFAULT_MODEL_POOLS.items()
+        }
+    }
 
-            return JSONResponse(
-                content=response_dict,
-                headers=resp_headers,
-            )
 
-    except (ProxyError, MiddlewareReject):
-        raise
-    except RouterProxyError as exc:
-        # Convert router's ProxyError to enriched ProxyError for LLM analysis
-        raise ProxyError(exc.status_code, exc.message, "router_error")
-    except Exception as exc:
-        # Import here to avoid circular import at module level
-        from chutes.middleware.json_guard import JsonValidationFailed
+@app.post("/v1/scillm/batch/completions")
+async def scillm_batch_completions(request: Request):
+    """Run a batch across a weighted provider pool using ``asyncio.as_completed``."""
+    auth_err = _check_auth(request)
+    if auth_err:
+        raise ProxyError(401, auth_err, "authentication_error")
+    if _config is None or _router is None or _middleware_chain is None:
+        raise ProxyError(503, "Proxy not ready — startup incomplete", "service_unavailable")
 
-        if isinstance(exc, JsonValidationFailed):
-            logger.warning(
-                "[{}] JSON validation failed for model={}, signalling upstream error",
-                request_id,
-                model,
-            )
-            raise ProxyError(
-                502,
-                f"JSON validation failed after repair: {exc.raw_text[:200]}",
-                "json_validation_error",
-            )
-        await _middleware_chain.run_on_error(body, exc)
-        raise
+    body = await request.json()
+    pool_name = str(body.get("model_pool") or body.get("model") or "qra-deepseek-pool")
+    pool = _model_pool(pool_name)
+    if pool is None:
+        raise ProxyError(
+            400,
+            f"Unknown model_pool '{pool_name}'. Available: {', '.join(sorted(_DEFAULT_MODEL_POOLS))}.",
+            "invalid_request_error",
+        )
+
+    items = body.get("items")
+    if not isinstance(items, list) or not items:
+        raise ProxyError(400, "items must be a non-empty list", "invalid_request_error")
+    max_items = int(body.get("max_items") or 500)
+    if len(items) > max_items:
+        raise ProxyError(400, f"batch has {len(items)} items; max_items is {max_items}", "invalid_request_error")
+
+    batch_id = str(body.get("batch_id") or f"batch-{uuid.uuid4().hex[:12]}")
+    lanes = pool["lanes"]
+    lane_semaphores = {
+        lane["name"]: asyncio.Semaphore(int(lane.get("max_concurrency") or 1))
+        for lane in lanes
+    }
+    auth_header = request.headers.get("authorization", "")
+    caller_skill = request.headers.get("x-caller-skill", "scillm-batch-pool")
+    shared_params = {key: body[key] for key in _BATCH_FORWARD_KEYS if key in body}
+    shared_params["stream"] = False
+    total_started = time.monotonic()
+
+    async def run_one(client: httpx.AsyncClient, item: dict[str, Any], index: int) -> dict[str, Any]:
+        lane = _lane_for_index(lanes, index)
+        item_id = _item_id(item, index)
+        started = time.monotonic()
+        async with lane_semaphores[lane["name"]]:
+            try:
+                payload = {
+                    **shared_params,
+                    **{key: item[key] for key in _BATCH_FORWARD_KEYS if key in item},
+                    "model": lane["model"],
+                    "messages": _messages_for_batch_item(item),
+                }
+                item_metadata = item.get("scillm_metadata") if isinstance(item.get("scillm_metadata"), dict) else {}
+                payload["scillm_metadata"] = {
+                    **item_metadata,
+                    "batch_id": batch_id,
+                    "item_id": item_id,
+                    "model_pool": pool_name,
+                    "lane": lane["name"],
+                    "selected_model": lane["model"],
+                    "provider": lane.get("provider"),
+                }
+                timeout = float(item.get("timeout") or body.get("timeout") or lane.get("timeout") or 300.0)
+                response = await client.post(
+                    "/v1/chat/completions",
+                    headers={
+                        "Authorization": auth_header,
+                        "X-Caller-Skill": caller_skill,
+                        "X-Scillm-Batch-Id": batch_id,
+                        "X-Scillm-Batch-Total": str(len(items)),
+                        "X-Scillm-Call-Key": item_id,
+                    },
+                    json=payload,
+                    timeout=timeout,
+                )
+                response.raise_for_status()
+                data = response.json()
+                return {
+                    "ok": True,
+                    "item_id": item_id,
+                    "index": index,
+                    "lane": lane["name"],
+                    "provider": lane.get("provider"),
+                    "model": lane["model"],
+                    "served_model": data.get("model"),
+                    "content": data.get("choices", [{}])[0].get("message", {}).get("content"),
+                    "response": data,
+                    "latency_s": round(time.monotonic() - started, 2),
+                }
+            except httpx.HTTPStatusError as exc:
+                error = str(exc)
+                try:
+                    error_body = exc.response.json()
+                    if isinstance(error_body, dict) and isinstance(error_body.get("error"), dict):
+                        error = error_body["error"].get("message") or error
+                except Exception:
+                    error = exc.response.text or error
+                return {
+                    "ok": False,
+                    "item_id": item_id,
+                    "index": index,
+                    "lane": lane["name"],
+                    "provider": lane.get("provider"),
+                    "model": lane["model"],
+                    "error": error,
+                    "status_code": exc.response.status_code,
+                    "latency_s": round(time.monotonic() - started, 2),
+                }
+            except Exception as exc:
+                return {
+                    "ok": False,
+                    "item_id": item_id,
+                    "index": index,
+                    "lane": lane["name"],
+                    "provider": lane.get("provider"),
+                    "model": lane["model"],
+                    "error": str(exc) or type(exc).__name__,
+                    "error_type": type(exc).__name__,
+                    "latency_s": round(time.monotonic() - started, 2),
+                }
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://scillm.internal") as client:
+        tasks = [
+            asyncio.create_task(run_one(client, item, index))
+            for index, item in enumerate(items)
+            if isinstance(item, dict)
+        ]
+        if len(tasks) != len(items):
+            raise ProxyError(400, "each item must be an object", "invalid_request_error")
+        results = []
+        for task in asyncio.as_completed(tasks):
+            results.append(await task)
+
+    completed = sum(1 for result in results if result.get("ok"))
+    failed = len(results) - completed
+    return {
+        "batch_id": batch_id,
+        "model_pool": pool_name,
+        "strategy": pool["strategy"],
+        "lanes": lanes,
+        "total": len(results),
+        "completed": completed,
+        "failed": failed,
+        "elapsed_s": round(time.monotonic() - total_started, 2),
+        "results": results,
+        "ordered": False,
+        "completion_order": "as_completed",
+    }
 
 
 @app.get("/v1/scillm/health")
@@ -981,7 +1408,86 @@ async def scillm_models(request: Request):
         "models": ["all-MiniLM-L6-v2"],
         "endpoint": EMBEDDING_SERVICE_URL,
     }
-    return {"groups": groups, "aliases": _config.aliases}
+    return {
+        "groups": groups,
+        "aliases": _config.aliases,
+        "auto_providers": {
+            "codex": {
+                "model_prefixes": ["gpt-", "codex-", "o1", "o3", "o4"],
+                "examples": ["gpt-5.5", "gpt-5.3-codex", "gpt-5.2-codex"],
+                "key_configured": _codex_oauth_available(),
+            },
+            OPENCODE_GO_PROVIDER: {
+                "model_prefix": "opencode-go/",
+                "models_endpoint": "/v1/scillm/opencode-go/models",
+                "key_configured": bool(_config.opencode_go_api_key),
+            }
+        },
+    }
+
+
+@app.get("/v1/scillm/opencode-go/models")
+async def scillm_opencode_go_models(
+    request: Request,
+    source: str = "auto",
+    refresh: bool = True,
+    verbose: bool = False,
+):
+    """List OpenCode Go models available to scillm.
+
+    ``source=auto`` defaults to live CLI refresh, then a running
+    ``opencode serve`` instance, then the built-in registry.  ``source=server``,
+    ``source=cli``, and ``source=static`` force one path.
+    """
+    auth_err = _check_auth(request)
+    if auth_err:
+        raise ProxyError(401, auth_err, "authentication_error")
+
+    if _config is None:
+        raise ProxyError(503, "Proxy not ready — startup incomplete", "service_unavailable")
+
+    source = source.lower()
+    if source not in {"auto", "server", "cli", "static"}:
+        raise ProxyError(400, "source must be one of: auto, server, cli, static", "invalid_request_error")
+
+    errors: list[str] = []
+    models: list[str] = []
+    actual_source = "static"
+
+    if source in {"auto", "cli"}:
+        try:
+            models = await list_opencode_go_models_from_cli(refresh=refresh, verbose=verbose)
+            actual_source = "cli"
+        except Exception as exc:
+            errors.append(f"cli: {exc}")
+            if source == "cli":
+                raise ProxyError(502, f"opencode models failed: {exc}", "provider_error")
+
+    if not models and source in {"auto", "server"}:
+        try:
+            models = await list_opencode_go_models_from_server()
+            if models:
+                actual_source = "server"
+        except Exception as exc:
+            errors.append(f"server: {exc}")
+            if source == "server":
+                raise ProxyError(502, f"OpenCode server model listing failed: {exc}", "provider_error")
+
+    if not models:
+        models = static_opencode_go_models()
+        actual_source = "static"
+
+    key_configured = bool(_config.opencode_go_api_key)
+    return {
+        "provider": OPENCODE_GO_PROVIDER,
+        "source": actual_source,
+        "refresh": refresh,
+        "verbose": verbose,
+        "key_configured": key_configured,
+        "model_count": len(models),
+        "models": [describe_opencode_go_model(model, key_configured=key_configured) for model in models],
+        "errors": errors,
+    }
 
 
 @app.get("/v1/models")
@@ -1023,7 +1529,7 @@ async def openai_models(request: Request):
         for m in ["claude-sonnet-4-6", "claude-opus-4-6", "claude-haiku-4-5"]:
             auto_models.append({"id": m, "object": "model", "created": int(_start_time), "owned_by": "anthropic-oauth"})
     if is_codex_available():
-        for m in ["gpt-5.3-codex", "gpt-5.2-codex"]:
+        for m in ["gpt-5.5", "gpt-5.3-codex", "gpt-5.2-codex"]:
             auto_models.append({"id": m, "object": "model", "created": int(_start_time), "owned_by": "codex-oauth"})
     if _config.gemini_api_base:
         for m in ["gemini-2.5-flash", "gemini-2.5-pro", "gemini-3-flash-preview", "gemini-3.1-pro-preview", "gemini-2.5-flash-lite"]:
@@ -1032,6 +1538,9 @@ async def openai_models(request: Request):
         auto_models.append({"id": "ollama:*", "object": "model", "created": int(_start_time), "owned_by": "ollama-auto"})
     if _config.chutes_api_base:
         auto_models.append({"id": "chutes:Org/Model", "object": "model", "created": int(_start_time), "owned_by": "chutes-auto"})
+    if _config.opencode_go_api_key:
+        for model in static_opencode_go_models():
+            auto_models.append({"id": model, "object": "model", "created": int(_start_time), "owned_by": OPENCODE_GO_PROVIDER})
 
     # Deduplicate (auto models might overlap with configured ones)
     existing_ids = {m["id"] for m in models}
@@ -1072,7 +1581,7 @@ async def scillm_providers(request: Request):
             "codex": {
                 "available": is_codex_available(),
                 "pattern": "gpt-* | codex-*",
-                "examples": ["gpt-5.3-codex", "gpt-5.2-codex"],
+                "examples": ["gpt-5.5", "gpt-5.3-codex", "gpt-5.2-codex"],
                 "auth": "OAuth via ~/.codex/auth.json",
                 "note": "temperature/max_tokens not supported",
             },
@@ -1315,6 +1824,77 @@ async def batch_status(request: Request, batch_id: str):
         return {"error": "batch_resume module not available"}
     except Exception as exc:
         return {"error": f"Failed to get batch status: {exc}"}
+
+
+@app.websocket("/v1/scillm/ws/batch/{batch_id}")
+async def websocket_batch(websocket: WebSocket, batch_id: str):
+    """WebSocket endpoint for real-time batch progress notifications.
+
+    Clients subscribe to receive progress events as calls in the batch complete.
+
+    Events sent to client:
+    - subscribed: Initial connection with current progress
+    - call_complete: Each call completion with status, duration, cost
+    - batch_complete: Final summary when all calls finish
+    - ping: Keep-alive (every 30s)
+
+    Client can send:
+    - {"type": "set_total", "total": N}: Set expected total calls
+
+    Headers for HTTP requests in the batch:
+    - X-Scillm-Batch-Id: Batch identifier (required)
+    - X-Scillm-Call-Key: Unique key for each call (optional, defaults to model)
+    - X-Scillm-Batch-Total: Total expected calls (optional)
+
+    Example usage (Python):
+        import asyncio
+        import websockets
+        import json
+
+        async def monitor_batch(batch_id):
+            uri = f"ws://localhost:4001/v1/scillm/ws/batch/{batch_id}"
+            async with websockets.connect(uri) as ws:
+                while True:
+                    msg = await ws.recv()
+                    data = json.loads(msg)
+                    print(f"Progress: {data}")
+                    if data.get("event") == "batch_complete":
+                        break
+
+        asyncio.run(monitor_batch("my-batch-123"))
+    """
+    # Note: WebSocket auth is optional — batch_id acts as the secret.
+    # For production, consider requiring Bearer token in query param.
+    try:
+        from chutes.middleware.batch_ws import websocket_batch_handler
+        await websocket_batch_handler(websocket, batch_id)
+    except ImportError:
+        await websocket.accept()
+        await websocket.send_json({"error": "batch_ws module not available"})
+        await websocket.close(code=1011, reason="module_not_available")
+
+
+@app.get("/v1/scillm/ws/batch/{batch_id}/status")
+async def websocket_batch_status(request: Request, batch_id: str):
+    """REST endpoint to check batch progress (alternative to WebSocket).
+
+    Returns current progress for a batch without subscribing.
+
+    Usage: GET /v1/scillm/ws/batch/my-batch-123/status
+    """
+    auth_err = _check_auth(request)
+    if auth_err:
+        raise ProxyError(401, auth_err, "authentication_error")
+
+    try:
+        from chutes.middleware.batch_ws import get_batch_tracker
+        tracker = get_batch_tracker()
+        status = await tracker.get_status(batch_id)
+        if status is None:
+            return {"batch_id": batch_id, "status": "not_found"}
+        return status
+    except ImportError:
+        return {"error": "batch_ws module not available"}
 
 
 # ---------------------------------------------------------------------------

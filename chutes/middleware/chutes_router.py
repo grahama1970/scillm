@@ -173,6 +173,14 @@ ALIAS_TO_FAMILY: dict[str, str] = {
     "text-deepseek": "deepseek-large",  # Explicit DeepSeek family
 }
 
+CHUTES_PROVIDER_PREFIXES = (
+    "deepseek-ai/",
+    "qwen/",
+    "moonshotai/",
+    "tngtech/",
+    "zai-org/",
+)
+
 
 async def _matches_family(model_name: str, family: str) -> bool:
     """Check if model matches family using HuggingFace metadata.
@@ -427,12 +435,10 @@ def _is_chutes_model(model: str) -> bool:
     if model_lower in ALIAS_TO_FAMILY:
         return True
 
-    # Org/Model format typically means Chutes
-    if "/" in model and not model.startswith("http"):
-        return True
-
-    # Known Chutes patterns
-    if any(x in model_lower for x in ["deepseek-ai/", "qwen/", "moonshotai/", "tngtech/"]):
+    # Only known Chutes provider prefixes should be dynamically routed.
+    # Other provider/model forms (for example opencode-go/* or openrouter
+    # ids) must pass through to their own provider seams.
+    if model_lower.startswith(CHUTES_PROVIDER_PREFIXES):
         return True
 
     return False

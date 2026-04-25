@@ -5,13 +5,17 @@ Creates documents in the `llm_call_log` collection via /upsert, enabling:
 - /orchestrate to diagnose failures and self-correct
 - /analytics to track cost and token trends
 - Debugging failed batches via raw request/response content
+
+Also writes to JSONL backup on disk — independent of database, survives wipes.
 """
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import time
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -21,6 +25,12 @@ from scillm.proxy.middleware import BaseMiddleware
 
 _MEMORY_URL = os.environ.get("MEMORY_URL", "http://127.0.0.1:8601")
 _COLLECTION = "llm_call_log"
+
+# JSONL backup path — independent of database, survives DB wipes
+_JSONL_BACKUP_DIR = Path(os.environ.get(
+    "SCILLM_LOG_BACKUP_DIR",
+    "/mnt/storage12tb/scillm-logs"
+))
 
 # Lazy-init httpx client (reuses connection pool)
 _client: httpx.AsyncClient | None = None
@@ -42,6 +52,25 @@ def _make_key(ts_iso: str, model: str) -> str:
     """Unique _key per request — includes UUID suffix to avoid batch collisions."""
     raw = f"{ts_iso}:{model}:{_uuid.uuid4().hex[:8]}"
     return hashlib.sha256(raw.encode()).hexdigest()[:16]
+
+
+def _write_jsonl_backup(doc: dict, now: datetime) -> None:
+    """Append doc to daily JSONL file — independent backup, survives DB wipes.
+
+    Path: /mnt/storage12tb/scillm-logs/2026-04/calls-2026-04-18.jsonl
+    """
+    try:
+        month_dir = _JSONL_BACKUP_DIR / now.strftime("%Y-%m")
+        month_dir.mkdir(parents=True, exist_ok=True)
+
+        log_file = month_dir / f"calls-{now.strftime('%Y-%m-%d')}.jsonl"
+
+        # Append-only write — one JSON object per line
+        with open(log_file, "a", encoding="utf-8") as f:
+            f.write(json.dumps(doc, default=str, ensure_ascii=False) + "\n")
+    except Exception as exc:
+        # Never crash the request for backup failure — just log
+        logger.warning("arango_log: JSONL backup failed: {}", exc)
 
 
 class ArangoLogMiddleware(BaseMiddleware):
@@ -158,6 +187,10 @@ class ArangoLogMiddleware(BaseMiddleware):
             "response_content": response_content,
         }
 
+        # JSONL backup FIRST — survives DB wipes, append-only, can't be corrupted by agents
+        _write_jsonl_backup(doc, now)
+
+        # Then write to ArangoDB (may fail if DB is down/wiped)
         client = _get_client()
         resp = await client.post(
             "/upsert",

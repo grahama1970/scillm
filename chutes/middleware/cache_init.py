@@ -151,8 +151,8 @@ class CacheMiddleware(BaseMiddleware):
                 response = await asyncio.wait_for(_inflight[cache_key], timeout=120.0)
                 logger.debug("cache_middleware: DEDUPE got response for {}", request.get("model", "?"))
                 return response
-            except asyncio.TimeoutError:
-                logger.warning("cache_middleware: DEDUPE timeout for {}", cache_key)
+            except (asyncio.TimeoutError, asyncio.CancelledError) as e:
+                logger.warning("cache_middleware: DEDUPE {} for {}", type(e).__name__, cache_key)
                 return response
 
         # Return cached response if we had a hit

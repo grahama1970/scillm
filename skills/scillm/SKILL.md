@@ -2,7 +2,8 @@
 name: scillm
 description: >
   Universal LLM proxy on localhost:4001. One endpoint for all providers:
-  Chutes, DeepSeek, Gemini, Ollama, Claude (OAuth), Codex (OAuth), GLM.
+  Chutes, DeepSeek, Gemini, Ollama, Claude (OAuth), Codex (OAuth), GLM,
+  OpenCode Go.
   Auto-routes by model name. POST /v1/chat/completions (OpenAI-compatible).
   ZIP explosion, PDF inlineData, fallback cascades, JSON repair.
 allowed-tools: Bash, Read
@@ -25,10 +26,13 @@ triggers:
   - call codex
   - call gemini
   - call glm
+  - call opencode go
+  - call deepseek v4
+  - call minimax
   - send zip to LLM
   - send PDF to LLM
 metadata:
-  short-description: scillm (universal LLM proxy — Chutes, Gemini, Claude, Codex, GLM, Ollama)
+  short-description: scillm (universal LLM proxy — Chutes, Gemini, Claude, Codex, GLM, OpenCode Go, Ollama)
 provides:
   - llm-completion
 composes: [task-monitor, create-evidence-case, analytics, create-figure, llm-eval-lab]
@@ -39,6 +43,12 @@ taxonomy:
 ---
 
 # scillm — One Endpoint for All LLM Calls
+
+## Critical Operating Rules
+
+- **Batch calls:** Always use `httpx.AsyncClient` + `asyncio.create_task` + `asyncio.as_completed(tasks)` for `/scillm` batches unless the user explicitly requests `asyncio.gather` or strict input-order completion.
+- **No default gather:** Do not use `asyncio.gather` for batch calls just because it is shorter. If ordered output is needed, use `as_completed`, preserve `id`/`scillm_metadata`, then reorder after all tasks finish.
+- **Batch metadata:** Include `scillm_metadata.batch_id` and `scillm_metadata.item_id` on each batch item so responses can be paired, resumed, and audited.
 
 ## Setup (one-time per provider)
 
@@ -52,6 +62,7 @@ Most providers need zero setup — scillm reads existing credentials automatical
 | **GLM** | Add `GLM_API_Key=your-key` to `.env` | Get key from [z.ai](https://z.ai) (Coding Lite plan or higher) |
 | **Chutes** | Add `CHUTES_API_KEY` and `CHUTES_API_BASE` to `.env` | PAYG or subscription at [chutes.ai](https://chutes.ai) |
 | **DeepSeek** | Add `DEEPSEEK_API` to `.env` | Get key from [platform.deepseek.com](https://platform.deepseek.com) |
+| **OpenCode Go** | Add `OPENCODE_GO_API_KEY` to `.env` | Call exact models as `opencode-go/<model-id>`. Live model discovery uses Docker-installed `opencode models --refresh opencode-go` with host OpenCode auth/config/cache mounted into Docker. |
 | **Ollama** | `ollama pull model:tag` | Local models, no auth needed |
 
 After setup, rebuild the proxy: `docker compose -p scillm -f deploy/docker/compose.scillm.core.yml up -d --build`
@@ -68,6 +79,12 @@ Auth: `Bearer sk-dev-proxy-123` (dev master key).
 The proxy handles provider cascading, retries, JSON validation, VLM auto-routing,
 concurrency limits, budget tracking, and optional Redis caching.
 
+**Slash skill wrapper:**
+```bash
+/scillm "Explain quantum computing in one sentence"
+/scillm --model moonshot-text "Explain quantum computing in one sentence"
+```
+
 ## Available Models
 
 | Model | Backend | Use Case | Fallback |
@@ -81,7 +98,13 @@ concurrency limits, budget tracking, and optional Redis caching.
 | `text-gemini-3` | Gemini 3 Flash Preview (free key) | Thinking model, 1M context | → text-gemini-3-paid |
 | `claude-sonnet-4-6` | Anthropic Claude Sonnet (OAuth) | Max subscription via ~/.claude | (none) |
 | `claude-haiku-4-5` | Anthropic Claude Haiku (OAuth) | Fast, cheap via Max subscription | (none) |
-| `gpt-5.3-codex` | OpenAI Codex (OAuth) | High-reasoning via ~/.codex | (none) |
+| `gpt-5.5` | OpenAI Codex (OAuth) | Current high-reasoning Codex model via ~/.codex | (none) |
+| `gpt-5.3-codex` | OpenAI Codex (OAuth) | Legacy Codex model via ~/.codex | (none) |
+| `opencode-go/deepseek-v4-pro` | OpenCode Go `/messages` | Strong coding/reasoning model | (none) |
+| `opencode-go/deepseek-v4-flash` | OpenCode Go `/messages` | Faster DeepSeek V4 | (none) |
+| `opencode-go/minimax-m2.7` | OpenCode Go `/messages` | MiniMax coding model | (none) |
+| `opencode-go/kimi-k2.6` | OpenCode Go `/chat/completions` | Kimi coding model | (none) |
+| `opencode-go/qwen3.6-plus` | OpenCode Go `/chat/completions` | Qwen coding model | (none) |
 | `vlm-claude` | Claude Sonnet (OAuth) | VLM fallback (images + PDFs) | (none) |
 | `vlm-codex` | GPT-5.3 Codex (OAuth) | VLM fallback (images + PDFs) | (none) |
 | Any `gemini-*` | Google | Auto-routed to Gemini API | (none) |
@@ -95,9 +118,10 @@ concurrency limits, budget tracking, and optional Redis caching.
 | Pattern | Provider | Auth | Example |
 |---------|----------|------|---------|
 | `claude-*` | Anthropic | Claude Code Max OAuth | `claude-sonnet-4-6` |
-| `gpt-*` / `codex-*` | OpenAI Codex | ChatGPT OAuth | `gpt-5.3-codex` |
+| `gpt-*` / `codex-*` | OpenAI Codex | ChatGPT OAuth | `gpt-5.5` |
 | `gemini-*` | Google | API key | `gemini-2.5-flash` |
 | `glm-*` (via `text-glm`) | Z.AI GLM | API key | `text-glm` → glm-5.1 |
+| `opencode-go/*` | OpenCode Go | `OPENCODE_GO_API_KEY` | `opencode-go/deepseek-v4-pro` |
 | `Org/Model` | Chutes | API key | `Qwen/Qwen3-30B-A3B` |
 | `model:tag` | Ollama (local) | none | `qwen2.5:7b` |
 
@@ -106,6 +130,46 @@ Cascade aliases still work: `text` (Chutes → Gemini free → Gemini paid → D
 **Chutes cold-start handling**: Non-TEE tried first (1 retry), falls through to TEE on 503. Warmup API fires in background on cold detect — miners notified to spin up. Next call may hit warm non-TEE.
 
 **Discover all available models:** `GET /v1/scillm/providers` returns every provider, its auto-routing pattern, available models, and auth status.
+
+**Discover live OpenCode Go models:** call `GET /v1/scillm/opencode-go/models?refresh=true`. The proxy runs `opencode models --refresh opencode-go` inside Docker first, using the mounted host OpenCode auth/config/cache, then falls back to `opencode serve /provider`, then a built-in registry. Use `models[*].id` directly as the chat `model`.
+
+```python
+import httpx
+
+SCILLM = "http://127.0.0.1:4001"
+HEADERS = {"Authorization": "Bearer sk-dev-proxy-123", "X-Caller-Skill": "scillm-skill"}
+
+with httpx.Client(timeout=120) as client:
+    listing = client.get(
+        f"{SCILLM}/v1/scillm/opencode-go/models",
+        headers=HEADERS,
+        params={"refresh": "true"},
+    )
+    listing.raise_for_status()
+    models = listing.json()["models"]
+
+    deepseek = [
+        m["id"] for m in models
+        if m["id"].startswith("opencode-go/deepseek-v4-")
+        and m["supported"]
+        and m["key_configured"]
+    ]
+    model = "opencode-go/deepseek-v4-pro" if "opencode-go/deepseek-v4-pro" in deepseek else deepseek[0]
+
+    resp = client.post(
+        f"{SCILLM}/v1/chat/completions",
+        headers=HEADERS,
+        json={
+            "model": model,
+            "messages": [{"role": "user", "content": "Say OK and name your model."}],
+            "temperature": 0,
+        },
+    )
+    resp.raise_for_status()
+    print(resp.json()["choices"][0]["message"]["content"])
+```
+
+For OpenCode Go, prefer exact model names over fallback aliases. These models are curated subscription models, not Chutes-style warm/cold deployments.
 
 ---
 
@@ -222,35 +286,126 @@ OpenAI-style arrays pass through unchanged — full control for multi-turn, syst
 
 ## Batch Calls (Parallel Completions)
 
-**No imports needed.** Just httpx + asyncio.gather against the proxy. No `max_tokens`.
-The proxy handles concurrency limits internally — fire all requests at once.
+**Default rule: all `/scillm` batch calls MUST use `asyncio.as_completed(tasks)` unless the user explicitly asks for ordered `gather` output.** This is required so long-running items do not block completed results, failures can be recorded item-by-item, and large jobs can persist partial progress as responses arrive.
+
+**Large QRA/default DeepSeek batches:** use the server-side pool endpoint `POST /v1/scillm/batch/completions` with `model_pool: "qra-deepseek-pool"` instead of hand-splitting Chutes/OpenCode Go yourself. This pool runs independent Chutes and OpenCode Go lanes concurrently and returns results in completion order.
+
+Do not use `asyncio.gather` for `/scillm` batches by default. If ordered output is required, collect `as_completed` results with each item’s `id` or `scillm_metadata`, then reorder after completion.
+
+Use `httpx.AsyncClient`, create tasks with `asyncio.create_task`, and process them with `asyncio.as_completed`. The proxy handles provider-side concurrency limits, but callers should still use a local `asyncio.Semaphore` for very large batches or quota-sensitive providers.
+
+### Server-side DeepSeek pool (recommended for large QRA batches)
+
+Use this when a batch has many independent QRA/extraction prompts and Chutes and
+OpenCode Go quality are close enough that throughput matters more than a single
+provider choice. Do **not** use it for model evals where every prompt must hit
+every model; use `/llm-eval-lab` for that.
+
+Pool contract:
+
+| Pool | Strategy | Lanes |
+|------|----------|-------|
+| `qra-deepseek-pool` | weighted round-robin | Chutes `deepseek-ai/DeepSeek-V3-0324-TEE` weight 3 + OpenCode Go `opencode-go/deepseek-v4-flash` weight 2 |
+
+```python
+import httpx
+
+SCILLM = "http://localhost:4001"
+HEADERS = {
+    "Authorization": "Bearer sk-dev-proxy-123",
+    "X-Caller-Skill": "create-qras",
+}
+
+items = [
+    {"id": "cwe20-ex0002", "prompt": "Create QRAs for CWE-20 and EX-0002 ..."},
+    {"id": "cwe287-ia0001", "prompt": "Create QRAs for CWE-287 and IA-0001 ..."},
+]
+
+with httpx.Client(timeout=900) as client:
+    resp = client.post(
+        f"{SCILLM}/v1/scillm/batch/completions",
+        headers=HEADERS,
+        json={
+            "model_pool": "qra-deepseek-pool",
+            "batch_id": "create-qras-20260425",
+            "temperature": 0,
+            "items": items,
+        },
+    )
+    resp.raise_for_status()
+    data = resp.json()
+
+for result in data["results"]:  # completion order, not input order
+    if result["ok"]:
+        print(result["item_id"], result["model"], result["latency_s"])
+        # result["content"] contains the assistant text
+    else:
+        print("FAILED", result["item_id"], result["model"], result["error"])
+```
+
+Response notes:
+
+- Results are returned in `as_completed` order; use `item_id` to join back to inputs.
+- Each inner call receives `scillm_metadata.batch_id`, `item_id`, `model_pool`, `lane`, `selected_model`, and `provider`.
+- Use `GET /v1/scillm/model-pools` to inspect available pools and lane weights.
+- Use this endpoint to raise throughput across providers; do not treat OpenCode Go as a Chutes fallback.
 
 ### httpx batch (recommended — no scillm import)
 
 ```python
-import asyncio, httpx
+import asyncio, httpx, time
 
 URL = "http://localhost:4001/v1/chat/completions"
 HEADERS = {"Authorization": "Bearer sk-dev-proxy-123"}
 
-async def complete(client, prompt):
-    resp = await client.post(URL, headers=HEADERS, json={
-        "model": "text",
-        "messages": [{"role": "user", "content": prompt}],
-    }, timeout=45.0)
-    return resp.json()["choices"][0]["message"]["content"]
+async def complete(client, request):
+    """Fire one request, return result paired with original request."""
+    t0 = time.monotonic()
+    try:
+        resp = await client.post(URL, headers=HEADERS, json={
+            "model": request.get("model", "text"),
+            "messages": [{"role": "user", "content": request["prompt"]}],
+            "scillm_metadata": {"batch_id": request["batch_id"], "item_id": request["id"]},
+        }, timeout=120.0)
+        resp.raise_for_status()
+        data = resp.json()
+        return {
+            "ok": True,
+            "request": request,
+            "content": data["choices"][0]["message"]["content"],
+            "metadata": data.get("scillm_metadata"),
+            "elapsed_s": round(time.monotonic() - t0, 2),
+        }
+    except Exception as exc:
+        return {
+            "ok": False,
+            "request": request,
+            "error": str(exc),
+            "elapsed_s": round(time.monotonic() - t0, 2),
+        }
 
 async def main():
-    prompts = ["What is 2+2?", "What is 3+3?", "What is 4+4?"]
+    requests = [
+        {"batch_id": "math-demo", "id": "q1", "prompt": "What is 2+2?"},
+        {"batch_id": "math-demo", "id": "q2", "prompt": "What is 3+3?"},
+        {"batch_id": "math-demo", "id": "q3", "prompt": "What is 4+4?"},
+    ]
     async with httpx.AsyncClient() as client:
-        results = await asyncio.gather(*[complete(client, p) for p in prompts])
-    for p, r in zip(prompts, results):
-        print(f"{p} → {r}")
+        tasks = [asyncio.create_task(complete(client, request)) for request in requests]
+        results = []
+        for task in asyncio.as_completed(tasks):
+            result = await task
+            results.append(result)
+            if result["ok"]:
+                print(f"{result['request']['id']} done in {result['elapsed_s']}s")
+            else:
+                print(f"{result['request']['id']} FAILED: {result['error']}")
+    return results
 
 asyncio.run(main())
 ```
 
-### Process responses as they arrive (no scillm import)
+### Response-arrival pattern (required default)
 
 Use `asyncio.as_completed` to handle each response the moment it arrives.
 Each result carries its original request metadata for pairing:
@@ -315,6 +470,100 @@ async def complete_limited(client, request):
     async with sem:
         return await complete(client, request)
 ```
+
+### OpenCode Go Large Batches
+
+For OpenCode Go batches, use exact `opencode-go/<model-id>` names and generate the
+live model list before choosing a model. Unlike Chutes, OpenCode Go should not be
+treated as a warm/cold fallback pool; pick the model intentionally and cap client
+concurrency to avoid burning subscription quota or creating local queue pressure.
+
+Suggested starting concurrency:
+
+| Model Pattern | Starting Concurrency | Notes |
+|---------------|----------------------|-------|
+| `opencode-go/deepseek-v4-pro` | 3–4 | Stronger, likely slower. Use for quality-sensitive coding/reasoning batches. |
+| `opencode-go/deepseek-v4-flash` | 6–8 | Faster DeepSeek option. Use for throughput-sensitive batches. |
+| `opencode-go/minimax-m2.7` | 4–6 | Good coding batch model. |
+| `opencode-go/qwen3.6-plus` | 6–8 | OpenAI-compatible chat endpoint, good throughput candidate. |
+| `opencode-go/kimi-k2.6` | 4–6 | Use for Kimi-specific coding behavior. |
+
+```python
+import asyncio
+import httpx
+
+SCILLM = "http://localhost:4001"
+HEADERS = {
+    "Authorization": "Bearer sk-dev-proxy-123",
+    "X-Caller-Skill": "scillm-opencode-go-batch",
+}
+
+async def pick_opencode_go_model(client, prefix="opencode-go/deepseek-v4-"):
+    listing = await client.get(
+        f"{SCILLM}/v1/scillm/opencode-go/models",
+        headers=HEADERS,
+        params={"refresh": "true"},
+    )
+    listing.raise_for_status()
+    models = listing.json()["models"]
+    candidates = [
+        m["id"] for m in models
+        if m["id"].startswith(prefix) and m["supported"] and m["key_configured"]
+    ]
+    if "opencode-go/deepseek-v4-pro" in candidates:
+        return "opencode-go/deepseek-v4-pro"
+    if not candidates:
+        raise RuntimeError("No configured OpenCode Go models available")
+    return candidates[0]
+
+async def complete_one(client, sem, model, item):
+    async with sem:
+        resp = await client.post(
+            f"{SCILLM}/v1/chat/completions",
+            headers=HEADERS,
+            json={
+                "model": model,
+                "messages": [
+                    {"role": "user", "content": item["prompt"]},
+                ],
+                "temperature": 0,
+                "scillm_metadata": {"batch_id": item["batch_id"], "item_id": item["id"]},
+            },
+            timeout=180.0,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        return {
+            "ok": True,
+            "id": item["id"],
+            "content": data["choices"][0]["message"]["content"],
+            "metadata": data.get("scillm_metadata"),
+        }
+
+async def run_batch(items, concurrency=4):
+    async with httpx.AsyncClient(timeout=180.0) as client:
+        model = await pick_opencode_go_model(client)
+        sem = asyncio.Semaphore(concurrency)
+        tasks = [asyncio.create_task(complete_one(client, sem, model, item)) for item in items]
+        results = []
+        for task in asyncio.as_completed(tasks):
+            try:
+                results.append(await task)
+            except Exception as exc:
+                results.append({"ok": False, "error": str(exc)})
+        return model, results
+
+items = [
+    {"batch_id": "demo", "id": "1", "prompt": "Summarize this requirement: ..."},
+    {"batch_id": "demo", "id": "2", "prompt": "Summarize this requirement: ..."},
+]
+model, results = asyncio.run(run_batch(items, concurrency=4))
+print(model, results)
+```
+
+For very large batches, chunk inputs at the caller level (for example, 100–500
+items at a time), persist results after each chunk, and resume failed items using
+the original `scillm_metadata.batch_id` and `item_id`.
 
 ## Source Grounding Verification
 
@@ -641,14 +890,14 @@ resp = httpx.post(
     "http://localhost:4001/v1/chat/completions",
     headers={"Authorization": "Bearer sk-dev-proxy-123"},
     json={
-        "model": "gpt-5.3-codex",
+        "model": "gpt-5.5",
         "messages": [{"role": "user", "content": "Explain quicksort"}],
     },
     timeout=120.0,
 )
 ```
 
-**Supported models:** `gpt-5.2-codex`, `gpt-5.3-codex`. Standard GPT models (gpt-4o, etc.) are NOT supported via ChatGPT OAuth — they require a platform API key.
+**Supported models:** `gpt-5.5`, `gpt-5.2-codex`, `gpt-5.3-codex`. Other platform GPT models (for example `gpt-4o`) are NOT supported via ChatGPT OAuth — they require a platform API key.
 
 **Streaming:** Both Claude and Codex support `"stream": true`. The proxy translates provider-specific SSE events into OpenAI-compatible delta chunks (`data: {"choices":[{"delta":{"content":"..."}}]}`). Works with any SSE client including `httpx.stream()` and the OpenAI SDK.
 

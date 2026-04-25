@@ -2,6 +2,7 @@
 
 Parses proxy_server_config.yaml into typed dataclasses.
 Resolves ``os.environ/VAR_NAME`` syntax for environment variable injection.
+Also supports fallback lookup via ``os.environ/PRIMARY|SECONDARY``.
 Supports CHUTES_RESEARCH toggle for research/standard endpoint switching.
 """
 
@@ -16,7 +17,7 @@ from typing import Any
 import yaml
 from loguru import logger
 
-_ENV_RE = re.compile(r"^os\.environ/(\w+)$")
+_ENV_RE = re.compile(r"^os\.environ/([\w|]+)$")
 
 
 # ---------------------------------------------------------------------------
@@ -85,6 +86,8 @@ class ProxyConfig:
     chutes_api_key: str | None = None
     gemini_api_base: str | None = None
     gemini_api_key: str | None = None
+    opencode_go_api_base: str | None = None
+    opencode_go_api_key: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -93,18 +96,23 @@ class ProxyConfig:
 
 
 def _resolve_env(value: Any) -> Any:
-    """Resolve ``os.environ/VAR_NAME`` strings to environment values."""
+    """Resolve ``os.environ/VAR_NAME`` strings to environment values.
+
+    Supports fallbacks via ``os.environ/PRIMARY|SECONDARY`` and returns the first
+    non-empty environment value found.
+    """
     if not isinstance(value, str):
         return value
     m = _ENV_RE.match(value)
     if not m:
         return value
-    var_name = m.group(1)
-    resolved = os.environ.get(var_name)
-    if resolved is None:
-        logger.warning("env var {} not set, using empty string", var_name)
-        return ""
-    return resolved
+    var_names = [part for part in m.group(1).split("|") if part]
+    for var_name in var_names:
+        resolved = os.environ.get(var_name)
+        if resolved:
+            return resolved
+    logger.warning("env vars {} not set, using empty string", ", ".join(var_names))
+    return ""
 
 
 def _resolve_dict(d: dict[str, Any]) -> dict[str, Any]:
@@ -260,6 +268,15 @@ def load_config(path: str | Path) -> ProxyConfig:
     if gemini_base:
         logger.info("Gemini auto-routing enabled (base={})", gemini_base)
 
+    opencode_go_base = (
+        os.environ.get("OPENCODE_GO_API_BASE")
+        or resolved.get("opencode_go_api_base")
+        or "https://opencode.ai/zen/go/v1"
+    )
+    opencode_go_key = os.environ.get("OPENCODE_GO_API_KEY") or resolved.get("opencode_go_api_key")
+    if opencode_go_base and opencode_go_key:
+        logger.info("OpenCode Go auto-routing enabled (base={})", opencode_go_base)
+
     return ProxyConfig(
         general=general,
         model_groups=model_groups,
@@ -278,4 +295,6 @@ def load_config(path: str | Path) -> ProxyConfig:
         chutes_api_key=chutes_key,
         gemini_api_base=gemini_base,
         gemini_api_key=gemini_key,
+        opencode_go_api_base=opencode_go_base,
+        opencode_go_api_key=opencode_go_key,
     )

@@ -1,0 +1,362 @@
+"""OpenCode Go provider helpers.
+
+OpenCode Go exposes two API shapes:
+- OpenAI-compatible chat completions for most models.
+- Anthropic-compatible messages for DeepSeek and MiniMax models.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import os
+import re
+from typing import Any, AsyncIterator
+
+import httpx
+import openai
+from loguru import logger
+
+from scillm.proxy.providers import make_chunk_id, sse_chunk, sse_done, sse_format
+from scillm.proxy.providers.claude import (
+    ANTHROPIC_VERSION,
+    _anthropic_to_openai_response,
+    _openai_tool_choice_to_anthropic,
+    _openai_tools_to_anthropic,
+    _openai_to_anthropic_messages,
+)
+
+OPENCODE_GO_PROVIDER = "opencode-go"
+OPENCODE_GO_PREFIX = f"{OPENCODE_GO_PROVIDER}/"
+OPENCODE_GO_DEFAULT_API_BASE = "https://opencode.ai/zen/go/v1"
+OPENCODE_SERVER_DEFAULT_URL = "http://127.0.0.1:4096"
+OPENCODE_GO_CHAT_TIMEOUT_SEC = 120
+OPENCODE_GO_MESSAGES_TIMEOUT_SEC = 600
+
+ENDPOINT_CHAT_COMPLETIONS = "chat_completions"
+ENDPOINT_MESSAGES = "messages"
+ENDPOINT_UNKNOWN = "unknown"
+
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+
+_MODEL_ENDPOINT_TYPES: dict[str, str] = {
+    "deepseek-v4-flash": ENDPOINT_MESSAGES,
+    "deepseek-v4-pro": ENDPOINT_MESSAGES,
+    "glm-5": ENDPOINT_CHAT_COMPLETIONS,
+    "glm-5.1": ENDPOINT_CHAT_COMPLETIONS,
+    "kimi-k2.5": ENDPOINT_CHAT_COMPLETIONS,
+    "kimi-k2.6": ENDPOINT_CHAT_COMPLETIONS,
+    "mimo-v2-omni": ENDPOINT_CHAT_COMPLETIONS,
+    "mimo-v2-pro": ENDPOINT_CHAT_COMPLETIONS,
+    "mimo-v2.5": ENDPOINT_CHAT_COMPLETIONS,
+    "mimo-v2.5-pro": ENDPOINT_CHAT_COMPLETIONS,
+    "minimax-m2.5": ENDPOINT_MESSAGES,
+    "minimax-m2.7": ENDPOINT_MESSAGES,
+    "qwen3.5-plus": ENDPOINT_CHAT_COMPLETIONS,
+    "qwen3.6-plus": ENDPOINT_CHAT_COMPLETIONS,
+}
+
+
+class OpenCodeGoHTTPError(Exception):
+    """HTTP error returned by the OpenCode Go API."""
+
+    def __init__(self, status_code: int, message: str) -> None:
+        self.status_code = status_code
+        self.message = message
+        super().__init__(f"OpenCode Go API {status_code}: {message}")
+
+
+def is_opencode_go_model(model: str) -> bool:
+    """Return true when *model* uses the OpenCode Go provider prefix."""
+    return model.startswith(OPENCODE_GO_PREFIX) and len(model) > len(OPENCODE_GO_PREFIX)
+
+
+def opencode_go_model_id(model: str) -> str:
+    """Strip ``opencode-go/`` from a model id."""
+    return model[len(OPENCODE_GO_PREFIX):] if is_opencode_go_model(model) else model
+
+
+def opencode_go_endpoint_type(model_id: str) -> str:
+    """Return the OpenCode Go endpoint type for a model id."""
+    return _MODEL_ENDPOINT_TYPES.get(model_id, ENDPOINT_UNKNOWN)
+
+
+def static_opencode_go_models() -> list[str]:
+    """Return known OpenCode Go model ids in prefixed provider/model form."""
+    return [f"{OPENCODE_GO_PREFIX}{model_id}" for model_id in sorted(_MODEL_ENDPOINT_TYPES)]
+
+
+def describe_opencode_go_model(model: str, *, key_configured: bool) -> dict[str, Any]:
+    """Build metadata for one OpenCode Go model."""
+    model_id = opencode_go_model_id(model)
+    endpoint_type = opencode_go_endpoint_type(model_id)
+    supported = endpoint_type in {ENDPOINT_CHAT_COMPLETIONS, ENDPOINT_MESSAGES}
+    return {
+        "id": f"{OPENCODE_GO_PREFIX}{model_id}",
+        "model": model_id,
+        "provider": OPENCODE_GO_PROVIDER,
+        "endpoint_type": endpoint_type,
+        "supported": supported,
+        "requires_key": True,
+        "key_configured": key_configured,
+        "route": "/v1/chat/completions",
+    }
+
+
+def parse_opencode_models_output(output: str) -> list[str]:
+    """Parse ``opencode models`` output into prefixed model ids."""
+    models: list[str] = []
+    seen: set[str] = set()
+    for raw_line in output.splitlines():
+        line = _ANSI_RE.sub("", raw_line).strip()
+        if not line or line.lower().startswith("models cache refreshed"):
+            continue
+        for token in line.split():
+            token = token.strip(",")
+            if is_opencode_go_model(token) and token not in seen:
+                seen.add(token)
+                models.append(token)
+                break
+    return models
+
+
+async def list_opencode_go_models_from_cli(*, refresh: bool = False, verbose: bool = False) -> list[str]:
+    """List OpenCode Go models via ``opencode models opencode-go``."""
+    args = ["opencode", "models"]
+    if refresh:
+        args.append("--refresh")
+    if verbose:
+        args.append("--verbose")
+    args.append(OPENCODE_GO_PROVIDER)
+
+    proc = await asyncio.create_subprocess_exec(
+        *args,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=20)
+    text = stdout.decode("utf-8", errors="replace")
+    if proc.returncode != 0:
+        err = stderr.decode("utf-8", errors="replace")
+        raise RuntimeError(f"{' '.join(args)} failed ({proc.returncode}): {err[:500]}")
+    return parse_opencode_models_output(text)
+
+
+def _extract_models_from_provider_obj(provider: Any) -> list[str]:
+    """Extract model ids from a flexible OpenCode Provider object."""
+    found: list[str] = []
+    seen: set[str] = set()
+
+    def add(model_id: str) -> None:
+        if not model_id:
+            return
+        prefixed = model_id if is_opencode_go_model(model_id) else f"{OPENCODE_GO_PREFIX}{model_id}"
+        if prefixed not in seen:
+            seen.add(prefixed)
+            found.append(prefixed)
+
+    def walk(value: Any) -> None:
+        if isinstance(value, str):
+            if is_opencode_go_model(value):
+                add(opencode_go_model_id(value))
+            elif value in _MODEL_ENDPOINT_TYPES:
+                add(value)
+        elif isinstance(value, dict):
+            if isinstance(value.get("id"), str) and value["id"] in _MODEL_ENDPOINT_TYPES:
+                add(value["id"])
+            for nested in value.values():
+                walk(nested)
+        elif isinstance(value, list):
+            for nested in value:
+                walk(nested)
+
+    walk(provider)
+    return found
+
+
+async def list_opencode_go_models_from_server(
+    *,
+    server_url: str | None = None,
+    username: str | None = None,
+    password: str | None = None,
+) -> list[str]:
+    """List OpenCode Go models from a running ``opencode serve`` instance."""
+    base = (server_url or os.environ.get("OPENCODE_SERVER_URL") or OPENCODE_SERVER_DEFAULT_URL).rstrip("/")
+    auth = None
+    password = password if password is not None else os.environ.get("OPENCODE_SERVER_PASSWORD")
+    username = username if username is not None else os.environ.get("OPENCODE_SERVER_USERNAME", "opencode")
+    if password:
+        auth = (username or "opencode", password)
+
+    async with httpx.AsyncClient(timeout=1.5, auth=auth) as client:
+        resp = await client.get(f"{base}/provider")
+    resp.raise_for_status()
+    data = resp.json()
+
+    providers = data.get("all", []) if isinstance(data, dict) else []
+    for provider in providers:
+        if not isinstance(provider, dict):
+            continue
+        provider_id = str(provider.get("id") or provider.get("providerID") or provider.get("name") or "")
+        if provider_id == OPENCODE_GO_PROVIDER:
+            return _extract_models_from_provider_obj(provider)
+    return []
+
+
+def _build_messages_body(
+    model: str,
+    messages: list[dict[str, Any]],
+    kwargs: dict[str, Any],
+) -> dict[str, Any]:
+    system_prompt, anthropic_msgs = _openai_to_anthropic_messages(messages)
+    for message in anthropic_msgs:
+        content = message.get("content")
+        if isinstance(content, str):
+            message["content"] = [{"type": "text", "text": content}]
+    body: dict[str, Any] = {
+        "model": model,
+        "messages": anthropic_msgs,
+    }
+    max_tokens = kwargs.get("max_tokens")
+    if max_tokens is not None:
+        body["max_tokens"] = max_tokens
+    if system_prompt:
+        body["system"] = system_prompt
+    if "temperature" in kwargs:
+        body["temperature"] = kwargs["temperature"]
+    if "top_p" in kwargs:
+        body["top_p"] = kwargs["top_p"]
+    if "stop" in kwargs:
+        stop = kwargs["stop"]
+        body["stop_sequences"] = stop if isinstance(stop, list) else [stop]
+    if "tools" in kwargs and kwargs["tools"]:
+        tools = _openai_tools_to_anthropic(kwargs["tools"])
+        if tools:
+            body["tools"] = tools
+            tool_choice = _openai_tool_choice_to_anthropic(kwargs.get("tool_choice"))
+            if tool_choice is not None:
+                body["tool_choice"] = tool_choice
+    return body
+
+
+def _messages_headers(api_key: str) -> dict[str, str]:
+    if not api_key:
+        raise OpenCodeGoHTTPError(401, "OPENCODE_GO_API_KEY is required")
+    return {
+        "Authorization": f"Bearer {api_key}",
+        "x-api-key": api_key,
+        "anthropic-version": ANTHROPIC_VERSION,
+        "content-type": "application/json",
+    }
+
+
+async def opencode_go_messages_completion(
+    model: str,
+    api_base: str,
+    api_key: str,
+    messages: list[dict[str, Any]],
+    **kwargs: Any,
+) -> openai.types.chat.ChatCompletion:
+    """Call an OpenCode Go Anthropic-compatible messages model."""
+    body = _build_messages_body(model, messages, dict(kwargs))
+    url = f"{api_base.rstrip('/')}/messages"
+    logger.info("OpenCode Go messages call: model={}, {} messages", model, len(body["messages"]))
+
+    async with httpx.AsyncClient(timeout=float(kwargs.get("timeout", 120))) as client:
+        resp = await client.post(url, json=body, headers=_messages_headers(api_key))
+
+    if resp.status_code != 200:
+        raise OpenCodeGoHTTPError(resp.status_code, resp.text[:500])
+    return _anthropic_to_openai_response(resp.json(), model)
+
+
+async def opencode_go_messages_stream(
+    model: str,
+    api_base: str,
+    api_key: str,
+    messages: list[dict[str, Any]],
+    **kwargs: Any,
+) -> AsyncIterator[bytes]:
+    """Stream an OpenCode Go messages response as OpenAI-compatible SSE."""
+    stream_kwargs = dict(kwargs)
+    stream_kwargs["stream"] = True
+    body = _build_messages_body(model, messages, stream_kwargs)
+    body["stream"] = True
+    url = f"{api_base.rstrip('/')}/messages"
+    headers = _messages_headers(api_key)
+    chunk_id = make_chunk_id()
+    tool_call_index = 0
+
+    try:
+        async with httpx.AsyncClient(timeout=float(kwargs.get("timeout", 120))) as client:
+            async with client.stream("POST", url, json=body, headers=headers) as resp:
+                if resp.status_code != 200:
+                    error_body = await resp.aread()
+                    error_text = error_body.decode("utf-8", errors="replace")
+                    yield sse_format({
+                        "error": {
+                            "message": f"OpenCode Go API {resp.status_code}: {error_text[:300]}",
+                            "type": "provider_error",
+                        }
+                    }).encode()
+                    yield sse_done().encode()
+                    return
+
+                buffer = ""
+                async for text_chunk in resp.aiter_text():
+                    buffer += text_chunk
+                    while "\n\n" in buffer:
+                        event_str, buffer = buffer.split("\n\n", 1)
+                        event_type = ""
+                        event_data = ""
+                        for line in event_str.splitlines():
+                            if line.startswith("event: "):
+                                event_type = line[7:].strip()
+                            elif line.startswith("data: "):
+                                event_data = line[6:]
+                        if not event_data:
+                            continue
+                        try:
+                            data = json.loads(event_data)
+                        except json.JSONDecodeError:
+                            continue
+
+                        if event_type == "content_block_start":
+                            block = data.get("content_block", {})
+                            if block.get("type") == "tool_use":
+                                yield sse_format(sse_chunk(chunk_id, model, tool_calls=[{
+                                    "index": tool_call_index,
+                                    "id": block.get("id", ""),
+                                    "type": "function",
+                                    "function": {"name": block.get("name", ""), "arguments": ""},
+                                }])).encode()
+                                tool_call_index += 1
+                        elif event_type == "content_block_delta":
+                            delta = data.get("delta", {})
+                            if delta.get("type") == "text_delta":
+                                yield sse_format(sse_chunk(chunk_id, model, content_delta=delta.get("text", ""))).encode()
+                            elif delta.get("type") == "input_json_delta":
+                                yield sse_format(sse_chunk(chunk_id, model, tool_calls=[{
+                                    "index": tool_call_index - 1,
+                                    "function": {"arguments": delta.get("partial_json", "")},
+                                }])).encode()
+                        elif event_type == "message_delta":
+                            delta = data.get("delta", {})
+                            stop_reason = delta.get("stop_reason", "end_turn")
+                            finish = "length" if stop_reason == "max_tokens" else "tool_calls" if stop_reason == "tool_use" else "stop"
+                            usage_data = data.get("usage", {})
+                            usage = None
+                            if usage_data:
+                                usage = {
+                                    "prompt_tokens": usage_data.get("input_tokens", 0),
+                                    "completion_tokens": usage_data.get("output_tokens", 0),
+                                    "total_tokens": usage_data.get("input_tokens", 0) + usage_data.get("output_tokens", 0),
+                                }
+                            yield sse_format(sse_chunk(chunk_id, model, finish_reason=finish, usage=usage)).encode()
+                        elif event_type == "message_stop":
+                            yield sse_done().encode()
+                            return
+    except Exception as exc:
+        logger.error("OpenCode Go stream interrupted: {}", exc)
+        yield sse_format({"error": {"message": f"stream_interrupted: {exc}", "type": "stream_error"}}).encode()
+        yield sse_done().encode()

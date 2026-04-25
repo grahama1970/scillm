@@ -41,9 +41,19 @@ async def _acompletion(*, model: str, messages: list, api_base: str, api_key: st
     kwargs.pop("custom_llm_provider", None)
     kwargs.pop("retry_on_empty", None)
     kwargs.pop("empty_retries", None)
+    extra_headers = kwargs.pop("extra_headers", None)
+    extra_body = dict(kwargs.pop("extra_body", None) or {})
+    scillm_metadata = kwargs.pop("scillm_metadata", None)
+    if scillm_metadata is not None:
+        extra_body["scillm_metadata"] = scillm_metadata
     client = _get_client(api_base, api_key)
     return await client.chat.completions.create(
-        model=model, messages=messages, timeout=timeout, **kwargs,
+        model=model,
+        messages=messages,
+        timeout=timeout,
+        extra_headers=extra_headers,
+        extra_body=extra_body or None,
+        **kwargs,
     )
 
 __all__ = ["parallel_acompletions", "parallel_acompletions_iter", "parallel_acompletions_env", "parallel_acompletions_simple", "parallel_acompletions_simple_env"]
@@ -621,6 +631,8 @@ async def parallel_acompletions_iter(
         _rf = req.get("response_format") or response_format
         _mt = req.get("max_tokens", default_max_tokens)
         _temp = req.get("temperature", default_temperature)
+        _extra_headers = req.get("extra_headers")
+        _scillm_metadata = req.get("scillm_metadata")
         start = loop.time()
         attempt = 0
         last_err: dict | None = None
@@ -647,6 +659,8 @@ async def parallel_acompletions_iter(
                             response_format=_rf,
                             max_tokens=_mt,
                             temperature=_temp,
+                            extra_headers=_extra_headers,
+                            scillm_metadata=_scillm_metadata,
                             timeout=timeout,
                             retry_on_empty=False,
                             empty_retries=0,

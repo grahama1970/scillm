@@ -1,6 +1,6 @@
 # Project Knowledge: scillm
 
-**Last updated:** 2026-04-15 14:00 by agent
+**Last updated:** 2026-04-25 12:55 by agent
 **Status:** Active development
 
 ## Current Understanding
@@ -10,6 +10,7 @@
 - All logging via ArangoDB (`llm_call_log` collection), NOT Redis
 - Redis is ONLY for optional caching
 - Silent batch failures are forbidden — must log raw responses for debugging
+- **JSONL backup** — all calls also written to `/mnt/storage12tb/scillm-logs/` (append-only, survives DB wipes)
 
 ### Dynamic Fallback Chain (2026-04-15)
 
@@ -61,6 +62,67 @@ curl -X POST -H "Authorization: Bearer sk-dev-proxy-123" \
   "http://localhost:4001/v1/scillm/concurrency/reset"
 ```
 
+### Batch Reliability Hardening (2026-04-15)
+
+**Goal:** Project agents should NEVER see 429 errors — scillm handles all rate limiting internally.
+
+**Seven fixes deployed:**
+
+1. **Abuse guard disabled** — Authenticated callers are legitimate. The abuse guard was blocking batch callers after transient provider errors, causing ALL subsequent requests to fail. Now disabled: `pre_call()` returns immediately without checking blocked clients.
+
+2. **Queue timeout returns 503 (not 429)** — Semantically correct: 429="you're sending too fast" vs 503="service overloaded". Queue exhaustion is capacity saturation, not rate limiting. Error message now references SKILL.md chunking docs.
+
+3. **Queue timeout extended to 600s** — Was 60s which caused batches of 100+ to fail. Now 10 minutes — allows deep queues to drain.
+
+4. **Queue rejection disabled** — `QUEUE_REJECT_THRESHOLD=0` and `MAX_QUEUE_PER_PROVIDER=0`. All requests queue indefinitely rather than rejecting with 429.
+
+5. **Zombie slot cleanup reduced to 90s** — Was 300s which caused zombie slots to persist 4+ minutes during batches. Now matches realistic timeouts.
+
+6. **Background cleanup auto-restart** — Cleanup task could die silently leaving zombies forever. Now auto-restarts up to 3 times.
+
+7. **asyncio.Lock in active_calls.py** — Was using `threading.Lock` which blocks the event loop. Now uses `asyncio.Lock` with proper `async with` syntax.
+
+**Error semantics now:**
+| Scenario | Status | Meaning |
+|----------|--------|---------|
+| Provider rate limit (429 from upstream) | 429 | Proxy retries internally via fallback chain |
+| Queue timeout after 600s | 503 | Service unavailable — batch too large for capacity |
+| Invalid request | 400 | Bad request format |
+
+**The only remaining failure mode:** 503 after 600s queue wait. This means the batch is too large for available capacity. Fix: use chunked processing (CHUNK_SIZE=4) per SKILL.md.
+
+### Server-side DeepSeek Model Pool (2026-04-25)
+
+Large QRA/default DeepSeek batches should use the server-side pool endpoint instead of manually splitting work across providers.
+
+**Endpoint:** `POST /v1/scillm/batch/completions`
+
+**Pool:** `qra-deepseek-pool`
+
+| Lane | Provider | Model | Weight | Max Concurrency | Timeout |
+|------|----------|-------|--------|-----------------|---------|
+| `chutes-deepseek` | Chutes | `deepseek-ai/DeepSeek-V3-0324-TEE` | 3 | 5 | 420s |
+| `opencode-go-deepseek-v4-flash` | OpenCode Go | `opencode-go/deepseek-v4-flash` | 2 | 4 | 620s |
+
+**Behavior:**
+- Uses weighted round-robin assignment, then runs all items with `asyncio.create_task` + `asyncio.as_completed`.
+- Returns results in completion order, not input order. Join results by `item_id`.
+- Adds `scillm_metadata.batch_id`, `item_id`, `model_pool`, `lane`, `selected_model`, and `provider` to each inner call.
+- This is for throughput across independent provider pools, not quality evaluation. Use `/llm-eval-lab` when every prompt must hit every model.
+- Do not model this as fallback. Fallback improves reliability after failure; provider-pool batching raises throughput immediately.
+
+**Discovery:** `GET /v1/scillm/model-pools`
+
+**Current empirical basis:** On `prompt_cwe20_ex0002`, OpenCode Go `deepseek-v4-flash` matched `deepseek-v4-pro` on the current QRA scorer (`0.933`) and was faster than Pro (`135.01s` vs `217.8s`), while Chutes was faster (`80.72s`) and semantically comparable. The pool uses Chutes as the larger lane and OpenCode Go Flash as additional independent capacity.
+
+### Codex OAuth gpt-5.5 Support (2026-04-25)
+
+`gpt-5.5` is supported through the Codex OAuth path (`~/.codex/auth.json`) and is explicitly configured in `local/proxy_server_config.yaml`.
+
+**Bug fixed:** app-level model validation was rejecting `gpt-5.5` before the router's `gpt-* | codex-*` auto-routing path could create a Codex OAuth group. Validation now allows Codex-prefixed model IDs when Codex OAuth credentials are available, and `/v1/scillm/models` advertises the explicit `gpt-5.5` group.
+
+**Live smoke:** `POST /v1/chat/completions` with `model: "gpt-5.5"` returned HTTP 200 and content `OK` after the Docker proxy rebuild.
+
 ### Docker Deployment Strategy (2026-04-15)
 
 **Target audience:** Power users only — engineers who need deep LLM proxy customization. Not for average users.
@@ -102,6 +164,15 @@ curl -X POST -H "Authorization: Bearer sk-dev-proxy-123" \
 
 | Date | Decision | Why |
 |------|----------|-----|
+| 2026-04-15 | Disable abuse guard for authenticated callers | Was blocking batch callers after transient errors → cascading failures. Authenticated callers with master key are legitimate. |
+| 2026-04-25 | Add `qra-deepseek-pool` server-side batch endpoint | Raises large-batch throughput by splitting work across independent Chutes and OpenCode Go lanes using `as_completed`, not fallback. |
+| 2026-04-25 | Prefer OpenCode Go `deepseek-v4-flash` over `deepseek-v4-pro` for batch lane | Same current QRA score as Pro on test prompt, materially faster; Pro remains a quality spot-check option. |
+| 2026-04-25 | OpenCode Go `/messages` must not default `max_tokens=4096` | The default cap caused hidden/reasoning token exhaustion and empty visible output; omit unless explicitly requested. |
+| 2026-04-25 | Add `gpt-5.5` Codex OAuth support | Orchestration requested `gpt-5.5`; validation rejected it before router auto-routing. Added explicit config group, validation allowance, discovery/docs, and live smoke. |
+| 2026-04-15 | Queue timeout returns 503 (not 429) | 429="you're sending too fast" vs 503="service overloaded". Queue exhaustion is capacity saturation, not rate limiting. |
+| 2026-04-15 | Extend queue timeout from 60s to 600s | Short timeout caused batches of 100+ to fail. 10min allows deep queues to drain. |
+| 2026-04-15 | Disable queue rejection (always queue) | QUEUE_REJECT_THRESHOLD=0. No upfront 429s — requests wait in queue instead of immediate rejection. |
+| 2026-04-15 | Use asyncio.Lock in active_calls.py | threading.Lock blocks event loop. Async middleware must use async primitives. |
 | 2026-04-15 | Mandatory X-Caller-Skill header | Requests without header rejected with 400 + helpful error. Prevents untraceable zombie requests from clogging queue. |
 | 2026-04-15 | Background stale slot cleanup (30s) | Runs independent of request flow. Fixes: when queue full, no pre_calls run, so stale detection never triggered. Now zombies auto-cleaned. |
 | 2026-04-15 | Reset endpoint `/v1/scillm/concurrency/reset` | Clears stuck queues without container restart. Returns slots_cleared, queue_cleared, pauses_cleared. |
@@ -109,6 +180,7 @@ curl -X POST -H "Authorization: Bearer sk-dev-proxy-123" \
 | 2026-04-15 | Fix semaphore race condition in concurrency_guard.py | Pre-acquire slots for in-flight requests when creating new semaphore during backoff. Fixes "9/8 slots" error causing cascading batch failures. |
 | 2026-04-15 | Standalone Docker deployment with bundled services | Power users get self-contained `docker compose up`. Memory service copied (not published image) because both projects under active development. |
 | 2026-04-15 | Dynamic fallback chains from Chutes utilization | Entire chain built at runtime, sorted by utilization score. Fixes 429s reaching clients from dynamically discovered models. |
+| 2026-04-17 | JSONL backup to /mnt/storage12tb/scillm-logs/ | Agent wiped 14GB ArangoDB — needed DB-independent backup. Append-only, daily files, monthly dirs. |
 | 2026-04-14 | CWE batch uses 6 Chutes models only | No OAuth (ban risk), no external DeepSeek (paid), no Gemini. All models verified 100% QRA grounding. Qwen3.5-397B is slowest last resort. |
 | 2026-04-13 | Remove Bifrost gateway | Was never enabled (BIFROST_ENABLED=false). Direct openai SDK routing is simpler. ArangoDB llm_call_log provides all monitoring data. |
 | 2026-04-13 | Build scillm batch dashboard in ux-lab | React components using EmbryStyle/NVIS tokens, queries ArangoDB for batch progress, per-skill usage, error rates |
@@ -131,7 +203,9 @@ curl -X POST -H "Authorization: Bearer sk-dev-proxy-123" \
 
 | File | Purpose |
 |------|---------|
-| `chutes/middleware/arango_log.py` | Logs every LLM call to ArangoDB with request/response content |
+| `src/scillm/proxy/app.py` | Main FastAPI proxy; includes `/v1/scillm/batch/completions` and `/v1/scillm/model-pools` |
+| `src/scillm/proxy/providers/opencode_go.py` | OpenCode Go routing seam, live model parsing, `/messages` adapter without default `max_tokens` |
+| `chutes/middleware/arango_log.py` | Logs every LLM call to ArangoDB + JSONL backup (dual write) |
 | `chutes/middleware/batch_resume.py` | Checks ArangoDB for completed work items (automatic batch resume) |
 | `chutes/middleware/json_guard.py` | JSON validation and repair |
 | `chutes/middleware/concurrency_guard.py` | Provider-aware semaphore (chutes=4, ollama=1) |
@@ -154,6 +228,7 @@ curl -X POST -H "Authorization: Bearer sk-dev-proxy-123" \
 | Redis for logging | Duplicate logging, wrong tool | Use ArangoDB via `arango_log.py` only |
 | max_tokens | Causes truncated output | Never set it — auto-stripped |
 | Fire-all-at-once batching | >4 requests causes queue timeout | Use CHUNK_SIZE=4 loop |
+| Manual Chutes/OpenCode splitting for QRA throughput | Reimplements scheduling inconsistently across agents | Use `POST /v1/scillm/batch/completions` with `qra-deepseek-pool` |
 | Deprecated model names | `deepseek-ai/DeepSeek-V3` triggers abuse guard | Use aliases (`text`, `vlm`) not direct model names |
 | Missing x-caller-skill | Can't debug which skill caused errors | Add header; fallback logs user_agent only |
 

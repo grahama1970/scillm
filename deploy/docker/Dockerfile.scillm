@@ -11,6 +11,10 @@ RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
     && npm install -g @google/gemini-cli \
     && rm -rf /var/lib/apt/lists/*
 
+# Install latest OpenCode binary for live model discovery.
+RUN curl -fsSL https://opencode.ai/install | bash \
+    && cp /root/.opencode/bin/opencode /usr/local/bin/opencode
+
 # Install uv via installer script
 RUN curl -LsSf https://astral.sh/uv/install.sh | sh && cp /root/.local/bin/uv /usr/local/bin/uv
 
