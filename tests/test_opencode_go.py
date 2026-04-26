@@ -158,6 +158,8 @@ def test_opencode_messages_body_translates_json_object_response_format():
     assert "Return QRA pairs." in body["system"]
     assert "exactly one valid JSON object" in body["system"]
     assert "markdown fences" in body["system"]
+    assert "Output contract reminder" in body["messages"][-1]["content"][-1]["text"]
+    assert "exactly one valid JSON object" in body["messages"][-1]["content"][-1]["text"]
     assert "response_format" not in body
 
 
@@ -183,6 +185,7 @@ def test_opencode_messages_body_translates_json_schema_response_format():
     assert "qra_response" in body["system"]
     assert '"pairs"' in body["system"]
     assert "markdown fences" in body["system"]
+    assert "qra_response" in body["messages"][-1]["content"][-1]["text"]
 
 
 def test_collect_system_prompt_handles_list_content():

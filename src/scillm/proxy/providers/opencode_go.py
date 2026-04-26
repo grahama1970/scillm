@@ -265,20 +265,46 @@ def _merge_system_prompt(*parts: str | None) -> str | None:
     return "\n\n".join(merged) if merged else None
 
 
+def _append_user_contract(messages: list[dict[str, Any]], instruction: str) -> None:
+    """Append a provider-boundary contract to the last user message."""
+    contract_block = {
+        "type": "text",
+        "text": f"Output contract reminder: {instruction}",
+    }
+    for message in reversed(messages):
+        if message.get("role") != "user":
+            continue
+        content = message.get("content")
+        if isinstance(content, list):
+            content.append(contract_block)
+        elif isinstance(content, str):
+            message["content"] = [
+                {"type": "text", "text": content},
+                contract_block,
+            ]
+        else:
+            message["content"] = [contract_block]
+        return
+    messages.append({"role": "user", "content": [contract_block]})
+
+
 def _build_messages_body(
     model: str,
     messages: list[dict[str, Any]],
     kwargs: dict[str, Any],
 ) -> dict[str, Any]:
     system_prompt, anthropic_msgs = _openai_to_anthropic_messages(messages)
+    json_instruction = _json_response_instruction(kwargs.get("response_format"))
     system_prompt = _merge_system_prompt(
         _collect_system_prompt(messages) or system_prompt,
-        _json_response_instruction(kwargs.get("response_format")),
+        json_instruction,
     )
     for message in anthropic_msgs:
         content = message.get("content")
         if isinstance(content, str):
             message["content"] = [{"type": "text", "text": content}]
+    if json_instruction:
+        _append_user_contract(anthropic_msgs, json_instruction)
     body: dict[str, Any] = {
         "model": model,
         "messages": anthropic_msgs,
