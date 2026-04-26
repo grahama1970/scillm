@@ -117,7 +117,7 @@ Large QRA/default DeepSeek batches should use the server-side pool endpoint inst
 
 Use the pool status endpoint as the source of truth for dashboards. It returns aggregate `in_flight/limit/queued/available` plus per-lane Chutes/OpenCode Go state and drift fields. Raw `GET /v1/scillm/active-calls` is only a debugging view.
 
-**OpenCode Go JSON contract:** DeepSeek/MiniMax OpenCode Go models use the Anthropic-compatible `/messages` endpoint. OpenAI `response_format` is not native there, so `/scillm` translates `response_format={"type":"json_object"}` and JSON schema response formats into a system-level JSON-only instruction while preserving all system messages.
+**OpenCode Go JSON contract:** DeepSeek/MiniMax OpenCode Go models use the Anthropic-compatible `/messages` endpoint. OpenAI `response_format` is not native there, so `/scillm` translates `response_format={"type":"json_object"}` and JSON schema response formats into provider-boundary JSON-only instructions in both the system prompt and final user turn while preserving all system messages.
 
 **Current empirical basis:** On `prompt_cwe20_ex0002`, OpenCode Go `deepseek-v4-flash` matched `deepseek-v4-pro` on the current QRA scorer (`0.933`) and was faster than Pro (`135.01s` vs `217.8s`), while Chutes was faster (`80.72s`) and semantically comparable. The pool uses Chutes as the larger lane and OpenCode Go Flash as additional independent capacity.
 

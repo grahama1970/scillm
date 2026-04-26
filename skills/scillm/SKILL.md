@@ -350,7 +350,7 @@ Response notes:
 - Use `GET /v1/scillm/model-pools` to inspect available pools and lane weights.
 - Use `GET /v1/scillm/model-pools/qra-deepseek-pool/status` for dashboard/live pool concurrency. It returns aggregate `in_flight`, `limit`, `queued`, `available`, and per-lane `registry_in_flight`, `semaphore_in_flight`, and `drift`.
 - Do not infer pool health from raw `/v1/scillm/active-calls`; raw active calls are a debugging view only.
-- OpenCode Go DeepSeek/MiniMax use an Anthropic-compatible `/messages` lane; `response_format` is translated into a system-level JSON contract because that endpoint does not enforce OpenAI `response_format` natively.
+- OpenCode Go DeepSeek/MiniMax use an Anthropic-compatible `/messages` lane; `response_format` is translated into provider-boundary JSON instructions in the system prompt and final user turn because that endpoint does not enforce OpenAI `response_format` natively.
 - Use this endpoint to raise throughput across providers; do not treat OpenCode Go as a Chutes fallback.
 
 ### httpx batch (recommended — no scillm import)
