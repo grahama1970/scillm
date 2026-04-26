@@ -97,7 +97,7 @@ Every provider scillm targets speaks OpenAI-compatible API (`/v1/chat/completion
 - **Opaque metadata round-trip** — Send `scillm_metadata` (any dict) in the request. The proxy strips it before the LLM sees it, then staples it back onto the response. The LLM cannot fabricate these values — use it for ArangoDB `_key` correlation in batch pipelines.
 - **JSON repair inside retry loop** — LLM responses with trailing commas, missing braces, or markdown fences wrapping JSON are repaired automatically instead of wasting the call.
 - **Auto multimodal routing** — Pass an image and scillm figures it out. No model selection needed — the proxy detects images in messages and reroutes to a vision model automatically.
-- **4-provider VLM cascade** — Images and PDFs cascade through Gemini free → Gemini paid → Claude OAuth → Codex OAuth. All four providers handle images; Claude and Codex also handle PDFs natively.
+- **VLM routing** — Images can go directly to `gpt-5.5` through Codex OAuth, to `vlm-chutes` for higher-throughput VLM work, or through the legacy `vlm` cascade. Avoid the generic `vlm` alias when Gemini quota limits matter because it starts with Gemini.
 - **Gemini free-to-paid key rotation** — Gemini free and paid keys are separate groups. A 429 on the free key cascades immediately to the paid key — no wasted retries on an exhausted quota.
 - **Cold-start warmup** — Chutes models that return 503 (cold) trigger a background warmup API call that posts a bounty for miners. The proxy falls through to the next deployment immediately. On startup, configured Chutes models are pre-warmed.
 - **Bounded concurrency queue** — Chutes.ai has a 5-connection limit. Exceed it and you get a 429 with a 90-second penalty. scillm queues overflow instead of rejecting it. Queue timeout is 600s (10 min) — large batches drain rather than fail.
@@ -105,7 +105,7 @@ Every provider scillm targets speaks OpenAI-compatible API (`/v1/chat/completion
 - **Automatic timeout estimation** — No more guessing timeouts. scillm queries historical latency data (p95 from `llm_call_log`) and sets per-call provider timeouts automatically. Response headers (`x-scillm-timeout-ms`, `x-scillm-timeout-source`) show what was used.
 - **Source grounding verification** — Pass source text, scillm verifies the response is grounded using fuzzy matching, retries with progressive prompts if not.
 - **Dynamic fallback chains** — For Chutes models, the ENTIRE fallback chain is built from real-time utilization data. All available models are scored by utilization + rate-limit ratio, sorted best-first, and tried in order. 429s never reach the client — the router cascades through the utilization-sorted chain automatically.
-- **Fallback cascade with circuit breaker** — `text` → `text-gemini` (free) → `text-gemini-paid` → `text-deepseek`. VLM: `vlm` (free) → `vlm-paid` → `vlm-claude` → `vlm-codex`. 3 failures trigger a 20-second cooldown per group.
+- **Fallback cascade with circuit breaker** — `text` uses Chutes DeepSeek-family fallbacks. VLM direct targets are preferred for quota-sensitive image work: `gpt-5.5` for Codex OAuth or `vlm-chutes` for Chutes VLM. The legacy `vlm` alias still starts with Gemini. 3 failures trigger a 20-second cooldown per group.
 - **Non-TEE fast-fail routing** — Multi-model Chutes groups try non-TEE first (better throughput) with 1 retry, then fall through to TEE. No 8-retry stall on cold non-TEE models.
 - **Native system prompts** — Claude gets an array of system blocks (matches Claude Code CLI). Codex gets the `instructions` field. No fake user-message hacks.
 - **Claude PDF support** — Send PDFs via `data:application/pdf;base64,...` in `image_url` or as Anthropic-native `type:document` blocks. Both formats auto-translate.
@@ -392,10 +392,11 @@ Callers say `model: "text"` — the proxy picks the provider. When models change
 | `text-gemini` | Google | Gemini 2.5 Flash (free key) | → text-gemini-paid → text-deepseek |
 | `text-gemini-paid` | Google | Gemini 2.5 Flash (paid key) | (none) |
 | `text-gemini-3` | Google | Gemini 3 Flash Preview (free) | → text-gemini-3-paid |
-| `vlm` | Google | Gemini 2.5 Flash (free key) | → vlm-paid → vlm-claude → vlm-codex |
+| `vlm` | Google | Gemini 2.5 Flash (free key) | Legacy cascade; avoid for quota-sensitive VLM work |
 | `vlm-claude` | Anthropic (OAuth) | Claude Sonnet | Images + PDFs |
 | `vlm-codex` | OpenAI (OAuth) | GPT-5.3 Codex | Images + PDFs |
-| `gpt-5.5` | OpenAI (OAuth) | Codex high-reasoning model via `~/.codex` | (none) |
+| `vlm-chutes` | Chutes | Qwen3-VL-235B | Higher-throughput image calls |
+| `gpt-5.5` | OpenAI (OAuth) | Codex high-reasoning model via `~/.codex` | Direct text + image calls |
 | `opencode-go/deepseek-v4-flash` | OpenCode Go | DeepSeek V4 Flash through OpenCode Go/Fireworks | (none) |
 | `opencode-go/deepseek-v4-pro` | OpenCode Go | DeepSeek V4 Pro through OpenCode Go/Fireworks | (none) |
 | `local-text` | Ollama | qwen2.5:0.5b | (none) |

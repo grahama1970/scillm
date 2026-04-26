@@ -93,16 +93,27 @@ def _openai_messages_to_codex_input(
         if isinstance(content, str):
             input_items.append({"role": role, "type": "message", "content": content})
         elif isinstance(content, list):
-            # Flatten content parts to text for Codex
-            text_parts = []
+            codex_parts: list[dict[str, Any]] = []
             for part in content:
-                if isinstance(part, dict) and part.get("type") == "text":
-                    text_parts.append(part["text"])
-            if text_parts:
+                if not isinstance(part, dict):
+                    continue
+                if part.get("type") == "text":
+                    codex_parts.append({
+                        "type": "input_text",
+                        "text": part.get("text", ""),
+                    })
+                elif part.get("type") == "image_url":
+                    url = part.get("image_url", {}).get("url", "")
+                    if url:
+                        codex_parts.append({
+                            "type": "input_image",
+                            "image_url": url,
+                        })
+            if codex_parts:
                 input_items.append({
                     "role": role,
                     "type": "message",
-                    "content": "\n".join(text_parts),
+                    "content": codex_parts,
                 })
 
     return instructions, input_items

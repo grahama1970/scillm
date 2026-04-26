@@ -98,7 +98,7 @@ concurrency limits, budget tracking, and optional Redis caching.
 | `text-gemini-3` | Gemini 3 Flash Preview (free key) | Thinking model, 1M context | → text-gemini-3-paid |
 | `claude-sonnet-4-6` | Anthropic Claude Sonnet (OAuth) | Max subscription via ~/.claude | (none) |
 | `claude-haiku-4-5` | Anthropic Claude Haiku (OAuth) | Fast, cheap via Max subscription | (none) |
-| `gpt-5.5` | OpenAI Codex (OAuth) | Current high-reasoning Codex model via ~/.codex | (none) |
+| `gpt-5.5` | OpenAI Codex (OAuth) | Direct high-reasoning text + image calls via ~/.codex | (none) |
 | `gpt-5.3-codex` | OpenAI Codex (OAuth) | Legacy Codex model via ~/.codex | (none) |
 | `opencode-go/deepseek-v4-pro` | OpenCode Go `/messages` | Strong coding/reasoning model | (none) |
 | `opencode-go/deepseek-v4-flash` | OpenCode Go `/messages` | Faster DeepSeek V4 | (none) |
@@ -133,7 +133,7 @@ Cascade aliases still work: `text` (Chutes → Gemini free → Gemini paid → D
 
 **Discover live OpenCode Go models:** call `GET /v1/scillm/opencode-go/models?refresh=true`. The proxy runs `opencode models --refresh opencode-go` inside Docker first, using the mounted host OpenCode auth/config/cache, then falls back to `opencode serve /provider`, then a built-in registry. Use `models[*].id` directly as the chat `model`.
 
-**OpenCode Go multimodal caveat:** `opencode models opencode-go --verbose` currently reports DeepSeek V4 Flash/Pro with `attachment=false`, `input.image=false`, and `input.pdf=false`. Through `/scillm`, `opencode-go/deepseek-v4-*` and `opencode-go/minimax-*` are text-only lanes. Do not use `opencode run --file` as a headless multimodal workaround yet: upstream OpenCode issues #16723 and #20802 are open for broken MIME/file attachment handling in CLI/custom-provider paths. Use `model: "vlm"` or a direct Gemini/Claude/Codex VLM model for images/PDFs.
+**OpenCode Go multimodal caveat:** `opencode models opencode-go --verbose` currently reports DeepSeek V4 Flash/Pro with `attachment=false`, `input.image=false`, and `input.pdf=false`. Through `/scillm`, `opencode-go/deepseek-v4-*` and `opencode-go/minimax-*` are text-only lanes. Do not use `opencode run --file` as a headless multimodal workaround yet: upstream OpenCode issues #16723 and #20802 are open for broken MIME/file attachment handling in CLI/custom-provider paths. For high-volume image work, use `model: "vlm-chutes"`; for high-reasoning image work, call `model: "gpt-5.5"` directly with OpenAI-compatible `image_url` parts. Avoid generic `model: "vlm"` when Gemini quota limits matter, because the configured cascade starts with Gemini.
 
 ```python
 import httpx
@@ -714,14 +714,14 @@ resp = httpx.post(
 
 ### Option C: Images via image_url (all VLM providers)
 
-For images (not PDFs), use the OpenAI-compat `image_url` format. This works across the full VLM cascade (Gemini → Claude → Codex):
+For images (not PDFs), use the OpenAI-compat `image_url` format. For this project, prefer direct `model: "gpt-5.5"` for high-reasoning image calls or `model: "vlm-chutes"` for higher-throughput VLM calls. Avoid generic `model: "vlm"` when Gemini quota limits matter, because the configured cascade starts with Gemini:
 
 ```python
 with open("screenshot.png", "rb") as f:
     img_b64 = base64.b64encode(f.read()).decode()
 
 resp = httpx.post(url, json={
-    "model": "vlm",  # cascade: Gemini free → paid → Claude → Codex
+    "model": "gpt-5.5",  # direct Codex OAuth; avoids Gemini VLM quota
     "messages": [{"role": "user", "content": [
         {"type": "text", "text": "Describe this screenshot"},
         {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{img_b64}"}},
@@ -902,7 +902,7 @@ resp = httpx.post(
 )
 ```
 
-**Supported models:** `gpt-5.5`, `gpt-5.2-codex`, `gpt-5.3-codex`. Other platform GPT models (for example `gpt-4o`) are NOT supported via ChatGPT OAuth — they require a platform API key.
+**Supported models:** `gpt-5.5`, `gpt-5.2-codex`, `gpt-5.3-codex`. `gpt-5.5` accepts OpenAI-compatible `image_url` content parts through `/scillm`; use it directly for high-reasoning image calls. Other platform GPT models (for example `gpt-4o`) are NOT supported via ChatGPT OAuth — they require a platform API key.
 
 **Streaming:** Both Claude and Codex support `"stream": true`. The proxy translates provider-specific SSE events into OpenAI-compatible delta chunks (`data: {"choices":[{"delta":{"content":"..."}}]}`). Works with any SSE client including `httpx.stream()` and the OpenAI SDK.
 
