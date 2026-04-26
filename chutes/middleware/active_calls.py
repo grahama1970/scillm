@@ -8,12 +8,18 @@ from __future__ import annotations
 import time
 import uuid
 from collections import deque
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timezone
 import asyncio
 from typing import Any
 
+from loguru import logger
+
 from scillm.proxy.middleware import BaseMiddleware
+
+
+ACTIVE_CALL_MIN_TTL_S = 600.0
+ACTIVE_CALL_DEFAULT_TTL_S = 900.0
 
 
 @dataclass
@@ -26,6 +32,9 @@ class ActiveCall:
     started_ts: str    # ISO timestamp
     provider: str = ""
     stream: bool = False
+    timeout_s: float | None = None
+    pool: str = ""
+    lane: str = ""
 
     def to_dict(self) -> dict:
         elapsed_ms = round((time.monotonic() - self.started_at) * 1000)
@@ -35,6 +44,9 @@ class ActiveCall:
             "caller": self.caller,
             "provider": self.provider,
             "stream": self.stream,
+            "timeout_s": self.timeout_s,
+            "pool": self.pool,
+            "lane": self.lane,
             "started_ts": self.started_ts,
             "elapsed_ms": elapsed_ms,
         }
@@ -61,6 +73,7 @@ _WINDOW_SECONDS = 300  # 5 minutes
 
 def get_active_calls() -> list[dict]:
     """Return list of all active calls (for /v1/scillm/active-calls endpoint)."""
+    evict_stale_active_calls()
     # Snapshot copy - safe without lock for read-only access
     calls = list(_active_calls.values())
     return [c.to_dict() for c in calls]
@@ -68,8 +81,82 @@ def get_active_calls() -> list[dict]:
 
 def get_active_count() -> int:
     """Return count of active calls."""
+    evict_stale_active_calls()
     # Dict len is atomic, no lock needed for read
     return len(_active_calls)
+
+
+def get_active_counts_by_provider() -> dict[str, int]:
+    """Return active-call counts grouped by provider."""
+    evict_stale_active_calls()
+    counts: dict[str, int] = {}
+    for call in list(_active_calls.values()):
+        provider = call.provider or "unknown"
+        counts[provider] = counts.get(provider, 0) + 1
+    return counts
+
+
+def evict_stale_active_calls(default_ttl_s: float = ACTIVE_CALL_DEFAULT_TTL_S) -> list[dict]:
+    """Evict active-call records that outlive their provider timeout.
+
+    Active calls are only an in-memory live registry. If a request is cancelled
+    or an exception path misses middleware cleanup, stale rows must not survive
+    indefinitely and distort dashboards.
+    """
+    now = time.monotonic()
+    evicted: list[dict] = []
+    for call_id, call in list(_active_calls.items()):
+        ttl = max(float(call.timeout_s or default_ttl_s) * 2.0, ACTIVE_CALL_MIN_TTL_S)
+        age_s = now - call.started_at
+        if age_s <= ttl:
+            continue
+        removed = _active_calls.pop(call_id, None)
+        if removed is None:
+            continue
+        record = removed.to_dict()
+        record["ttl_s"] = ttl
+        evicted.append(record)
+        logger.warning(
+            "active_calls: evicted stale call provider={} model={} call_id={} age_s={:.1f} ttl_s={:.1f}",
+            removed.provider,
+            removed.model,
+            removed.call_id,
+            age_s,
+            ttl,
+        )
+    return evicted
+
+
+def clear_active_calls(
+    *,
+    older_than_s: float | None = None,
+    caller: str | None = None,
+    model_contains: str | None = None,
+) -> list[dict]:
+    """Purge matching active-call records and return removed rows."""
+    now = time.monotonic()
+    removed: list[dict] = []
+    caller_filter = caller.lower() if caller else None
+    model_filter = model_contains.lower() if model_contains else None
+
+    for call_id, call in list(_active_calls.items()):
+        if older_than_s is not None and now - call.started_at <= older_than_s:
+            continue
+        if caller_filter and caller_filter not in call.caller.lower():
+            continue
+        if model_filter and model_filter not in call.model.lower():
+            continue
+        popped = _active_calls.pop(call_id, None)
+        if popped:
+            removed.append(popped.to_dict())
+            logger.warning(
+                "active_calls: purged call provider={} model={} call_id={} caller={}",
+                popped.provider,
+                popped.model,
+                popped.call_id,
+                popped.caller,
+            )
+    return removed
 
 
 def get_activity_graph(bucket_seconds: int = 10) -> dict:
@@ -91,7 +178,6 @@ def get_activity_graph(bucket_seconds: int = 10) -> dict:
 
     for i in range(num_buckets):
         bucket_start = now - (num_buckets - i) * bucket_seconds
-        bucket_end = bucket_start + bucket_seconds
         buckets.append({
             "ts": int(bucket_start * 1000),  # JS timestamp
             "total": 0,
@@ -138,6 +224,10 @@ def get_activity_graph(bucket_seconds: int = 10) -> dict:
 def _infer_provider(model: str) -> str:
     """Infer provider from model name."""
     m = model.lower()
+    if m.startswith("opencode-go/"):
+        return "opencode-go"
+    if "/" in m and not m.startswith("http"):
+        return "chutes"
     if "deepseek" in m:
         return "chutes" if "v3" in m or "r1" in m else "deepseek"
     if "gemini" in m or "flash" in m:
@@ -168,8 +258,11 @@ class ActiveCallsMiddleware(BaseMiddleware):
             caller=caller or "unknown",
             started_at=time.monotonic(),
             started_ts=datetime.now(timezone.utc).isoformat(),
-            provider=_infer_provider(request.get("model", "")),
+            provider=str(request.get("_concurrency_provider") or _infer_provider(request.get("model", ""))),
             stream=bool(request.get("stream")),
+            timeout_s=_request_timeout_s(request),
+            pool=str(request.get("_scillm_pool") or ""),
+            lane=str(request.get("_scillm_pool_lane") or ""),
         )
 
         async with _lock:
@@ -207,3 +300,13 @@ class ActiveCallsMiddleware(BaseMiddleware):
                         success=False,
                         provider=active.provider,
                     ))
+
+
+def _request_timeout_s(request: dict) -> float | None:
+    timeout = request.get("timeout")
+    if timeout is None and "_dynamic_timeout_ms" in request:
+        timeout = float(request["_dynamic_timeout_ms"]) / 1000.0
+    try:
+        return float(timeout) if timeout is not None else None
+    except (TypeError, ValueError):
+        return None

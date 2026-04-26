@@ -113,6 +113,10 @@ Large QRA/default DeepSeek batches should use the server-side pool endpoint inst
 
 **Discovery:** `GET /v1/scillm/model-pools`
 
+**Dashboard status:** `GET /v1/scillm/model-pools/qra-deepseek-pool/status`
+
+Use the pool status endpoint as the source of truth for dashboards. It returns aggregate `in_flight/limit/queued/available` plus per-lane Chutes/OpenCode Go state and drift fields. Raw `GET /v1/scillm/active-calls` is only a debugging view.
+
 **Current empirical basis:** On `prompt_cwe20_ex0002`, OpenCode Go `deepseek-v4-flash` matched `deepseek-v4-pro` on the current QRA scorer (`0.933`) and was faster than Pro (`135.01s` vs `217.8s`), while Chutes was faster (`80.72s`) and semantically comparable. The pool uses Chutes as the larger lane and OpenCode Go Flash as additional independent capacity.
 
 ### Codex OAuth gpt-5.5 Support (2026-04-25)
@@ -166,6 +170,7 @@ Large QRA/default DeepSeek batches should use the server-side pool endpoint inst
 |------|----------|-----|
 | 2026-04-15 | Disable abuse guard for authenticated callers | Was blocking batch callers after transient errors → cascading failures. Authenticated callers with master key are legitimate. |
 | 2026-04-25 | Add `qra-deepseek-pool` server-side batch endpoint | Raises large-batch throughput by splitting work across independent Chutes and OpenCode Go lanes using `as_completed`, not fallback. |
+| 2026-04-25 | Add live model-pool status and drift accounting | Dashboards use `/v1/scillm/model-pools/{pool}/status`; active-call cleanup is TTL-backed and drift is explicit. |
 | 2026-04-25 | Prefer OpenCode Go `deepseek-v4-flash` over `deepseek-v4-pro` for batch lane | Same current QRA score as Pro on test prompt, materially faster; Pro remains a quality spot-check option. |
 | 2026-04-25 | OpenCode Go `/messages` must not default `max_tokens=4096` | The default cap caused hidden/reasoning token exhaustion and empty visible output; omit unless explicitly requested. |
 | 2026-04-25 | Add `gpt-5.5` Codex OAuth support | Orchestration requested `gpt-5.5`; validation rejected it before router auto-routing. Added explicit config group, validation allowance, discovery/docs, and live smoke. |

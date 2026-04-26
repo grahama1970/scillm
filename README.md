@@ -201,6 +201,18 @@ curl http://localhost:4001/v1/scillm/model-pools \
   -H "Authorization: Bearer sk-dev-proxy-123"
 ```
 
+**Dashboard/live status:**
+
+```bash
+curl http://localhost:4001/v1/scillm/model-pools/qra-deepseek-pool/status \
+  -H "Authorization: Bearer sk-dev-proxy-123"
+```
+
+The status response is the dashboard contract for pool concurrency. It returns
+top-level `in_flight`, `limit`, `queued`, `available`, and per-lane state with
+`registry_in_flight`, `semaphore_in_flight`, and `drift`. Do not infer pool
+health from raw `/v1/scillm/active-calls` rows.
+
 **Submit a batch:**
 
 ```python
@@ -472,7 +484,10 @@ Test files: `tests/test_proxy_e2e.py` (contract tests), `tests/test_proxy_advers
 | `GET /v1/scillm/health` | Model groups, fallback chains, retry policy, concurrency slots |
 | `GET /v1/scillm/models` | Deployed models with group membership |
 | `GET /v1/scillm/model-pools` | Server-side batch pools and lane definitions |
+| `GET /v1/scillm/model-pools/{pool}/status` | Live aggregate and per-lane pool concurrency for dashboards |
 | `GET /v1/scillm/opencode-go/models?refresh=true` | Live OpenCode Go model discovery |
+| `GET /v1/scillm/active-calls` | Raw active-call rows for debugging; not the dashboard pool source of truth |
+| `POST /v1/scillm/active-calls/purge` | Purge stale in-memory active-call rows |
 | `POST /v1/scillm/batch/completions` | Server-side batch completions using `model_pool` |
 | `GET /v1/models` | OpenAI-compatible model list |
 | `GET /v1/budget` | Current daily spend and remaining budget |

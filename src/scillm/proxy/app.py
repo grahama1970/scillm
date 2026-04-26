@@ -212,6 +212,62 @@ def _model_pool(pool_name: str) -> dict[str, Any] | None:
     }
 
 
+def _model_pool_status(
+    pool_name: str,
+    pool: dict[str, Any],
+    concurrency: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Build pool-aware lane status from provider concurrency state."""
+    concurrency = concurrency or {}
+    lane_statuses = []
+    seen_providers: set[str] = set()
+    aggregate_in_flight = 0
+    aggregate_limit = 0
+    aggregate_queued = 0
+
+    for lane in pool.get("lanes", []):
+        provider = str(lane.get("provider") or "")
+        provider_state = concurrency.get(provider, {}) if isinstance(concurrency, dict) else {}
+        effective_limit = int(provider_state.get("effective_limit") or lane.get("max_concurrency") or 1)
+        configured_limit = int(provider_state.get("configured_limit") or lane.get("max_concurrency") or effective_limit)
+        in_flight = int(provider_state.get("in_flight") or 0)
+        queued = int(provider_state.get("queued") or 0)
+        status = {
+            "name": lane.get("name"),
+            "provider": provider,
+            "model": lane.get("model"),
+            "weight": lane.get("weight", 1),
+            "lane_limit": int(lane.get("max_concurrency") or effective_limit),
+            "configured_limit": configured_limit,
+            "effective_limit": effective_limit,
+            "in_flight": in_flight,
+            "queued": queued,
+            "available": int(provider_state.get("available") or max(0, effective_limit - in_flight)),
+            "paused": bool(provider_state.get("paused", False)),
+            "backoff_active": bool(provider_state.get("backoff_active", False)),
+            "pause_remaining_s": provider_state.get("pause_remaining_s", 0),
+            "registry_in_flight": int(provider_state.get("registry_in_flight") or 0),
+            "semaphore_in_flight": int(provider_state.get("semaphore_in_flight") or in_flight),
+            "drift": int(provider_state.get("drift") or 0),
+        }
+        lane_statuses.append(status)
+        if provider and provider not in seen_providers:
+            seen_providers.add(provider)
+            aggregate_in_flight += in_flight
+            aggregate_limit += effective_limit
+            aggregate_queued += queued
+
+    return {
+        "name": pool_name,
+        "strategy": pool.get("strategy"),
+        "in_flight": aggregate_in_flight,
+        "limit": aggregate_limit,
+        "queued": aggregate_queued,
+        "available": max(0, aggregate_limit - aggregate_in_flight),
+        "lanes": lane_statuses,
+    }
+
+
 def _weighted_lane_sequence(lanes: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Expand lane weights into a deterministic weighted round-robin sequence."""
     sequence: list[dict[str, Any]] = []
@@ -505,10 +561,21 @@ async def _load_middleware(config: ProxyConfig) -> list[BaseMiddleware]:
     except (ImportError, Exception) as exc:
         logger.debug("ArangoLogMiddleware not loaded: {}", exc)
 
-    # Active calls tracking — exposes in-flight requests for live monitoring
+    # Active calls tracking — exposes in-flight requests for live monitoring.
+    # It must register after ConcurrencyMiddleware acquires a provider slot so
+    # active-calls and health semaphore state describe the same live lifecycle.
     try:
         from chutes.middleware.active_calls import ActiveCallsMiddleware
-        middlewares.insert(0, ActiveCallsMiddleware())  # First in chain to track all calls
+        active_mw = ActiveCallsMiddleware()
+        insert_at = next(
+            (
+                index + 1
+                for index, middleware in enumerate(middlewares)
+                if type(middleware).__name__ == "ConcurrencyMiddleware"
+            ),
+            0,
+        )
+        middlewares.insert(insert_at, active_mw)
         logger.info("ActiveCallsMiddleware loaded")
     except (ImportError, Exception) as exc:
         logger.debug("ActiveCallsMiddleware not loaded: {}", exc)
@@ -846,8 +913,14 @@ async def chat_completions(request: Request):
     # Inject headers for middleware (arango_log.py uses x-caller-skill)
     body["_headers"] = dict(request.headers)
 
-    # Pre-call middleware (can modify request or reject)
-    body = await _middleware_chain.run_pre_call(body)
+    # Pre-call middleware (can modify request or reject). If a later
+    # pre_call hook rejects, earlier hooks such as ActiveCallsMiddleware and
+    # ConcurrencyMiddleware must still see on_error and clean up.
+    try:
+        body = await _middleware_chain.run_pre_call(body)
+    except BaseException as exc:
+        await _middleware_chain.run_on_error(body, exc if isinstance(exc, Exception) else Exception(type(exc).__name__))
+        raise
     model = body.get("model", model)
     messages = body.get("messages", messages)
 
@@ -980,11 +1053,17 @@ async def chat_completions(request: Request):
                     headers=resp_headers,
                 )
 
-        except (ProxyError, MiddlewareReject):
+        except asyncio.CancelledError as exc:
+            await _middleware_chain.run_on_error(body, exc)
+            raise
+        except (ProxyError, MiddlewareReject) as exc:
+            await _middleware_chain.run_on_error(body, exc)
             raise
         except RouterProxyError as exc:
             # Convert router's ProxyError to enriched ProxyError for LLM analysis
-            raise ProxyError(exc.status_code, exc.message, "router_error")
+            proxy_exc = ProxyError(exc.status_code, exc.message, "router_error")
+            await _middleware_chain.run_on_error(body, proxy_exc)
+            raise proxy_exc
         except Exception as exc:
             # Import retry exceptions here to avoid circular import at module level
             from chutes.middleware.json_guard import JsonValidationFailed
@@ -1006,12 +1085,14 @@ async def chat_completions(request: Request):
                         "[{}] Schema validation max corrections exceeded ({})",
                         request_id, correction_attempt,
                     )
-                    raise ProxyError(
+                    proxy_exc = ProxyError(
                         422,
                         f"Schema validation failed after {correction_attempt} correction attempts. "
                         f"Last correction hint: {exc.hint[:300]}",
                         "schema_validation_failed",
                     )
+                    await _middleware_chain.run_on_error(body, proxy_exc)
+                    raise proxy_exc
                 logger.info(
                     "[{}] Schema validation failed, retrying with correction (attempt {})",
                     request_id, correction_attempt,
@@ -1028,12 +1109,14 @@ async def chat_completions(request: Request):
                 error_details = "; ".join(
                     e.get("message", str(e)) for e in exc.errors[:5]
                 )
-                raise ProxyError(
+                proxy_exc = ProxyError(
                     422,
                     f"Schema validation failed: {error_details}",
                     "schema_validation_failed",
                     advice="Fix your prompt to return JSON matching the schema, or remove json_schema from request.",
                 )
+                await _middleware_chain.run_on_error(body, proxy_exc)
+                raise proxy_exc
 
             # Handle Grounding course correction retry
             if GroundingRetryNeeded and isinstance(exc, GroundingRetryNeeded):
@@ -1043,12 +1126,14 @@ async def chat_completions(request: Request):
                         "[{}] Grounding max corrections exceeded ({})",
                         request_id, correction_attempt,
                     )
-                    raise ProxyError(
+                    proxy_exc = ProxyError(
                         422,
                         f"Grounding verification failed after {correction_attempt} correction attempts. "
                         f"Response not sufficiently grounded in source text.",
                         "grounding_failed",
                     )
+                    await _middleware_chain.run_on_error(body, proxy_exc)
+                    raise proxy_exc
                 logger.info(
                     "[{}] Grounding failed, retrying with correction (attempt {})",
                     request_id, correction_attempt,
@@ -1066,11 +1151,13 @@ async def chat_completions(request: Request):
                     request_id,
                     model,
                 )
-                raise ProxyError(
+                proxy_exc = ProxyError(
                     502,
                     f"JSON validation failed after repair: {exc.raw_text[:200]}",
                     "json_validation_error",
                 )
+                await _middleware_chain.run_on_error(body, proxy_exc)
+                raise proxy_exc
             await _middleware_chain.run_on_error(body, exc)
             raise
 
@@ -1082,15 +1169,48 @@ async def scillm_model_pools(request: Request):
     if auth_err:
         raise ProxyError(401, auth_err, "authentication_error")
 
+    concurrency = {}
+    try:
+        from chutes.middleware.concurrency_guard import get_concurrency_status
+        concurrency = get_concurrency_status()
+    except ImportError:
+        pass
+
     return {
         "pools": {
             name: {
                 **pool,
                 "lanes": [dict(lane) for lane in pool["lanes"]],
+                "status": _model_pool_status(name, pool, concurrency),
             }
             for name, pool in _DEFAULT_MODEL_POOLS.items()
         }
     }
+
+
+@app.get("/v1/scillm/model-pools/{pool_name}/status")
+async def scillm_model_pool_status(request: Request, pool_name: str):
+    """Return live aggregate and per-lane concurrency for one model pool."""
+    auth_err = _check_auth(request)
+    if auth_err:
+        raise ProxyError(401, auth_err, "authentication_error")
+
+    pool = _model_pool(pool_name)
+    if pool is None:
+        raise ProxyError(
+            404,
+            f"Unknown model_pool '{pool_name}'. Available: {', '.join(sorted(_DEFAULT_MODEL_POOLS))}.",
+            "not_found",
+        )
+
+    concurrency = {}
+    try:
+        from chutes.middleware.concurrency_guard import get_concurrency_status
+        concurrency = get_concurrency_status()
+    except ImportError:
+        pass
+
+    return _model_pool_status(pool_name, pool, concurrency)
 
 
 @app.post("/v1/scillm/batch/completions")
@@ -1142,6 +1262,8 @@ async def scillm_batch_completions(request: Request):
                     **{key: item[key] for key in _BATCH_FORWARD_KEYS if key in item},
                     "model": lane["model"],
                     "messages": _messages_for_batch_item(item),
+                    "_scillm_pool": pool_name,
+                    "_scillm_pool_lane": lane["name"],
                 }
                 item_metadata = item.get("scillm_metadata") if isinstance(item.get("scillm_metadata"), dict) else {}
                 payload["scillm_metadata"] = {
@@ -1154,6 +1276,7 @@ async def scillm_batch_completions(request: Request):
                     "provider": lane.get("provider"),
                 }
                 timeout = float(item.get("timeout") or body.get("timeout") or lane.get("timeout") or 300.0)
+                payload["timeout"] = timeout
                 response = await client.post(
                     "/v1/chat/completions",
                     headers={
@@ -1269,6 +1392,11 @@ async def scillm_health(request: Request):
     except ImportError:
         pass
 
+    model_pools = {
+        name: _model_pool_status(name, pool, concurrency)
+        for name, pool in _DEFAULT_MODEL_POOLS.items()
+    }
+
     return {
         "status": "ok",
         "uptime_seconds": round(uptime, 1),
@@ -1282,6 +1410,7 @@ async def scillm_health(request: Request):
         "routing_strategy": _config.routing_strategy,
         "circuit_breaker": _router.circuit_status(),
         "concurrency": concurrency,
+        "model_pools": model_pools,
         "abuse_guard": abuse_guard,
     }
 
@@ -1298,6 +1427,30 @@ async def scillm_active_calls(request: Request):
         return {"active": get_active_calls()}
     except ImportError:
         return {"active": [], "error": "ActiveCallsMiddleware not loaded"}
+
+
+@app.post("/v1/scillm/active-calls/purge")
+async def scillm_active_calls_purge(
+    request: Request,
+    older_than_s: float | None = 600.0,
+    caller: str | None = None,
+    model_contains: str | None = None,
+):
+    """Purge stale active-call rows from the in-memory live registry."""
+    auth_err = _check_auth(request)
+    if auth_err:
+        raise ProxyError(401, auth_err, "authentication_error")
+
+    try:
+        from chutes.middleware.active_calls import clear_active_calls
+        purged = clear_active_calls(
+            older_than_s=older_than_s,
+            caller=caller,
+            model_contains=model_contains,
+        )
+        return {"purged": len(purged), "active": purged}
+    except ImportError:
+        return {"purged": 0, "active": [], "error": "ActiveCallsMiddleware not loaded"}
 
 
 @app.get("/v1/scillm/activity")

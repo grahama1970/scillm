@@ -348,6 +348,8 @@ Response notes:
 - Results are returned in `as_completed` order; use `item_id` to join back to inputs.
 - Each inner call receives `scillm_metadata.batch_id`, `item_id`, `model_pool`, `lane`, `selected_model`, and `provider`.
 - Use `GET /v1/scillm/model-pools` to inspect available pools and lane weights.
+- Use `GET /v1/scillm/model-pools/qra-deepseek-pool/status` for dashboard/live pool concurrency. It returns aggregate `in_flight`, `limit`, `queued`, `available`, and per-lane `registry_in_flight`, `semaphore_in_flight`, and `drift`.
+- Do not infer pool health from raw `/v1/scillm/active-calls`; raw active calls are a debugging view only.
 - Use this endpoint to raise throughput across providers; do not treat OpenCode Go as a Chutes fallback.
 
 ### httpx batch (recommended — no scillm import)
@@ -969,6 +971,10 @@ Redis caching is auto-enabled when `REDIS_HOST` or `REDIS_URL` is set:
 |---|---|---|
 | `/health/liveliness` | GET | Is the proxy alive? |
 | `/v1/scillm/health` | GET | Router health + fallback config + concurrency status |
+| `/v1/scillm/model-pools` | GET | Server-side pool definitions plus live lane status |
+| `/v1/scillm/model-pools/{pool}/status` | GET | Dashboard contract for aggregate/per-lane pool concurrency |
+| `/v1/scillm/active-calls` | GET | Raw active calls for debugging; not pool source of truth |
+| `/v1/scillm/active-calls/purge` | POST | Purge stale in-memory active-call rows |
 | `/v1/scillm/models` | GET | Model groups, deployments, aliases |
 | `/v1/scillm/providers` | GET | **All available providers, auto-routing patterns, and examples** |
 | `/v1/scillm/auth` | GET | **OAuth token health** — Claude/Codex token status, expiry, subscription tier |

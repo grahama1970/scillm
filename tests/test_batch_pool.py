@@ -8,6 +8,7 @@ from scillm.proxy.app import (
     _lane_for_index,
     _messages_for_batch_item,
     _model_pool,
+    _model_pool_status,
     _weighted_lane_sequence,
 )
 from scillm.proxy.errors import ProxyError
@@ -67,3 +68,38 @@ def test_item_id_prefers_explicit_fields():
     assert _item_id({"item_id": "a", "id": "b"}, 0) == "a"
     assert _item_id({"id": "b"}, 0) == "b"
     assert _item_id({}, 2) == "item-3"
+
+
+def test_model_pool_status_reports_aggregate_and_lanes():
+    pool = _model_pool("qra-deepseek-pool")
+    assert pool is not None
+
+    status = _model_pool_status(
+        "qra-deepseek-pool",
+        pool,
+        {
+            "chutes": {
+                "effective_limit": 4,
+                "configured_limit": 4,
+                "in_flight": 3,
+                "queued": 1,
+                "registry_in_flight": 3,
+                "semaphore_in_flight": 3,
+                "drift": 0,
+            },
+            "opencode-go": {
+                "effective_limit": 4,
+                "configured_limit": 4,
+                "in_flight": 2,
+                "queued": 0,
+                "registry_in_flight": 2,
+                "semaphore_in_flight": 2,
+                "drift": 0,
+            },
+        },
+    )
+
+    assert status["in_flight"] == 5
+    assert status["limit"] == 8
+    assert status["queued"] == 1
+    assert [lane["provider"] for lane in status["lanes"]] == ["chutes", "opencode-go"]

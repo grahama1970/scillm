@@ -14,6 +14,7 @@ from scillm.proxy.providers.opencode_go import (
 )
 from scillm.proxy.router import Router
 from chutes.middleware.chutes_router import _is_chutes_model
+from chutes.middleware.concurrency_guard import _resolve_provider
 
 
 def test_parse_opencode_models_output_strips_refresh_and_ansi():
@@ -77,6 +78,12 @@ def test_chutes_router_does_not_claim_opencode_go_models():
     assert _is_chutes_model("opencode-go/deepseek-v4-pro") is False
     assert _is_chutes_model("opencode-go/minimax-m2.7") is False
     assert _is_chutes_model("deepseek-ai/DeepSeek-V3.2-TEE") is True
+
+
+def test_concurrency_guard_routes_opencode_go_to_its_own_provider():
+    assert _resolve_provider("opencode-go/deepseek-v4-flash") == "opencode-go"
+    assert _resolve_provider("opencode-go/minimax-m2.7") == "opencode-go"
+    assert _resolve_provider("deepseek-ai/DeepSeek-V3.2-TEE") == "chutes"
 
 
 def test_app_validation_allows_direct_chutes_model_ids():

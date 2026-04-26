@@ -18,7 +18,6 @@ Migrated from CustomLogger to BaseMiddleware interface.
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import os
 import time
 from typing import Any, Dict
@@ -60,6 +59,7 @@ _DEFAULT_LIMITS: Dict[str, int] = {
     "anthropic": 2,    # Same as claude - adaptive backoff adjusts if 429s occur
     "codex": 8,        # Codex Pro OAuth - OpenAI tier ~10K RPM, using 8 concurrent
     "openai": 8,       # Standard OpenAI
+    "opencode-go": 4,  # OpenCode Go provider pool lane
 }
 DEFAULT_LIMIT = 6
 
@@ -69,7 +69,7 @@ def _load_provider_limits() -> Dict[str, int]:
     import os
     limits = dict(_DEFAULT_LIMITS)
     for provider in list(limits.keys()):
-        env_key = f"SCILLM_CONCURRENCY_{provider.upper()}"
+        env_key = f"SCILLM_CONCURRENCY_{provider.upper().replace('-', '_')}"
         env_val = os.environ.get(env_key)
         if env_val is not None:
             try:
@@ -130,7 +130,6 @@ _request_counter: int = 0  # Simple counter for unique request IDs
 
 async def _persist_state() -> None:
     """Persist backoff state to ArangoDB for restart survival."""
-    now = time.monotonic()
     docs = []
     for provider in PROVIDER_LIMITS:
         configured = PROVIDER_LIMITS[provider]
@@ -223,6 +222,11 @@ async def load_state_from_arango() -> None:
 def _resolve_provider(model: str) -> str:
     """Determine provider key from model name."""
     model_lower = model.lower()
+
+    # OpenCode Go model ids also contain "/", so detect before generic
+    # provider/model slash routing to Chutes.
+    if model_lower.startswith("opencode-go/"):
+        return "opencode-go"
 
     # ── Chutes detection FIRST (Org/Model format) ─────────────────────────
     # Models like "deepseek-ai/DeepSeek-V3.1-TEE" or "Qwen/Qwen3-30B" are Chutes
@@ -406,6 +410,7 @@ def _release_stale_slots() -> int:
     for provider, slots in list(_slot_acquired_at.items()):
         stale_ids = [req_id for req_id, acquired in slots.items() if acquired < cutoff]
         for req_id in stale_ids:
+            acquired = slots[req_id]
             del slots[req_id]
             # Release the semaphore slot
             sem = _semaphores.get(provider)
@@ -415,7 +420,7 @@ def _release_stale_slots() -> int:
             released += 1
             logger.warning(
                 "concurrency_guard: {} released STALE slot {} (held {:.0f}s > {:.0f}s limit)",
-                provider, req_id, now - cutoff + SLOT_MAX_AGE_S, SLOT_MAX_AGE_S,
+                provider, req_id, now - acquired, SLOT_MAX_AGE_S,
             )
 
     if released:
@@ -433,20 +438,27 @@ def _track_slot_acquire(provider: str, request_id: str) -> None:
     _slot_acquired_at[provider][request_id] = time.monotonic()
 
 
-def _track_slot_release(provider: str, request_id: str) -> None:
-    """Remove slot from age tracking on release."""
+def _track_slot_release(provider: str, request_id: str) -> bool:
+    """Remove slot from age tracking on release. Returns true if tracked."""
     if provider in _slot_acquired_at and request_id in _slot_acquired_at[provider]:
         del _slot_acquired_at[provider][request_id]
+        return True
+    return False
 
 
 def _release(provider: str, request_id: str | None = None) -> None:
     """Release a semaphore slot and attempt recovery."""
+    if request_id and not _track_slot_release(provider, request_id):
+        logger.debug(
+            "concurrency_guard: {} release skipped for already-released slot {}",
+            provider,
+            request_id,
+        )
+        return
     sem = _semaphores.get(provider)
     if sem:
         sem.release()
         _in_flight[provider] = max(0, _in_flight.get(provider, 1) - 1)
-    if request_id:
-        _track_slot_release(provider, request_id)
     _maybe_recover(provider)
 
 
@@ -487,6 +499,7 @@ def _release_stale_slots_force() -> int:
     for provider, slots in list(_slot_acquired_at.items()):
         stale_ids = [req_id for req_id, acquired in slots.items() if acquired < cutoff]
         for req_id in stale_ids:
+            acquired = slots[req_id]
             del slots[req_id]
             sem = _semaphores.get(provider)
             if sem:
@@ -495,7 +508,7 @@ def _release_stale_slots_force() -> int:
             released += 1
             logger.warning(
                 "concurrency_guard: {} released STALE slot {} (held {:.0f}s)",
-                provider, req_id, now - cutoff + SLOT_MAX_AGE_S,
+                provider, req_id, now - acquired,
             )
     return released
 
@@ -751,10 +764,19 @@ def get_concurrency_status() -> Dict[str, Any]:
     """Return current concurrency state for all providers."""
     now = time.monotonic()
     status = {}
+    registry_counts: dict[str, int] = {}
+    try:
+        from chutes.middleware.active_calls import get_active_counts_by_provider
+        registry_counts = get_active_counts_by_provider()
+    except Exception as exc:
+        logger.debug("concurrency_guard: active registry unavailable for drift check: {}", exc)
+
     for provider in PROVIDER_LIMITS:
         configured = PROVIDER_LIMITS[provider]
         effective = _effective_limits.get(provider, configured)
-        current = _in_flight.get(provider, 0)
+        semaphore_in_flight = _in_flight.get(provider, 0)
+        registry_in_flight = registry_counts.get(provider, 0)
+        drift = registry_in_flight - semaphore_in_flight
         queued = _queue_depth.get(provider, 0)
         hits = _rate_limit_hits.get(provider, [])
         recent_429s = len([t for t in hits if t > now - _BACKOFF_WINDOW_S])
@@ -777,9 +799,12 @@ def get_concurrency_status() -> Dict[str, Any]:
         status[provider] = {
             "configured_limit": configured,
             "effective_limit": effective,
-            "in_flight": current,
+            "in_flight": semaphore_in_flight,
+            "semaphore_in_flight": semaphore_in_flight,
+            "registry_in_flight": registry_in_flight,
+            "drift": drift,
             "queued": queued,
-            "available": effective - current,
+            "available": effective - semaphore_in_flight,
             "max_queue": MAX_QUEUE_PER_PROVIDER,
             "recent_429s": recent_429s,
             "backoff_active": effective < configured,
