@@ -8,6 +8,7 @@ from scillm.proxy.providers.opencode_go import (
     OPENCODE_GO_CHAT_TIMEOUT_SEC,
     OPENCODE_GO_MESSAGES_TIMEOUT_SEC,
     _build_messages_body,
+    _collect_system_prompt,
     describe_opencode_go_model,
     opencode_go_endpoint_type,
     parse_opencode_models_output,
@@ -128,3 +129,66 @@ def test_opencode_messages_body_preserves_explicit_max_tokens():
     )
 
     assert body["max_tokens"] == 2048
+
+
+def test_opencode_messages_body_preserves_all_system_messages():
+    body = _build_messages_body(
+        "deepseek-v4-pro",
+        [
+            {"role": "system", "content": "Contract A."},
+            {"role": "system", "content": [{"type": "text", "text": "Contract B."}]},
+            {"role": "user", "content": "Return JSON."},
+        ],
+        {},
+    )
+
+    assert body["system"] == "Contract A.\n\nContract B."
+
+
+def test_opencode_messages_body_translates_json_object_response_format():
+    body = _build_messages_body(
+        "deepseek-v4-pro",
+        [
+            {"role": "system", "content": "Return QRA pairs."},
+            {"role": "user", "content": "CM0018 -> CM0019"},
+        ],
+        {"response_format": {"type": "json_object"}},
+    )
+
+    assert "Return QRA pairs." in body["system"]
+    assert "exactly one valid JSON object" in body["system"]
+    assert "markdown fences" in body["system"]
+    assert "response_format" not in body
+
+
+def test_opencode_messages_body_translates_json_schema_response_format():
+    body = _build_messages_body(
+        "deepseek-v4-pro",
+        [{"role": "user", "content": "CM0018 -> CM0019"}],
+        {
+            "response_format": {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "qra_response",
+                    "schema": {
+                        "type": "object",
+                        "required": ["pairs"],
+                        "properties": {"pairs": {"type": "array"}},
+                    },
+                },
+            }
+        },
+    )
+
+    assert "qra_response" in body["system"]
+    assert '"pairs"' in body["system"]
+    assert "markdown fences" in body["system"]
+
+
+def test_collect_system_prompt_handles_list_content():
+    system = _collect_system_prompt([
+        {"role": "system", "content": [{"type": "text", "text": "A"}, {"type": "text", "text": "B"}]},
+        {"role": "user", "content": "hi"},
+    ])
+
+    assert system == "A\nB"

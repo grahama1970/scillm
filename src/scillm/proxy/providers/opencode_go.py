@@ -203,12 +203,78 @@ async def list_opencode_go_models_from_server(
     return []
 
 
+def _system_content_to_text(content: Any) -> str:
+    """Return text from OpenAI system content, including content-part lists."""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = [
+            str(part.get("text", ""))
+            for part in content
+            if isinstance(part, dict) and part.get("type") == "text" and part.get("text")
+        ]
+        return "\n".join(parts)
+    return ""
+
+
+def _collect_system_prompt(messages: list[dict[str, Any]]) -> str | None:
+    """Collect all OpenAI system messages instead of keeping only the last one."""
+    prompts = [
+        text
+        for message in messages
+        if message.get("role") == "system"
+        for text in [_system_content_to_text(message.get("content", ""))]
+        if text
+    ]
+    return "\n\n".join(prompts) if prompts else None
+
+
+def _json_response_instruction(response_format: Any) -> str | None:
+    """Translate OpenAI response_format into text for OpenCode Go /messages."""
+    if not isinstance(response_format, dict):
+        return None
+
+    response_type = response_format.get("type")
+    if response_type == "json_object":
+        return (
+            "You must respond with exactly one valid JSON object. "
+            "Do not include markdown fences, prose, commentary, or text outside the JSON object."
+        )
+
+    if response_type == "json_schema":
+        json_schema = response_format.get("json_schema")
+        if not isinstance(json_schema, dict):
+            return (
+                "You must respond with exactly one valid JSON value matching the requested schema. "
+                "Do not include markdown fences, prose, commentary, or text outside JSON."
+            )
+        name = json_schema.get("name") or "response"
+        schema = json_schema.get("schema") or json_schema
+        schema_text = json.dumps(schema, ensure_ascii=False, sort_keys=True)
+        return (
+            f"You must respond with exactly one valid JSON value for schema {name!r}. "
+            "Do not include markdown fences, prose, commentary, or text outside JSON. "
+            f"JSON schema: {schema_text}"
+        )
+
+    return None
+
+
+def _merge_system_prompt(*parts: str | None) -> str | None:
+    merged = [part for part in parts if part]
+    return "\n\n".join(merged) if merged else None
+
+
 def _build_messages_body(
     model: str,
     messages: list[dict[str, Any]],
     kwargs: dict[str, Any],
 ) -> dict[str, Any]:
     system_prompt, anthropic_msgs = _openai_to_anthropic_messages(messages)
+    system_prompt = _merge_system_prompt(
+        _collect_system_prompt(messages) or system_prompt,
+        _json_response_instruction(kwargs.get("response_format")),
+    )
     for message in anthropic_msgs:
         content = message.get("content")
         if isinstance(content, str):
