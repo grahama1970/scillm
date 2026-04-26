@@ -119,6 +119,8 @@ Use the pool status endpoint as the source of truth for dashboards. It returns a
 
 **OpenCode Go JSON contract:** DeepSeek/MiniMax OpenCode Go models use the Anthropic-compatible `/messages` endpoint. OpenAI `response_format` is not native there, so `/scillm` translates `response_format={"type":"json_object"}` and JSON schema response formats into provider-boundary JSON-only instructions in both the system prompt and final user turn while preserving all system messages.
 
+**OpenCode Go multimodal:** As of April 26, 2026, `opencode models opencode-go --verbose` reports DeepSeek V4 Flash/Pro with `attachment=false`, `input.image=false`, and `input.pdf=false`. `/scillm` treats `opencode-go/deepseek-v4-*` and `opencode-go/minimax-*` as text-only lanes and rejects image/PDF content early with guidance to use `vlm`, Gemini, Claude, or Codex VLM paths.
+
 **Current empirical basis:** On `prompt_cwe20_ex0002`, OpenCode Go `deepseek-v4-flash` matched `deepseek-v4-pro` on the current QRA scorer (`0.933`) and was faster than Pro (`135.01s` vs `217.8s`), while Chutes was faster (`80.72s`) and semantically comparable. The pool uses Chutes as the larger lane and OpenCode Go Flash as additional independent capacity.
 
 ### Codex OAuth gpt-5.5 Support (2026-04-25)

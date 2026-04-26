@@ -202,6 +202,24 @@ def _codex_oauth_available() -> bool:
         return False
 
 
+def _message_has_multimodal_content(message: dict[str, Any]) -> bool:
+    content = message.get("content")
+    if isinstance(content, list):
+        return any(
+            isinstance(part, dict)
+            and (
+                part.get("type") in {"image_url", "image", "document"}
+                or "inlineData" in part
+            )
+            for part in content
+        )
+    return isinstance(content, dict) and (
+        "image_url" in content
+        or "inlineData" in content
+        or content.get("type") in {"image_url", "image", "document"}
+    )
+
+
 def _model_pool(pool_name: str) -> dict[str, Any] | None:
     pool = _DEFAULT_MODEL_POOLS.get(pool_name)
     if pool is None:
@@ -444,6 +462,19 @@ def _validate_model_request(model: str, body: dict, request: Request) -> None:
         any(isinstance(p, dict) and "inlineData" in p for p in msg.get("content", []))
         for msg in messages
     )
+    has_multimodal_content = any(
+        isinstance(msg, dict) and _message_has_multimodal_content(msg)
+        for msg in messages
+    )
+    if is_opencode_go_model(model) and has_multimodal_content:
+        raise ProxyError(
+            400,
+            f"OpenCode Go model '{model}' is text-only through /scillm today. "
+            "Live `opencode models opencode-go --verbose` reports "
+            "attachment=false and input.image=false/input.pdf=false for DeepSeek V4. "
+            "Use model='vlm' for image/PDF work, or target a confirmed vision-capable provider.",
+            "invalid_request_error",
+        )
     if has_inline_data and not model_lower.startswith(("gemini", "text-gemini")):
         raise ProxyError(
             400,

@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 from scillm.proxy.config import ProxyConfig
-from scillm.proxy.app import _is_direct_chutes_model, _is_empty_length_response
+import pytest
+
+from scillm.proxy.app import _is_direct_chutes_model, _is_empty_length_response, _validate_model_request
+from scillm.proxy.errors import ProxyError
 from scillm.proxy.providers.opencode_go import (
     ENDPOINT_CHAT_COMPLETIONS,
     ENDPOINT_MESSAGES,
@@ -16,6 +19,10 @@ from scillm.proxy.providers.opencode_go import (
 from scillm.proxy.router import Router
 from chutes.middleware.chutes_router import _is_chutes_model
 from chutes.middleware.concurrency_guard import _resolve_provider
+
+
+class _Request:
+    headers: dict[str, str] = {"x-caller-skill": "test"}
 
 
 def test_parse_opencode_models_output_strips_refresh_and_ansi():
@@ -91,6 +98,32 @@ def test_app_validation_allows_direct_chutes_model_ids():
     assert _is_direct_chutes_model("deepseek-ai/DeepSeek-V3-0324-TEE") is True
     assert _is_direct_chutes_model("Qwen/Qwen3-30B-A3B") is True
     assert _is_direct_chutes_model("opencode-go/deepseek-v4-pro") is False
+
+
+def test_app_validation_rejects_multimodal_opencode_go_requests():
+    body = {
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "Describe this image."},
+                    {"type": "image_url", "image_url": {"url": "data:image/png;base64,abc"}},
+                ],
+            }
+        ]
+    }
+
+    with pytest.raises(ProxyError) as exc:
+        _validate_model_request("opencode-go/deepseek-v4-flash", body, _Request())
+
+    assert "text-only" in exc.value.message
+    assert "attachment=false" in exc.value.message
+
+
+def test_app_validation_allows_text_opencode_go_requests():
+    body = {"messages": [{"role": "user", "content": "Return JSON."}]}
+
+    _validate_model_request("opencode-go/deepseek-v4-flash", body, _Request())
 
 
 def test_empty_length_response_detects_visible_token_exhaustion():

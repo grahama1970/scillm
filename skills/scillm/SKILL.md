@@ -133,6 +133,8 @@ Cascade aliases still work: `text` (Chutes → Gemini free → Gemini paid → D
 
 **Discover live OpenCode Go models:** call `GET /v1/scillm/opencode-go/models?refresh=true`. The proxy runs `opencode models --refresh opencode-go` inside Docker first, using the mounted host OpenCode auth/config/cache, then falls back to `opencode serve /provider`, then a built-in registry. Use `models[*].id` directly as the chat `model`.
 
+**OpenCode Go multimodal caveat:** `opencode models opencode-go --verbose` currently reports DeepSeek V4 Flash/Pro with `attachment=false`, `input.image=false`, and `input.pdf=false`. Through `/scillm`, `opencode-go/deepseek-v4-*` and `opencode-go/minimax-*` are text-only lanes. Use `model: "vlm"` or a direct Gemini/Claude/Codex VLM model for images/PDFs.
+
 ```python
 import httpx
 
