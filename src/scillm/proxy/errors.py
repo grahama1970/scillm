@@ -27,7 +27,7 @@ class ErrorAnalysis(BaseModel):
 class ProxyError(Exception):
     """Base proxy exception carrying HTTP status, message, and error type."""
 
-    __slots__ = ("status_code", "message", "error_type", "advice", "call_id")
+    __slots__ = ("status_code", "message", "error_type", "advice", "call_id", "details")
 
     def __init__(
         self,
@@ -36,12 +36,14 @@ class ProxyError(Exception):
         error_type: str,
         advice: str | None = None,
         call_id: str | None = None,
+        details: dict | None = None,
     ) -> None:
         self.status_code = status_code
         self.message = message
         self.error_type = error_type
         self.advice = advice or _get_advice_for_error(error_type, message)
         self.call_id = call_id
+        self.details = details or {}
         super().__init__(message)
 
     def to_dict(self) -> dict:
@@ -59,6 +61,8 @@ class ProxyError(Exception):
             result["error"]["skill"] = "/best-practices-scillm"
         if self.call_id:
             result["error"]["debug_url"] = f"http://localhost:4001/v1/scillm/debug/{self.call_id}"
+        if self.details:
+            result["error"]["details"] = self.details
         return result
 
 
@@ -597,7 +601,13 @@ async def proxy_error_handler(request: Request, exc: ProxyError) -> JSONResponse
     error_dict = exc.to_dict()
 
     # LLM-powered analysis for non-analysis requests (prevent infinite loops)
-    if caller_skill != _ANALYSIS_CALLER and exc.status_code >= 400:
+    should_run_llm_analysis = (
+        caller_skill != _ANALYSIS_CALLER
+        and exc.status_code >= 400
+        and exc.error_type != "timeout_error"
+        and exc.status_code != 504
+    )
+    if should_run_llm_analysis:
         try:
             # Extract observable facts from request for anti-pattern diagnosis
             model_requested = None

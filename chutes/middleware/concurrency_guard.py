@@ -126,6 +126,14 @@ _last_stale_check: float = 0.0  # Monotonic time of last stale slot check
 _request_counter: int = 0  # Simple counter for unique request IDs
 
 
+def _new_semaphore_with_reserved_slots(limit: int, reserved_slots: int) -> asyncio.Semaphore:
+    """Create a fresh semaphore whose initial availability accounts for in-flight calls."""
+    if limit < 0:
+        raise ValueError("limit must be non-negative")
+    reserved = max(0, min(reserved_slots, limit))
+    return asyncio.Semaphore(limit - reserved)
+
+
 # ── Persistence functions ────────────────────────────────────────────────
 
 async def _persist_state() -> None:
@@ -312,12 +320,7 @@ def _record_429(provider: str, retry_after: int | None = None) -> None:
             provider, current, new_limit, slots_to_reserve, current_in_flight,
         )
 
-        # Create new semaphore and immediately reserve slots for in-flight requests
-        new_sem = asyncio.Semaphore(new_limit)
-        for _ in range(slots_to_reserve):
-            # Non-blocking acquire since we just created the semaphore
-            new_sem.acquire_nowait()
-        _semaphores[provider] = new_sem
+        _semaphores[provider] = _new_semaphore_with_reserved_slots(new_limit, slots_to_reserve)
 
         # Persist state change to ArangoDB
         asyncio.create_task(_persist_state())
@@ -374,10 +377,7 @@ def _maybe_recover(provider: str) -> None:
     # Reserve slots for in-flight requests (same fix as _record_429)
     current_in_flight = _in_flight.get(provider, 0)
     slots_to_reserve = min(current_in_flight, new_limit)
-    new_sem = asyncio.Semaphore(new_limit)
-    for _ in range(slots_to_reserve):
-        new_sem.acquire_nowait()
-    _semaphores[provider] = new_sem
+    _semaphores[provider] = _new_semaphore_with_reserved_slots(new_limit, slots_to_reserve)
 
     logger.info(
         "concurrency_guard: {} recovery — no 429s for {:.0f}s, restoring {} → {} (reserved {} for in-flight)",
@@ -642,6 +642,9 @@ class ConcurrencyMiddleware(BaseMiddleware):
                 )
 
             raise MiddlewareReject(msg, status_code=503)
+        except BaseException:
+            _queue_depth[provider] = max(0, _queue_depth.get(provider, 0) - 1)
+            raise
 
         queue_wait_ms = int((time.monotonic() - queue_start) * 1000)
         _queue_depth[provider] = max(0, _queue_depth.get(provider, 0) - 1)
@@ -765,9 +768,14 @@ def get_concurrency_status() -> Dict[str, Any]:
     now = time.monotonic()
     status = {}
     registry_counts: dict[str, int] = {}
+    stale_counts: dict[str, int] = {}
     try:
-        from chutes.middleware.active_calls import get_active_counts_by_provider
+        from chutes.middleware.active_calls import (
+            get_active_counts_by_provider,
+            get_stale_counts_by_provider,
+        )
         registry_counts = get_active_counts_by_provider()
+        stale_counts = get_stale_counts_by_provider()
     except Exception as exc:
         logger.debug("concurrency_guard: active registry unavailable for drift check: {}", exc)
 
@@ -776,6 +784,7 @@ def get_concurrency_status() -> Dict[str, Any]:
         effective = _effective_limits.get(provider, configured)
         semaphore_in_flight = _in_flight.get(provider, 0)
         registry_in_flight = registry_counts.get(provider, 0)
+        stale_active_calls = stale_counts.get(provider, 0)
         drift = registry_in_flight - semaphore_in_flight
         queued = _queue_depth.get(provider, 0)
         hits = _rate_limit_hits.get(provider, [])
@@ -800,8 +809,12 @@ def get_concurrency_status() -> Dict[str, Any]:
             "configured_limit": configured,
             "effective_limit": effective,
             "in_flight": semaphore_in_flight,
+            "actual_in_flight": semaphore_in_flight,
+            "live_in_flight": semaphore_in_flight,
             "semaphore_in_flight": semaphore_in_flight,
             "registry_in_flight": registry_in_flight,
+            "stale_active_calls": stale_active_calls,
+            "registry_drift": drift,
             "drift": drift,
             "queued": queued,
             "available": effective - semaphore_in_flight,

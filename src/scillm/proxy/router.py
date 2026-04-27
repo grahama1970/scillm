@@ -97,9 +97,10 @@ def _trigger_chutes_warmup(model: str) -> None:
 class ProxyError(Exception):
     """Terminal error raised when all retries and fallbacks are exhausted."""
 
-    def __init__(self, status_code: int, message: str) -> None:
+    def __init__(self, status_code: int, message: str, details: dict[str, Any] | None = None) -> None:
         self.status_code = status_code
         self.message = message
+        self.details = details or {}
         super().__init__(f"[{status_code}] {message}")
 
 
@@ -213,6 +214,62 @@ def _status_code_for(exc: Exception) -> int:
     if isinstance(exc, openai.APIStatusError):
         return exc.status_code
     return 502
+
+
+def _deadline_remaining_s(deadline_at: float | None) -> float | None:
+    if deadline_at is None:
+        return None
+    return deadline_at - time.monotonic()
+
+
+def _deadline_timeout_details(
+    kwargs: dict[str, Any],
+    *,
+    provider: str = "",
+    model: str = "",
+    final_provider_error: Exception | str | None = None,
+) -> dict[str, Any]:
+    metadata = kwargs.get("_scillm_metadata") if isinstance(kwargs.get("_scillm_metadata"), dict) else {}
+    started_at = kwargs.get("_deadline_started_at")
+    elapsed_ms = None
+    if started_at is not None:
+        elapsed_ms = int((time.monotonic() - float(started_at)) * 1000)
+    details = {
+        "caller": kwargs.get("_caller_skill") or "unknown",
+        "item_id": metadata.get("item_id"),
+        "batch_id": metadata.get("batch_id"),
+        "provider": provider,
+        "model": model,
+        "elapsed_ms": elapsed_ms,
+        "timeout_s": kwargs.get("_deadline_timeout_s"),
+        "cascade_attempts": kwargs.get("_cascade_attempts", 0),
+        "final_provider_error": str(final_provider_error) if final_provider_error else None,
+    }
+    return {key: value for key, value in details.items() if value is not None}
+
+
+def _deadline_exceeded(
+    kwargs: dict[str, Any],
+    *,
+    provider: str = "",
+    model: str = "",
+    final_provider_error: Exception | str | None = None,
+) -> ProxyError:
+    details = _deadline_timeout_details(
+        kwargs,
+        provider=provider,
+        model=model,
+        final_provider_error=final_provider_error,
+    )
+    timeout_s = details.get("timeout_s", "unknown")
+    attempts = details.get("cascade_attempts", 0)
+    return ProxyError(
+        504,
+        f"Request deadline exceeded after {timeout_s}s "
+        f"(provider={provider or 'unknown'}, model={model or 'unknown'}, "
+        f"cascade_attempts={attempts})",
+        details=details,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -597,8 +654,16 @@ class Router:
         Returns the OpenAI response/stream on success.
         Raises the last exception on exhaustion.
         """
+        request_context = dict(kwargs)
         kwargs = dict(kwargs)
         override = kwargs.pop("_max_retries_override", None)
+        deadline_at_raw = kwargs.pop("_deadline_at", None)
+        deadline_at = float(deadline_at_raw) if deadline_at_raw is not None else None
+        kwargs.pop("_deadline_timeout_s", None)
+        kwargs.pop("_deadline_started_at", None)
+        kwargs.pop("_caller_skill", None)
+        kwargs.pop("_scillm_metadata", None)
+        kwargs.pop("_cascade_attempts", None)
 
         # Dynamic timeout from TimeoutEstimatorMiddleware (ms -> seconds)
         # Use MAX of dynamic estimate and config timeout — config is a floor
@@ -612,6 +677,12 @@ class Router:
             timeout_sec = config_timeout
         if policy_max_timeout_s is not None:
             timeout_sec = min(timeout_sec, float(policy_max_timeout_s))
+
+        remaining = _deadline_remaining_s(deadline_at)
+        if remaining is not None:
+            if remaining <= 0:
+                raise _deadline_exceeded(request_context, provider=dep.custom_llm_provider or "", model=dep.model)
+            timeout_sec = min(timeout_sec, remaining)
 
         client = self._client_for(dep)
         policy = self._config.retry_policy
@@ -689,6 +760,16 @@ class Router:
 
         for attempt in range(max_possible + 1):
             try:
+                remaining = _deadline_remaining_s(deadline_at)
+                if remaining is not None:
+                    if remaining <= 0:
+                        raise _deadline_exceeded(
+                            request_context,
+                            provider=dep.custom_llm_provider or "",
+                            model=dep.model,
+                            final_provider_error=last_exc,
+                        )
+                    timeout_sec = min(timeout_sec, remaining)
                 resp = await client.chat.completions.create(
                     model=dep.model,
                     messages=messages,
@@ -736,6 +817,14 @@ class Router:
                     )
                     raise
                 delay = min(base_delay * (2 ** attempt), 60)
+                remaining = _deadline_remaining_s(deadline_at)
+                if remaining is not None and remaining <= delay:
+                    raise _deadline_exceeded(
+                        request_context,
+                        provider=dep.custom_llm_provider or "",
+                        model=dep.model,
+                        final_provider_error=exc,
+                    )
                 logger.info(
                     "Deployment {} attempt {}/{} got {} — retrying in {:.1f}s",
                     dep.model,
@@ -784,6 +873,8 @@ class Router:
                 return await self._try_deployment(dep, messages, **kw)
             except Exception as exc:
                 last_exc = exc
+                if isinstance(exc, ProxyError) and exc.status_code == 504:
+                    raise
                 logger.debug(
                     "Group '{}' deployment {} failed: {}",
                     group.name,
@@ -845,8 +936,13 @@ class Router:
         last_exc: Exception | None = None
         last_status = 502
         skipped: list[str] = []
+        cascade_attempts = 0
 
         for gname in chain:
+            remaining = _deadline_remaining_s(kwargs.get("_deadline_at"))
+            if remaining is not None and remaining <= 0:
+                raise _deadline_exceeded(kwargs, final_provider_error=last_exc)
+
             # Circuit breaker: skip groups in cooldown
             circuit = self._circuit(gname)
             if circuit.is_open():
@@ -862,12 +958,17 @@ class Router:
                 logger.warning("Group {!r} has no deployments, skipping", gname)
                 continue
             try:
-                result = await self._try_group(group, messages, **kwargs)
+                cascade_attempts += 1
+                group_kwargs = dict(kwargs)
+                group_kwargs["_cascade_attempts"] = cascade_attempts
+                result = await self._try_group(group, messages, **group_kwargs)
                 circuit.record_success()
                 return result
             except Exception as exc:
                 last_exc = exc
                 last_status = _status_code_for(exc)
+                if isinstance(exc, ProxyError) and exc.status_code == 504:
+                    raise
                 circuit.record_failure(
                     self._config.allowed_fails,
                     self._config.cooldown_time,

@@ -217,9 +217,13 @@ curl http://localhost:4001/v1/scillm/model-pools/qra-deepseek-pool/status \
 ```
 
 The status response is the dashboard contract for pool concurrency. It returns
-top-level `in_flight`, `limit`, `queued`, `available`, and per-lane state with
-`registry_in_flight`, `semaphore_in_flight`, and `drift`. Do not infer pool
-health from raw `/v1/scillm/active-calls` rows.
+top-level `live_in_flight`, `actual_in_flight`, `limit`, `queued`, `available`,
+and per-lane state with `live_in_flight`, `semaphore_in_flight`,
+`stale_active_calls`, and `registry_drift`. Dashboard progress should use
+`live_in_flight`; stale registry rows are diagnostics only. Timeout errors
+include structured details such as `caller`, `batch_id`, `item_id`, `provider`,
+`model`, `elapsed_ms`, `timeout_s`, `cascade_attempts`, and
+`final_provider_error`.
 
 **Submit a batch:**
 

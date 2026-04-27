@@ -103,3 +103,31 @@ def test_model_pool_status_reports_aggregate_and_lanes():
     assert status["limit"] == 8
     assert status["queued"] == 1
     assert [lane["provider"] for lane in status["lanes"]] == ["chutes", "opencode-go"]
+
+
+def test_model_pool_status_uses_live_semaphore_not_stale_registry_rows():
+    pool = _model_pool("qra-deepseek-pool")
+    assert pool is not None
+
+    status = _model_pool_status(
+        "qra-deepseek-pool",
+        pool,
+        {
+            "opencode-go": {
+                "effective_limit": 4,
+                "configured_limit": 4,
+                "in_flight": 1,
+                "live_in_flight": 1,
+                "semaphore_in_flight": 1,
+                "registry_in_flight": 9,
+                "stale_active_calls": 8,
+                "registry_drift": 8,
+            },
+        },
+    )
+
+    opencode_lane = next(lane for lane in status["lanes"] if lane["provider"] == "opencode-go")
+    assert opencode_lane["live_in_flight"] == 1
+    assert opencode_lane["stale_active_calls"] == 8
+    assert opencode_lane["registry_drift"] == 8
+    assert status["live_in_flight"] == 1

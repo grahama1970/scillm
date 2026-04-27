@@ -250,8 +250,21 @@ def _model_pool_status(
         provider_state = concurrency.get(provider, {}) if isinstance(concurrency, dict) else {}
         effective_limit = int(provider_state.get("effective_limit") or lane.get("max_concurrency") or 1)
         configured_limit = int(provider_state.get("configured_limit") or lane.get("max_concurrency") or effective_limit)
-        in_flight = int(provider_state.get("in_flight") or 0)
+        semaphore_in_flight = int(
+            provider_state.get("semaphore_in_flight")
+            or provider_state.get("actual_in_flight")
+            or provider_state.get("in_flight")
+            or 0
+        )
+        live_in_flight = int(provider_state.get("live_in_flight") or semaphore_in_flight)
         queued = int(provider_state.get("queued") or 0)
+        registry_in_flight = int(provider_state.get("registry_in_flight") or 0)
+        stale_active_calls = int(provider_state.get("stale_active_calls") or 0)
+        registry_drift = int(
+            provider_state.get("registry_drift")
+            if provider_state.get("registry_drift") is not None
+            else registry_in_flight - semaphore_in_flight
+        )
         status = {
             "name": lane.get("name"),
             "provider": provider,
@@ -260,20 +273,24 @@ def _model_pool_status(
             "lane_limit": int(lane.get("max_concurrency") or effective_limit),
             "configured_limit": configured_limit,
             "effective_limit": effective_limit,
-            "in_flight": in_flight,
+            "in_flight": live_in_flight,
+            "actual_in_flight": semaphore_in_flight,
+            "live_in_flight": live_in_flight,
             "queued": queued,
-            "available": int(provider_state.get("available") or max(0, effective_limit - in_flight)),
+            "available": int(provider_state.get("available") or max(0, effective_limit - semaphore_in_flight)),
             "paused": bool(provider_state.get("paused", False)),
             "backoff_active": bool(provider_state.get("backoff_active", False)),
             "pause_remaining_s": provider_state.get("pause_remaining_s", 0),
-            "registry_in_flight": int(provider_state.get("registry_in_flight") or 0),
-            "semaphore_in_flight": int(provider_state.get("semaphore_in_flight") or in_flight),
-            "drift": int(provider_state.get("drift") or 0),
+            "registry_in_flight": registry_in_flight,
+            "stale_active_calls": stale_active_calls,
+            "semaphore_in_flight": semaphore_in_flight,
+            "registry_drift": registry_drift,
+            "drift": registry_drift,
         }
         lane_statuses.append(status)
         if provider and provider not in seen_providers:
             seen_providers.add(provider)
-            aggregate_in_flight += in_flight
+            aggregate_in_flight += live_in_flight
             aggregate_limit += effective_limit
             aggregate_queued += queued
 
@@ -281,6 +298,8 @@ def _model_pool_status(
         "name": pool_name,
         "strategy": pool.get("strategy"),
         "in_flight": aggregate_in_flight,
+        "actual_in_flight": aggregate_in_flight,
+        "live_in_flight": aggregate_in_flight,
         "limit": aggregate_limit,
         "queued": aggregate_queued,
         "available": max(0, aggregate_limit - aggregate_in_flight),
@@ -317,6 +336,47 @@ def _messages_for_batch_item(item: dict[str, Any]) -> list[dict[str, Any]]:
 
 def _item_id(item: dict[str, Any], index: int) -> str:
     return str(item.get("item_id") or item.get("id") or f"item-{index + 1}")
+
+
+def _float_or_none(value: Any) -> float | None:
+    try:
+        return float(value) if value is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _request_deadline_timeout_s(body: dict[str, Any]) -> float | None:
+    """Return caller-facing end-to-end timeout, not provider estimate."""
+    explicit_timeout = _float_or_none(body.get("timeout"))
+    if explicit_timeout is not None:
+        return explicit_timeout
+    return _float_or_none(body.get("_policy_max_timeout_s"))
+
+
+def _timeout_error_details(
+    body: dict[str, Any],
+    *,
+    model: str,
+    started_at: float,
+    timeout_s: float,
+    final_provider_error: Exception | str | None = None,
+) -> dict[str, Any]:
+    metadata = body.get("_scillm_metadata")
+    if not isinstance(metadata, dict):
+        metadata = body.get("scillm_metadata")
+    if not isinstance(metadata, dict):
+        metadata = {}
+    return {
+        "caller": body.get("_caller_skill") or body.get("_headers", {}).get("x-caller-skill") or "unknown",
+        "item_id": metadata.get("item_id"),
+        "batch_id": metadata.get("batch_id"),
+        "provider": body.get("_concurrency_provider"),
+        "model": model,
+        "elapsed_ms": int((time.monotonic() - started_at) * 1000),
+        "timeout_s": timeout_s,
+        "cascade_attempts": body.get("_cascade_attempts", 0),
+        "final_provider_error": str(final_provider_error) if final_provider_error else None,
+    }
 
 
 def _repo_root() -> Path:
@@ -678,8 +738,9 @@ async def _load_middleware(config: ProxyConfig) -> list[BaseMiddleware]:
     # It must register after ConcurrencyMiddleware acquires a provider slot so
     # active-calls and health semaphore state describe the same live lifecycle.
     try:
-        from chutes.middleware.active_calls import ActiveCallsMiddleware
+        from chutes.middleware.active_calls import ActiveCallsMiddleware, start_active_call_janitor
         active_mw = ActiveCallsMiddleware()
+        start_active_call_janitor()
         insert_at = next(
             (
                 index + 1
@@ -1025,12 +1086,37 @@ async def chat_completions(request: Request):
 
     # Inject headers for middleware (arango_log.py uses x-caller-skill)
     body["_headers"] = dict(request.headers)
+    body["_caller_skill"] = caller_skill
+    start = time.monotonic()
+    deadline_timeout_s = _request_deadline_timeout_s(body)
 
     # Pre-call middleware (can modify request or reject). If a later
     # pre_call hook rejects, earlier hooks such as ActiveCallsMiddleware and
     # ConcurrencyMiddleware must still see on_error and clean up.
     try:
-        body = await _middleware_chain.run_pre_call(body)
+        if deadline_timeout_s is not None and deadline_timeout_s > 0:
+            remaining = (start + deadline_timeout_s) - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError("request deadline expired before middleware")
+            async with asyncio.timeout(remaining):
+                body = await _middleware_chain.run_pre_call(body)
+        else:
+            body = await _middleware_chain.run_pre_call(body)
+    except TimeoutError as exc:
+        proxy_exc = ProxyError(
+            504,
+            f"Request timed out after {deadline_timeout_s}s before provider call completed",
+            "timeout_error",
+            details=_timeout_error_details(
+                body,
+                model=model,
+                started_at=start,
+                timeout_s=deadline_timeout_s or 0,
+                final_provider_error=exc,
+            ),
+        )
+        await _middleware_chain.run_on_error(body, proxy_exc)
+        raise proxy_exc
     except BaseException as exc:
         await _middleware_chain.run_on_error(body, exc if isinstance(exc, Exception) else Exception(type(exc).__name__))
         raise
@@ -1059,11 +1145,22 @@ async def chat_completions(request: Request):
     if "_policy_max_timeout_s" in body:
         kwargs["_policy_max_timeout_s"] = body["_policy_max_timeout_s"]
 
+    policy_deadline_timeout_s = _request_deadline_timeout_s(body)
+    if deadline_timeout_s is None or (
+        policy_deadline_timeout_s is not None
+        and policy_deadline_timeout_s < deadline_timeout_s
+    ):
+        deadline_timeout_s = policy_deadline_timeout_s
+    if deadline_timeout_s is not None and deadline_timeout_s > 0:
+        kwargs["_deadline_started_at"] = start
+        kwargs["_deadline_timeout_s"] = deadline_timeout_s
+        kwargs["_deadline_at"] = start + deadline_timeout_s
+        kwargs["_caller_skill"] = caller_skill
+        kwargs["_scillm_metadata"] = caller_metadata if isinstance(caller_metadata, dict) else {}
+
     # Pass dynamic fallback chain from ChutesRouter (utilization-aware ordering)
     if "_dynamic_fallback_chain" in body:
         kwargs["_dynamic_fallback_chain"] = body["_dynamic_fallback_chain"]
-
-    start = time.monotonic()
 
     # -------------------------------------------------------------------------
     # BATCH RESUME: Check if this work item already completed successfully
@@ -1099,7 +1196,25 @@ async def chat_completions(request: Request):
 
     while True:
         try:
-            result = await _router.complete(model, working_messages, **kwargs)
+            if deadline_timeout_s is not None and deadline_timeout_s > 0:
+                remaining = (start + deadline_timeout_s) - time.monotonic()
+                if remaining <= 0:
+                    details = _timeout_error_details(
+                        body,
+                        model=model,
+                        started_at=start,
+                        timeout_s=deadline_timeout_s,
+                    )
+                    raise ProxyError(
+                        504,
+                        f"Request timed out after {deadline_timeout_s}s before provider call completed",
+                        "timeout_error",
+                        details=details,
+                    )
+                async with asyncio.timeout(remaining):
+                    result = await _router.complete(model, working_messages, **kwargs)
+            else:
+                result = await _router.complete(model, working_messages, **kwargs)
 
             if stream:
                 # OAuth providers return AsyncIterator[bytes] (already SSE-formatted).
@@ -1176,7 +1291,29 @@ async def chat_completions(request: Request):
             raise
         except RouterProxyError as exc:
             # Convert router's ProxyError to enriched ProxyError for LLM analysis
-            proxy_exc = ProxyError(exc.status_code, exc.message, "router_error")
+            error_type = "timeout_error" if exc.status_code == 504 else "router_error"
+            proxy_exc = ProxyError(
+                exc.status_code,
+                exc.message,
+                error_type,
+                details=getattr(exc, "details", {}) or {},
+            )
+            await _middleware_chain.run_on_error(body, proxy_exc)
+            raise proxy_exc
+        except TimeoutError as exc:
+            details = _timeout_error_details(
+                body,
+                model=model,
+                started_at=start,
+                timeout_s=deadline_timeout_s or 0,
+                final_provider_error=exc,
+            )
+            proxy_exc = ProxyError(
+                504,
+                f"Request timed out after {deadline_timeout_s}s",
+                "timeout_error",
+                details=details,
+            )
             await _middleware_chain.run_on_error(body, proxy_exc)
             raise proxy_exc
         except Exception as exc:
@@ -1538,10 +1675,23 @@ async def scillm_active_calls(request: Request):
         raise ProxyError(401, auth_err, "authentication_error")
 
     try:
-        from chutes.middleware.active_calls import get_active_calls
-        return {"active": get_active_calls()}
+        from chutes.middleware.active_calls import get_active_calls, get_recent_stale_active_calls
+        active = get_active_calls()
+        stale = get_recent_stale_active_calls()
+        return {
+            "active": active,
+            "live_in_flight": len(active),
+            "stale_active_calls": len(stale),
+            "stale": stale,
+        }
     except ImportError:
-        return {"active": [], "error": "ActiveCallsMiddleware not loaded"}
+        return {
+            "active": [],
+            "live_in_flight": 0,
+            "stale_active_calls": 0,
+            "stale": [],
+            "error": "ActiveCallsMiddleware not loaded",
+        }
 
 
 @app.post("/v1/scillm/active-calls/purge")

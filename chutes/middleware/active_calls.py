@@ -18,8 +18,9 @@ from loguru import logger
 from scillm.proxy.middleware import BaseMiddleware
 
 
-ACTIVE_CALL_MIN_TTL_S = 600.0
 ACTIVE_CALL_DEFAULT_TTL_S = 900.0
+ACTIVE_CALL_STALE_GRACE_S = 5.0
+ACTIVE_CALL_JANITOR_INTERVAL_S = 5.0
 
 
 @dataclass
@@ -36,7 +37,12 @@ class ActiveCall:
     pool: str = ""
     lane: str = ""
 
-    def to_dict(self) -> dict:
+    def stale_after_s(self, default_ttl_s: float = ACTIVE_CALL_DEFAULT_TTL_S) -> float:
+        if self.timeout_s is None:
+            return default_ttl_s
+        return max(0.0, float(self.timeout_s)) + ACTIVE_CALL_STALE_GRACE_S
+
+    def to_dict(self, *, live_status: str = "live") -> dict:
         elapsed_ms = round((time.monotonic() - self.started_at) * 1000)
         return {
             "call_id": self.call_id,
@@ -49,6 +55,8 @@ class ActiveCall:
             "lane": self.lane,
             "started_ts": self.started_ts,
             "elapsed_ms": elapsed_ms,
+            "live_status": live_status,
+            "stale_after_s": self.stale_after_s(),
         }
 
 
@@ -65,9 +73,11 @@ class CompletedCall:
 # Global registry of active calls
 _active_calls: dict[str, ActiveCall] = {}
 _lock = asyncio.Lock()
+_janitor_task: asyncio.Task | None = None
 
 # Rolling window of completed calls for activity graph (last 5 minutes)
 _completed_calls: deque[CompletedCall] = deque(maxlen=1000)
+_stale_calls: deque[dict] = deque(maxlen=1000)
 _WINDOW_SECONDS = 300  # 5 minutes
 
 
@@ -79,6 +89,16 @@ def get_active_calls() -> list[dict]:
     return [c.to_dict() for c in calls]
 
 
+def get_recent_stale_active_calls(window_s: float = _WINDOW_SECONDS) -> list[dict]:
+    """Return recently evicted stale rows for diagnostics only."""
+    now = time.monotonic()
+    return [
+        dict(call)
+        for call in list(_stale_calls)
+        if now - float(call.get("stale_evicted_at_monotonic", 0.0)) <= window_s
+    ]
+
+
 def get_active_count() -> int:
     """Return count of active calls."""
     evict_stale_active_calls()
@@ -87,7 +107,7 @@ def get_active_count() -> int:
 
 
 def get_active_counts_by_provider() -> dict[str, int]:
-    """Return active-call counts grouped by provider."""
+    """Return live active-call counts grouped by provider."""
     evict_stale_active_calls()
     counts: dict[str, int] = {}
     for call in list(_active_calls.values()):
@@ -96,8 +116,31 @@ def get_active_counts_by_provider() -> dict[str, int]:
     return counts
 
 
+def get_stale_counts_by_provider(window_s: float = _WINDOW_SECONDS) -> dict[str, int]:
+    """Return recent stale-call counts grouped by provider for diagnostics."""
+    counts: dict[str, int] = {}
+    for call in get_recent_stale_active_calls(window_s=window_s):
+        provider = str(call.get("provider") or "unknown")
+        counts[provider] = counts.get(provider, 0) + 1
+    return counts
+
+
+def get_active_call_diagnostics_by_provider(window_s: float = _WINDOW_SECONDS) -> dict[str, dict[str, int]]:
+    """Return live and stale registry counts grouped by provider."""
+    live_counts = get_active_counts_by_provider()
+    stale_counts = get_stale_counts_by_provider(window_s=window_s)
+    providers = set(live_counts) | set(stale_counts)
+    return {
+        provider: {
+            "live_in_flight": live_counts.get(provider, 0),
+            "stale_active_calls": stale_counts.get(provider, 0),
+        }
+        for provider in providers
+    }
+
+
 def evict_stale_active_calls(default_ttl_s: float = ACTIVE_CALL_DEFAULT_TTL_S) -> list[dict]:
-    """Evict active-call records that outlive their provider timeout.
+    """Evict active-call records that outlive their request timeout plus grace.
 
     Active calls are only an in-memory live registry. If a request is cancelled
     or an exception path misses middleware cleanup, stale rows must not survive
@@ -106,16 +149,19 @@ def evict_stale_active_calls(default_ttl_s: float = ACTIVE_CALL_DEFAULT_TTL_S) -
     now = time.monotonic()
     evicted: list[dict] = []
     for call_id, call in list(_active_calls.items()):
-        ttl = max(float(call.timeout_s or default_ttl_s) * 2.0, ACTIVE_CALL_MIN_TTL_S)
+        ttl = call.stale_after_s(default_ttl_s)
         age_s = now - call.started_at
         if age_s <= ttl:
             continue
         removed = _active_calls.pop(call_id, None)
         if removed is None:
             continue
-        record = removed.to_dict()
+        record = removed.to_dict(live_status="stale")
         record["ttl_s"] = ttl
+        record["stale_evicted_at_monotonic"] = now
+        record["stale_evicted_ts"] = datetime.now(timezone.utc).isoformat()
         evicted.append(record)
+        _stale_calls.append(record)
         logger.warning(
             "active_calls: evicted stale call provider={} model={} call_id={} age_s={:.1f} ttl_s={:.1f}",
             removed.provider,
@@ -133,18 +179,29 @@ def clear_active_calls(
     caller: str | None = None,
     model_contains: str | None = None,
 ) -> list[dict]:
-    """Purge matching active-call records and return removed rows."""
+    """Purge matching active/stale-call records and return removed rows."""
     now = time.monotonic()
     removed: list[dict] = []
     caller_filter = caller.lower() if caller else None
     model_filter = model_contains.lower() if model_contains else None
 
+    def matches(call: ActiveCall | dict) -> bool:
+        if isinstance(call, ActiveCall):
+            age_s = now - call.started_at
+            caller_value = call.caller
+            model_value = call.model
+        else:
+            age_s = float(call.get("elapsed_ms", 0.0)) / 1000.0
+            caller_value = str(call.get("caller") or "")
+            model_value = str(call.get("model") or "")
+        if older_than_s is not None and age_s <= older_than_s:
+            return False
+        if caller_filter and caller_filter not in caller_value.lower():
+            return False
+        return not (model_filter and model_filter not in model_value.lower())
+
     for call_id, call in list(_active_calls.items()):
-        if older_than_s is not None and now - call.started_at <= older_than_s:
-            continue
-        if caller_filter and caller_filter not in call.caller.lower():
-            continue
-        if model_filter and model_filter not in call.model.lower():
+        if not matches(call):
             continue
         popped = _active_calls.pop(call_id, None)
         if popped:
@@ -156,6 +213,22 @@ def clear_active_calls(
                 popped.call_id,
                 popped.caller,
             )
+
+    retained_stale: deque[dict] = deque(maxlen=_stale_calls.maxlen)
+    for call in list(_stale_calls):
+        if matches(call):
+            removed.append(dict(call))
+            logger.warning(
+                "active_calls: purged stale call provider={} model={} call_id={} caller={}",
+                call.get("provider"),
+                call.get("model"),
+                call.get("call_id"),
+                call.get("caller"),
+            )
+        else:
+            retained_stale.append(call)
+    _stale_calls.clear()
+    _stale_calls.extend(retained_stale)
     return removed
 
 
@@ -203,6 +276,7 @@ def get_activity_graph(bucket_seconds: int = 10) -> dict:
                 buckets[bucket_idx]["error"] += 1
             buckets[bucket_idx]["latency_sum"] += call.duration_ms
 
+    evict_stale_active_calls()
     active_count = len(_active_calls)
 
     # Compute avg latency
@@ -219,6 +293,31 @@ def get_activity_graph(bucket_seconds: int = 10) -> dict:
         "active_count": active_count,
         "window_seconds": _WINDOW_SECONDS,
     }
+
+
+async def _janitor_loop(interval_s: float) -> None:
+    try:
+        while True:
+            evicted = evict_stale_active_calls()
+            if evicted:
+                logger.warning("active_calls: janitor evicted {} stale call(s)", len(evicted))
+            await asyncio.sleep(interval_s)
+    except asyncio.CancelledError:
+        logger.info("active_calls: janitor stopped")
+        raise
+
+
+def start_active_call_janitor(interval_s: float = ACTIVE_CALL_JANITOR_INTERVAL_S) -> None:
+    """Start a background janitor that keeps live accounting clean."""
+    global _janitor_task
+    if _janitor_task is not None and not _janitor_task.done():
+        return
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return
+    _janitor_task = loop.create_task(_janitor_loop(interval_s))
+    logger.info("active_calls: janitor started (interval={}s)", interval_s)
 
 
 def _infer_provider(model: str) -> str:
