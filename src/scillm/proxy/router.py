@@ -603,12 +603,15 @@ class Router:
         # Dynamic timeout from TimeoutEstimatorMiddleware (ms -> seconds)
         # Use MAX of dynamic estimate and config timeout — config is a floor
         dynamic_timeout_ms = kwargs.pop("_dynamic_timeout_ms", None)
+        policy_max_timeout_s = kwargs.pop("_policy_max_timeout_s", None)
         config_timeout = float(dep.timeout or 120)
         if dynamic_timeout_ms is not None:
             dynamic_timeout = float(dynamic_timeout_ms) / 1000.0
             timeout_sec = max(dynamic_timeout, config_timeout)
         else:
             timeout_sec = config_timeout
+        if policy_max_timeout_s is not None:
+            timeout_sec = min(timeout_sec, float(policy_max_timeout_s))
 
         client = self._client_for(dep)
         policy = self._config.retry_policy

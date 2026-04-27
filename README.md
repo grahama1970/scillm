@@ -87,6 +87,14 @@ scillm is designed for **local development and trusted networks**. The default c
 
 scillm does not implement multi-tenant auth, key rotation, or per-client access control. It's designed for single-user research and engineering workflows.
 
+For local blast-radius control, scillm can enforce optional `caller_profiles`
+keyed by `X-Caller-Skill`. These are not users, teams, or virtual keys; they
+are local safety rules for known callers. Profiles can restrict model
+aliases/pools, deny dangerous model patterns, require `scillm_metadata` keys
+such as `batch_id` and `item_id`, block tools/files/images/PDFs/streaming, and
+cap provider timeout. See `registry/caller_profiles.example.yaml` for a minimal
+copyable profile set.
+
 ## What You Get
 
 Every provider scillm targets speaks OpenAI-compatible API (`/v1/chat/completions`). Provider-specific handler code is unnecessary for this use case. Adding a provider is 5 lines of YAML. The proxy handles format translation (OpenAI tools → Anthropic/Codex/Gemini native), OAuth token management, streaming SSE normalization, and fallback cascading — not a framework, just the code that does the work.
@@ -473,6 +481,8 @@ Test files: `tests/test_proxy_e2e.py` (contract tests), `tests/test_proxy_advers
 
 **Discover available models:** `GET /v1/scillm/providers`
 
+**Discover capability facts:** `GET /v1/scillm/capabilities`
+
 **Composes with:** `/task-monitor`, `/create-evidence-case`, `/analytics`, `/create-figure`, `/llm-eval-lab`
 
 **Full reference:** [`skills/scillm/SKILL.md`](skills/scillm/SKILL.md) — code examples for single calls, batch calls, Claude/Codex OAuth, ZIP/PDF file sending, VLM auto-routing, and source grounding.
@@ -484,6 +494,7 @@ Test files: `tests/test_proxy_e2e.py` (contract tests), `tests/test_proxy_advers
 | `GET /health/liveliness` | Is the proxy alive? |
 | `GET /v1/scillm/health` | Model groups, fallback chains, retry policy, concurrency slots |
 | `GET /v1/scillm/models` | Deployed models with group membership |
+| `GET /v1/scillm/capabilities` | Read-only model, adapter, pool, and caller policy capability facts |
 | `GET /v1/scillm/model-pools` | Server-side batch pools and lane definitions |
 | `GET /v1/scillm/model-pools/{pool}/status` | Live aggregate and per-lane pool concurrency for dashboards |
 | `GET /v1/scillm/opencode-go/models?refresh=true` | Live OpenCode Go model discovery |

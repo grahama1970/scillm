@@ -1,0 +1,13 @@
+id: chutes
+provider: chutes
+supports:
+  text: true
+  image: true
+  pdf: false
+  zip: false
+  streaming: true
+  tools: true
+quirks:
+  - cold_models_return_503
+  - utilization_varies_by_model
+  - direct_model_ids_use_org_slash_model

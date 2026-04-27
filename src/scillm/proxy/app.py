@@ -12,9 +12,11 @@ import os
 import time
 import uuid
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Any
 
 import httpx
+import yaml
 from fastapi import FastAPI, Request, WebSocket
 from fastapi.responses import JSONResponse
 from loguru import logger
@@ -317,6 +319,77 @@ def _item_id(item: dict[str, Any], index: int) -> str:
     return str(item.get("item_id") or item.get("id") or f"item-{index + 1}")
 
 
+def _repo_root() -> Path:
+    return Path(__file__).resolve().parents[3]
+
+
+def _load_adapter_manifests() -> dict[str, dict[str, Any]]:
+    """Load local read-only adapter capability manifests."""
+    manifests: dict[str, dict[str, Any]] = {}
+    manifest_dir = _repo_root() / "registry" / "adapters"
+    if not manifest_dir.exists():
+        return manifests
+    for path in sorted(manifest_dir.glob("*.yaml")):
+        try:
+            data = yaml.safe_load(path.read_text()) or {}
+        except Exception as exc:
+            logger.warning("failed to read adapter manifest {}: {}", path, exc)
+            continue
+        if not isinstance(data, dict):
+            continue
+        adapter_id = str(data.get("id") or path.stem)
+        manifests[adapter_id] = data
+    return manifests
+
+
+def _adapter_id_for_deployment(dep: Any, group_name: str = "") -> str:
+    provider = (dep.custom_llm_provider or "").lower()
+    model = (dep.model or "").lower()
+    api_base = (dep.api_base or "").lower()
+    group = group_name.lower()
+
+    if provider == "anthropic-oauth" or model.startswith("claude") or "anthropic" in api_base:
+        return "claude_oauth"
+    if provider == "codex-oauth" or model.startswith(("gpt", "codex")):
+        return "codex_oauth"
+    if provider in {"gemini-oauth", "gemini"} or model.startswith("gemini") or "generativelanguage.googleapis.com" in api_base:
+        return "gemini"
+    if provider.startswith("opencode-go") or group.startswith("opencode-go/"):
+        return "opencode_go"
+    if "ollama" in api_base or ":" in model:
+        return "ollama"
+    if "chutes" in api_base or "/" in dep.model:
+        return "chutes"
+    return "openai_compatible"
+
+
+def _deployment_supports(dep: Any, group_name: str, adapters: dict[str, dict[str, Any]]) -> dict[str, bool]:
+    adapter_id = _adapter_id_for_deployment(dep, group_name)
+    adapter_supports = adapters.get(adapter_id, {}).get("supports", {})
+    supports = {
+        "text": True,
+        "image": bool(adapter_supports.get("image", False)),
+        "pdf": bool(adapter_supports.get("pdf", False)),
+        "zip": bool(adapter_supports.get("zip", False)),
+        "streaming": bool(adapter_supports.get("streaming", True)),
+        "tools": bool(adapter_supports.get("tools", True)),
+    }
+    model = (dep.model or "").lower()
+    group = group_name.lower()
+    if group.startswith("vlm") or "glm-4.6v" in model or "vl" in model:
+        supports["image"] = True
+    if adapter_id == "opencode_go":
+        supports["image"] = False
+        supports["pdf"] = False
+        supports["zip"] = False
+    return supports
+
+
+def _merge_supports(items: list[dict[str, bool]]) -> dict[str, bool]:
+    keys = {"text", "image", "pdf", "zip", "streaming", "tools"}
+    return {key: any(item.get(key, False) for item in items) for key in sorted(keys)}
+
+
 def _suggest_model(unknown: str, candidates: set[str], n: int = 3) -> list[str]:
     """Suggest closest matching model names using fuzzy matching.
 
@@ -506,13 +579,14 @@ async def _load_middleware(config: ProxyConfig) -> list[BaseMiddleware]:
       1. AbuseGuard — blocks clients after repeated 4xx errors (pre_call)
       2. CacheMiddleware — returns cached responses, dedupes in-flight (pre_call) — BEFORE concurrency
       3. TimeoutEstimator — queries /latency-stats, sets _dynamic_timeout_ms (pre_call)
-      4. ChutesRouter — selects least saturated Chutes model variant (pre_call)
-      5. VlmRouter — rewrites model before routing (pre_call)
-      6. ConcurrencyMiddleware — acquires provider semaphore (pre_call), releases (post_call/on_error)
-      7. JsonGuard — validates JSON responses, repairs or raises (post_call)
-      8. BudgetMiddleware — tracks spend, exposes via headers (post_call)
-      9. CostHeaderMiddleware — injects x-cost-usd headers (post_call)
-      10. ArangoLogMiddleware — logs to ArangoDB llm_call_log (post_call, on_error) — LAST
+      4. CallerPolicy — per-caller blast-radius controls (pre_call)
+      5. ChutesRouter — selects least saturated Chutes model variant (pre_call)
+      6. VlmRouter — rewrites model before routing (pre_call)
+      7. ConcurrencyMiddleware — acquires provider semaphore (pre_call), releases (post_call/on_error)
+      8. JsonGuard — validates JSON responses, repairs or raises (post_call)
+      9. BudgetMiddleware — tracks spend, exposes via headers (post_call)
+      10. CostHeaderMiddleware — injects x-cost-usd headers (post_call)
+      11. ArangoLogMiddleware — logs to ArangoDB llm_call_log (post_call, on_error) — LAST
 
     All persistence uses ArangoDB (no Redis):
       - CacheMiddleware → scillm_response_cache
@@ -545,6 +619,14 @@ async def _load_middleware(config: ProxyConfig) -> list[BaseMiddleware]:
         logger.info("TimeoutEstimatorMiddleware loaded")
     except (ImportError, Exception) as exc:
         logger.debug("TimeoutEstimatorMiddleware not loaded: {}", exc)
+
+    if config.caller_profiles:
+        try:
+            from chutes.middleware.caller_policy import CallerPolicyMiddleware
+            middlewares.append(CallerPolicyMiddleware(config))
+            logger.info("CallerPolicyMiddleware loaded ({} profiles)", len(config.caller_profiles))
+        except (ImportError, Exception) as exc:
+            logger.debug("CallerPolicyMiddleware not loaded: {}", exc)
 
     # ChutesRouter selects best model variant based on utilization (before VlmRouter)
     middlewares.extend([ChutesRouter(), VlmRouter(), ConcurrencyMiddleware(), JsonGuard()])
@@ -974,6 +1056,8 @@ async def chat_completions(request: Request):
     # Pass dynamic timeout from TimeoutEstimatorMiddleware to router
     if "_dynamic_timeout_ms" in body:
         kwargs["_dynamic_timeout_ms"] = body["_dynamic_timeout_ms"]
+    if "_policy_max_timeout_s" in body:
+        kwargs["_policy_max_timeout_s"] = body["_policy_max_timeout_s"]
 
     # Pass dynamic fallback chain from ChutesRouter (utilization-aware ordering)
     if "_dynamic_fallback_chain" in body:
@@ -1607,6 +1691,71 @@ async def scillm_models(request: Request):
                 "key_configured": bool(_config.opencode_go_api_key),
             }
         },
+    }
+
+
+@app.get("/v1/scillm/capabilities")
+async def scillm_capabilities(request: Request):
+    """Read-only capability facts for callers, adapters, pools, and policies."""
+    auth_err = _check_auth(request)
+    if auth_err:
+        raise ProxyError(401, auth_err, "authentication_error")
+    if _config is None:
+        raise ProxyError(503, "Proxy not ready", "service_unavailable")
+
+    adapters = _load_adapter_manifests()
+    model_groups: dict[str, dict[str, Any]] = {}
+    for name, group in _config.model_groups.items():
+        deployments = []
+        support_items = []
+        for dep in group.deployments:
+            adapter_id = _adapter_id_for_deployment(dep, name)
+            supports = _deployment_supports(dep, name, adapters)
+            support_items.append(supports)
+            deployments.append({
+                "model": dep.model,
+                "provider": adapter_id,
+                "custom_llm_provider": dep.custom_llm_provider,
+                "supports": supports,
+                "timeout": dep.timeout,
+            })
+        model_groups[name] = {
+            "supports": _merge_supports(support_items),
+            "deployments": deployments,
+            "fallbacks": _config.fallbacks.get(name, []),
+        }
+
+    pools = {}
+    for name, pool in _DEFAULT_MODEL_POOLS.items():
+        pools[name] = {
+            "strategy": pool.get("strategy"),
+            "description": pool.get("description"),
+            "supports": {
+                "batch": True,
+                "text": True,
+                "image": False,
+                "pdf": False,
+                "zip": False,
+                "streaming": False,
+                "tools": False,
+            },
+            "lanes": [dict(lane) for lane in pool.get("lanes", [])],
+        }
+
+    try:
+        from chutes.middleware.caller_policy import caller_profiles_for_capabilities
+        caller_profiles = caller_profiles_for_capabilities(_config)
+    except Exception:
+        caller_profiles = {}
+
+    return {
+        "version": 1,
+        "model_groups": model_groups,
+        "aliases": _config.aliases,
+        "fallbacks": _config.fallbacks,
+        "model_pools": pools,
+        "adapters": adapters,
+        "caller_profiles": caller_profiles,
     }
 
 

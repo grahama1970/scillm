@@ -65,6 +65,25 @@ class GeneralSettings:
     health_check_concurrency: int = 5
 
 
+@dataclass(frozen=True)
+class CallerProfile:
+    """Per-caller capability policy.
+
+    Profiles are keyed by the ``X-Caller-Skill`` header.  Empty/default fields
+    are permissive to keep unprofiled callers OpenAI-compatible.
+    """
+
+    allowed_models: list[str] = field(default_factory=list)
+    deny_model_patterns: list[str] = field(default_factory=list)
+    require_scillm_metadata: list[str] = field(default_factory=list)
+    allow_tools: bool = True
+    allow_files: bool = True
+    allow_images: bool = True
+    allow_pdfs: bool = True
+    allow_streaming: bool = True
+    max_timeout_s: float | None = None
+
+
 @dataclass
 class ProxyConfig:
     """Complete proxy configuration."""
@@ -88,6 +107,7 @@ class ProxyConfig:
     gemini_api_key: str | None = None
     opencode_go_api_base: str | None = None
     opencode_go_api_key: str | None = None
+    caller_profiles: dict[str, CallerProfile] = field(default_factory=dict)
 
 
 # ---------------------------------------------------------------------------
@@ -192,6 +212,57 @@ def _parse_general(gs: dict[str, Any] | None) -> GeneralSettings:
     )
 
 
+def _as_str_list(value: Any) -> list[str]:
+    """Normalize YAML scalar/list values to a list of strings."""
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, list):
+        return [str(item) for item in value if item is not None]
+    return [str(value)]
+
+
+def _as_bool(value: Any, default: bool = True) -> bool:
+    """Parse permissive YAML/env boolean values."""
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"1", "true", "yes", "on"}:
+            return True
+        if normalized in {"0", "false", "no", "off"}:
+            return False
+    return bool(value)
+
+
+def _parse_caller_profiles(raw: dict[str, Any] | None) -> dict[str, CallerProfile]:
+    """Parse caller_profiles config keyed by X-Caller-Skill."""
+    if not raw:
+        return {}
+    out: dict[str, CallerProfile] = {}
+    for caller, profile in raw.items():
+        if not isinstance(profile, dict):
+            logger.warning("caller_profiles.{} must be a mapping, skipping", caller)
+            continue
+        max_timeout_raw = profile.get("max_timeout_s")
+        max_timeout_s = float(max_timeout_raw) if max_timeout_raw is not None else None
+        out[str(caller)] = CallerProfile(
+            allowed_models=_as_str_list(profile.get("allowed_models")),
+            deny_model_patterns=_as_str_list(profile.get("deny_model_patterns")),
+            require_scillm_metadata=_as_str_list(profile.get("require_scillm_metadata")),
+            allow_tools=_as_bool(profile.get("allow_tools"), True),
+            allow_files=_as_bool(profile.get("allow_files"), True),
+            allow_images=_as_bool(profile.get("allow_images"), True),
+            allow_pdfs=_as_bool(profile.get("allow_pdfs"), True),
+            allow_streaming=_as_bool(profile.get("allow_streaming"), True),
+            max_timeout_s=max_timeout_s,
+        )
+    return out
+
+
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
@@ -222,6 +293,7 @@ def load_config(path: str | Path) -> ProxyConfig:
     router = resolved.get("router_settings", {})
     fallbacks = _parse_fallbacks(router.get("fallbacks"))
     retry_policy = _parse_retry_policy(router.get("retry_policy"))
+    caller_profiles = _parse_caller_profiles(resolved.get("caller_profiles"))
 
     settings = resolved.get("scillm_settings", resolved.get("litellm_settings", {}))
     aliases = settings.get("model_alias_map", {})
@@ -297,4 +369,5 @@ def load_config(path: str | Path) -> ProxyConfig:
         gemini_api_key=gemini_key,
         opencode_go_api_base=opencode_go_base,
         opencode_go_api_key=opencode_go_key,
+        caller_profiles=caller_profiles,
     )

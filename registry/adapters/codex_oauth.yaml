@@ -1,0 +1,14 @@
+id: codex_oauth
+provider: codex-oauth
+supports:
+  text: true
+  image: true
+  pdf: false
+  zip: false
+  streaming: true
+  tools: true
+quirks:
+  - uses_codex_cli_oauth_credentials
+  - tool_choice_required_forced_to_auto
+  - not_for_batch
+  - project_agent_image_analysis_should_use_codex_exec

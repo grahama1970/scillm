@@ -1,0 +1,13 @@
+id: ollama
+provider: ollama
+supports:
+  text: true
+  image: false
+  pdf: false
+  zip: false
+  streaming: true
+  tools: false
+quirks:
+  - local_only
+  - response_format_is_stripped
+  - any_model_tag_can_auto_route

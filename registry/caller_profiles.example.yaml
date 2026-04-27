@@ -1,0 +1,23 @@
+caller_profiles:
+  create-qras:
+    allowed_models: [qra-deepseek-pool, text]
+    deny_model_patterns: ["gpt-*", "claude-*"]
+    require_scillm_metadata: [batch_id, item_id]
+    allow_tools: false
+    allow_files: false
+    allow_images: false
+    allow_pdfs: false
+    allow_streaming: false
+    max_timeout_s: 60
+
+  pdf-extraction-review:
+    allowed_models: [vlm-chutes, vlm-claude, gpt-5.5]
+    allow_images: true
+    allow_pdfs: true
+    allow_tools: false
+
+  experimental-agent:
+    allowed_models: [local-text, text]
+    allow_tools: false
+    allow_files: false
+    max_timeout_s: 60

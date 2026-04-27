@@ -1,0 +1,14 @@
+id: opencode_go
+provider: opencode-go
+supports:
+  text: true
+  image: false
+  pdf: false
+  zip: false
+  streaming: true
+  tools: true
+quirks:
+  - deepseek_v4_uses_messages_endpoint
+  - minimax_uses_messages_endpoint
+  - response_format_json_is_instruction_only
+  - live_cli_reports_attachment_false_for_deepseek_v4

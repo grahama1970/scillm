@@ -1,0 +1,13 @@
+id: gemini
+provider: gemini
+supports:
+  text: true
+  image: true
+  pdf: true
+  zip: true
+  streaming: true
+  tools: true
+quirks:
+  - inlineData_requires_direct_gemini_model
+  - free_tier_flash_25_can_have_low_daily_quota
+  - zip_explosion_happens_in_scillm_router
