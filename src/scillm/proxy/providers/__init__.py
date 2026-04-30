@@ -7,6 +7,25 @@ import time
 import uuid
 from typing import Any
 
+import httpx
+
+
+def streaming_timeout(overall_timeout_s: float | int | None = None) -> httpx.Timeout:
+    """Return an httpx timeout suitable for provider SSE streams.
+
+    Connect/pool/write failures should surface quickly, but reads must not use
+    a short response cap because long reasoning streams can be silent between
+    provider events. The proxy-level SSE liveness wrapper owns heartbeat and
+    overall-budget enforcement.
+    """
+    connect_timeout = 10.0
+    if overall_timeout_s is not None:
+        try:
+            connect_timeout = min(connect_timeout, max(1.0, float(overall_timeout_s)))
+        except (TypeError, ValueError):
+            pass
+    return httpx.Timeout(timeout=None, connect=connect_timeout, read=None, write=30.0, pool=10.0)
+
 
 def sse_chunk(
     chunk_id: str,

@@ -6,17 +6,135 @@ objects with proper SSE formatting and graceful disconnect handling.
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import json
+import time
 from typing import Any, AsyncIterator, Optional
 
 from loguru import logger
 from starlette.responses import StreamingResponse
+
+DEFAULT_STREAM_HEARTBEAT_S = 15.0
 
 SSE_HEADERS: dict[str, str] = {
     "Cache-Control": "no-cache",
     "Connection": "keep-alive",
     "X-Accel-Buffering": "no",
 }
+
+
+def _sse_event(event: str, data: dict[str, Any]) -> str:
+    """Build a named SSE event."""
+    return f"event: {event}\ndata: {json.dumps(data)}\n\n"
+
+
+def _is_done_chunk(chunk: str | bytes) -> bool:
+    if isinstance(chunk, bytes):
+        text = chunk.decode("utf-8", errors="ignore")
+    else:
+        text = chunk
+    return "data: [DONE]" in text
+
+
+async def sse_liveness_wrapper(
+    stream: AsyncIterator[str] | AsyncIterator[bytes],
+    *,
+    model: str = "",
+    started_at: float | None = None,
+    overall_timeout_s: float | None = None,
+    heartbeat_interval_s: float = DEFAULT_STREAM_HEARTBEAT_S,
+    progress_events: bool = False,
+) -> AsyncIterator[str | bytes]:
+    """Wrap an SSE stream with heartbeat and overall-budget enforcement.
+
+    Provider stream reads can legitimately be silent for long reasoning spans.
+    This wrapper keeps the client connection live with heartbeat comments while
+    a pending provider read is in progress, and enforces a separate overall
+    request budget so streams cannot hang forever.
+    """
+    started = started_at or time.monotonic()
+    deadline = started + overall_timeout_s if overall_timeout_s and overall_timeout_s > 0 else None
+    heartbeat_interval = max(0.001, float(heartbeat_interval_s or DEFAULT_STREAM_HEARTBEAT_S))
+    iterator = stream.__aiter__()
+    pending: asyncio.Task[Any] | None = None
+    done_sent = False
+
+    if progress_events:
+        yield _sse_event(
+            "started",
+            {"model": model, "elapsed_ms": int((time.monotonic() - started) * 1000)},
+        )
+
+    try:
+        while True:
+            if pending is None:
+                pending = asyncio.create_task(iterator.__anext__())
+
+            wait_timeout = heartbeat_interval
+            if deadline is not None:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    pending.cancel()
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await pending
+                    error_payload = {
+                        "error": {
+                            "message": f"stream_timeout: overall budget exceeded after {overall_timeout_s}s",
+                            "type": "timeout_error",
+                        }
+                    }
+                    yield _sse_event("error", error_payload) if progress_events else f"data: {json.dumps(error_payload)}\n\n"
+                    yield "data: [DONE]\n\n"
+                    done_sent = True
+                    return
+                wait_timeout = min(wait_timeout, remaining)
+
+            done, _ = await asyncio.wait({pending}, timeout=wait_timeout)
+            if not done:
+                heartbeat = {
+                    "model": model,
+                    "elapsed_ms": int((time.monotonic() - started) * 1000),
+                }
+                if progress_events:
+                    yield _sse_event("heartbeat", heartbeat)
+                else:
+                    yield f": heartbeat {json.dumps(heartbeat)}\n\n"
+                continue
+
+            task = pending
+            pending = None
+            try:
+                chunk = task.result()
+            except StopAsyncIteration:
+                if progress_events:
+                    yield _sse_event(
+                        "done",
+                        {"model": model, "elapsed_ms": int((time.monotonic() - started) * 1000)},
+                    )
+                if not done_sent:
+                    yield "data: [DONE]\n\n"
+                return
+
+            if _is_done_chunk(chunk):
+                if progress_events:
+                    yield _sse_event(
+                        "done",
+                        {"model": model, "elapsed_ms": int((time.monotonic() - started) * 1000)},
+                    )
+                yield chunk
+                done_sent = True
+                return
+            yield chunk
+    except Exception as exc:
+        logger.error("SSE liveness wrapper interrupted: {}", exc)
+        error_payload = {"error": {"message": f"stream_interrupted: {exc}", "type": "stream_error"}}
+        yield _sse_event("error", error_payload) if progress_events else f"data: {json.dumps(error_payload)}\n\n"
+        if not done_sent:
+            yield "data: [DONE]\n\n"
+    finally:
+        if pending is not None and not pending.done():
+            pending.cancel()
 
 
 def _compute_cost_event(usage: dict[str, Any], model: str) -> Optional[str]:
@@ -80,7 +198,15 @@ async def _sse_generator(stream: Any, model: str = "") -> AsyncIterator[str]:
         yield "data: [DONE]\n\n"
 
 
-async def stream_response(stream: Any, model: str = "") -> StreamingResponse:
+async def stream_response(
+    stream: Any,
+    model: str = "",
+    *,
+    started_at: float | None = None,
+    overall_timeout_s: float | None = None,
+    heartbeat_interval_s: float = DEFAULT_STREAM_HEARTBEAT_S,
+    progress_events: bool = False,
+) -> StreamingResponse:
     """Convert an OpenAI ``AsyncStream`` into a Starlette ``StreamingResponse``.
 
     Parameters
@@ -98,7 +224,14 @@ async def stream_response(stream: Any, model: str = "") -> StreamingResponse:
         and appropriate SSE headers.
     """
     return StreamingResponse(
-        _sse_generator(stream, model=model),
+        sse_liveness_wrapper(
+            _sse_generator(stream, model=model),
+            model=model,
+            started_at=started_at,
+            overall_timeout_s=overall_timeout_s,
+            heartbeat_interval_s=heartbeat_interval_s,
+            progress_events=progress_events,
+        ),
         media_type="text/event-stream",
         headers=SSE_HEADERS,
     )

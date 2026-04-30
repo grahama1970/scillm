@@ -268,6 +268,7 @@ def _deadline_exceeded(
         f"Request deadline exceeded after {timeout_s}s "
         f"(provider={provider or 'unknown'}, model={model or 'unknown'}, "
         f"cascade_attempts={attempts})",
+        "timeout_error",
         details=details,
     )
 

@@ -906,6 +906,13 @@ resp = httpx.post(
 
 **Streaming:** Both Claude and Codex support `"stream": true`. The proxy translates provider-specific SSE events into OpenAI-compatible delta chunks (`data: {"choices":[{"delta":{"content":"..."}}]}`). Works with any SSE client including `httpx.stream()` and the OpenAI SDK.
 
+For long grounded/reasoning calls, prefer streaming instead of one blocking HTTP response. Use:
+- `timeout`: overall wall-clock budget, e.g. 300–600s.
+- `stream_heartbeat_s`: heartbeat cadence for idle liveness, default 15s.
+- Short client connect timeout, but no arbitrary 15s read cap.
+
+The proxy keeps SSE connections live with heartbeat comments while providers are silent and fails only when the overall budget expires. If a caller needs named progress events for artifact writers, pass `stream_progress_events: true`; normal token chunks remain OpenAI-compatible `data:` chunks.
+
 **Note:** `max_tokens` is ignored for Codex (the ChatGPT backend doesn't support it).
 
 **Credential priority:** `~/.codex/auth.json` (Codex CLI) > `~/.pi/agent/auth.json` (Pi CLI).

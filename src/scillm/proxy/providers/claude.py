@@ -15,7 +15,7 @@ import httpx
 import openai
 from loguru import logger
 
-from scillm.proxy.providers import make_chunk_id, sse_chunk, sse_done, sse_format
+from scillm.proxy.providers import make_chunk_id, sse_chunk, sse_done, sse_format, streaming_timeout
 from scillm.proxy.providers.auth import get_anthropic_token
 
 ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages"
@@ -402,7 +402,7 @@ async def claude_completion_stream(
     tool_call_index = 0  # tracks which tool_call we're streaming
 
     try:
-        async with httpx.AsyncClient(timeout=float(timeout)) as client:
+        async with httpx.AsyncClient(timeout=streaming_timeout(timeout)) as client:
             async with client.stream("POST", ANTHROPIC_API_URL, json=body, headers=headers) as resp:
                 if resp.status_code != 200:
                     error_body = await resp.aread()

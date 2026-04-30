@@ -1,6 +1,6 @@
 # Project Knowledge: scillm
 
-**Last updated:** 2026-04-25 12:55 by agent
+**Last updated:** 2026-04-30 10:29 by agent
 **Status:** Active development
 
 ## Current Understanding
@@ -10,7 +10,9 @@
 - All logging via ArangoDB (`llm_call_log` collection), NOT Redis
 - Redis is ONLY for optional caching
 - Silent batch failures are forbidden — must log raw responses for debugging
+- No-exceptions scillm policy: every `/v1/chat/completions` and `/v1/scillm/batch/completions` request must include `X-Caller-Skill`; `max_tokens` is rejected; batch-pool requests must include explicit `model_pool`, stable `batch_id`, and per-item ids so violations return actionable `scillm_policy_violation` errors to the project agent. Strict reliability is enforced in all environments: guarded requests, required middleware, logging, metrics, and batch-pool partial failures must not fail open.
 - **JSONL backup** — all calls also written to `/mnt/storage12tb/scillm-logs/` (append-only, survives DB wipes)
+- 2026-04-30: Long /scillm streaming calls now use SSE heartbeat liveness with short provider connect timeouts, unbounded provider read timeouts, caller-controlled overall budgets, and optional named progress events. The core Docker stack was rebuilt and restarted with the change, and /health returned ok.
 
 ### Dynamic Fallback Chain (2026-04-15)
 
@@ -202,6 +204,8 @@ Use the pool status endpoint as the source of truth for dashboards. It returns a
 | 2026-04-13 | Document misuse patterns in SKILL.md | Schema mismatches, silent failures, Redis logging are now documented anti-patterns |
 | 2026-04-10 | Bifrost P1+P2 architecture | Go gateway for performance + Python for API translation |
 | 2026-04-05 | Use fallbacks instead of priority field | litellm ignores model_info.priority — was silently broken |
+| 2026-04-27 | Fail closed for guarded and observability failures in all environments | scillm reliability requires incorrect calls, missing required middleware, schema/grounding failures, logging failures, metrics failures, and batch-pool item failures to return explicit actionable errors instead of silently degrading. |
+| 2026-04-30 | Use SSE heartbeats and overall budgets for long /scillm calls | Fixed 15s response caps break grounded reasoning calls; streaming callers need short connect timeout, heartbeat/idle liveness, and a 5-10 minute overall budget. |
 
 ## Open Questions
 

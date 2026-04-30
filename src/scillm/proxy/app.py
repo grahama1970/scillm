@@ -34,7 +34,7 @@ from scillm.proxy.providers.opencode_go import (
 )
 from scillm.proxy.router import Router
 from scillm.proxy.router import ProxyError as RouterProxyError
-from scillm.proxy.streaming import SSE_HEADERS, stream_response
+from scillm.proxy.streaming import DEFAULT_STREAM_HEARTBEAT_S, SSE_HEADERS, sse_liveness_wrapper, stream_response
 from starlette.responses import StreamingResponse
 
 # ---------------------------------------------------------------------------
@@ -351,6 +351,15 @@ def _request_deadline_timeout_s(body: dict[str, Any]) -> float | None:
     if explicit_timeout is not None:
         return explicit_timeout
     return _float_or_none(body.get("_policy_max_timeout_s"))
+
+
+def _stream_heartbeat_interval_s(body: dict[str, Any]) -> float:
+    """Return heartbeat cadence for streaming responses."""
+    for key in ("stream_heartbeat_s", "heartbeat_interval_s", "idle_timeout", "read_timeout"):
+        value = _float_or_none(body.get(key))
+        if value is not None and value > 0:
+            return value
+    return DEFAULT_STREAM_HEARTBEAT_S
 
 
 def _timeout_error_details(
@@ -1217,18 +1226,34 @@ async def chat_completions(request: Request):
                 result = await _router.complete(model, working_messages, **kwargs)
 
             if stream:
+                heartbeat_interval_s = _stream_heartbeat_interval_s(body)
+                progress_events = bool(body.get("stream_progress_events") or body.get("progress_events"))
                 # OAuth providers return AsyncIterator[bytes] (already SSE-formatted).
                 # The openai SDK returns its own async stream type.
                 if hasattr(result, "__aiter__") and not hasattr(result, "response"):
                     # Raw byte stream from OAuth providers — pipe directly
                     response = StreamingResponse(
-                        result,
+                        sse_liveness_wrapper(
+                            result,
+                            model=model,
+                            started_at=start,
+                            overall_timeout_s=deadline_timeout_s,
+                            heartbeat_interval_s=heartbeat_interval_s,
+                            progress_events=progress_events,
+                        ),
                         media_type="text/event-stream",
                         headers=SSE_HEADERS,
                     )
                 else:
                     # OpenAI SDK async stream — use existing SSE wrapper
-                    response = await stream_response(result, model=model)
+                    response = await stream_response(
+                        result,
+                        model=model,
+                        started_at=start,
+                        overall_timeout_s=deadline_timeout_s,
+                        heartbeat_interval_s=heartbeat_interval_s,
+                        progress_events=progress_events,
+                    )
                 # Post-call middleware (observe only for streaming)
                 await _middleware_chain.run_post_call(body, {"stream": True})
                 return response

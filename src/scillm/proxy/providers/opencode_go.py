@@ -17,7 +17,7 @@ import httpx
 import openai
 from loguru import logger
 
-from scillm.proxy.providers import make_chunk_id, sse_chunk, sse_done, sse_format
+from scillm.proxy.providers import make_chunk_id, sse_chunk, sse_done, sse_format, streaming_timeout
 from scillm.proxy.providers.claude import (
     ANTHROPIC_VERSION,
     _anthropic_to_openai_response,
@@ -380,7 +380,7 @@ async def opencode_go_messages_stream(
     tool_call_index = 0
 
     try:
-        async with httpx.AsyncClient(timeout=float(kwargs.get("timeout", 120))) as client:
+        async with httpx.AsyncClient(timeout=streaming_timeout(kwargs.get("timeout", 120))) as client:
             async with client.stream("POST", url, json=body, headers=headers) as resp:
                 if resp.status_code != 200:
                     error_body = await resp.aread()

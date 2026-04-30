@@ -15,7 +15,7 @@ import httpx
 import openai
 from loguru import logger
 
-from scillm.proxy.providers import make_chunk_id, sse_chunk, sse_done, sse_format
+from scillm.proxy.providers import make_chunk_id, sse_chunk, sse_done, sse_format, streaming_timeout
 from scillm.proxy.providers.auth import get_codex_credentials
 
 CODEX_API_URL = "https://chatgpt.com/backend-api/codex/responses"
@@ -351,7 +351,7 @@ async def codex_completion_stream(
     tool_call_ids: dict[str, int] = {}  # call_id → index
 
     try:
-        async with httpx.AsyncClient(timeout=float(timeout)) as client:
+        async with httpx.AsyncClient(timeout=streaming_timeout(timeout)) as client:
             async with client.stream("POST", CODEX_API_URL, json=body, headers=headers) as resp:
                 if resp.status_code != 200:
                     error_body = await resp.aread()

@@ -110,7 +110,7 @@ Every provider scillm targets speaks OpenAI-compatible API (`/v1/chat/completion
 - **Cold-start warmup** — Chutes models that return 503 (cold) trigger a background warmup API call that posts a bounty for miners. The proxy falls through to the next deployment immediately. On startup, configured Chutes models are pre-warmed.
 - **Bounded concurrency queue** — Chutes.ai has a 5-connection limit. Exceed it and you get a 429 with a 90-second penalty. scillm queues overflow instead of rejecting it. Queue timeout is 600s (10 min) — large batches drain rather than fail.
 - **Batch-friendly error semantics** — Queue exhaustion returns 503 (service unavailable), not 429 (rate limit). 429s come only from upstream providers. Abuse guard is disabled for authenticated callers — no cascade failures from transient errors.
-- **Automatic timeout estimation** — No more guessing timeouts. scillm queries historical latency data (p95 from `llm_call_log`) and sets per-call provider timeouts automatically. Response headers (`x-scillm-timeout-ms`, `x-scillm-timeout-source`) show what was used.
+- **Automatic timeout estimation** — No more guessing provider timeouts. scillm queries historical latency data (p95 from `llm_call_log`) and sets per-call provider budgets automatically. For long streaming calls, use a short connect timeout, heartbeat/idle liveness, and an explicit overall budget instead of fixed 15s response caps.
 - **Source grounding verification** — Pass source text, scillm verifies the response is grounded using fuzzy matching, retries with progressive prompts if not.
 - **Dynamic fallback chains** — For Chutes models, the ENTIRE fallback chain is built from real-time utilization data. All available models are scored by utilization + rate-limit ratio, sorted best-first, and tried in order. 429s never reach the client — the router cascades through the utilization-sorted chain automatically.
 - **Fallback cascade with circuit breaker** — `text` uses Chutes DeepSeek-family fallbacks. VLM direct targets are preferred for quota-sensitive image work: `gpt-5.5` for Codex OAuth or `vlm-chutes` for Chutes VLM. The legacy `vlm` alias still starts with Gemini. 3 failures trigger a 20-second cooldown per group.
@@ -120,7 +120,7 @@ Every provider scillm targets speaks OpenAI-compatible API (`/v1/chat/completion
 - **5xx-specific backoff** — Server errors (503) get different retry timing than rate limits (429).
 - **Gemini native file support** — Send PDFs, images, and ZIP archives via `inlineData` parts when targeting Gemini. ZIP files are auto-exploded into individual parts (text as text, binaries as native `inlineData`).
 - **Ollama auto-routing** — Any locally-pulled Ollama model works without a config entry. The proxy auto-detects unknown model names and routes them to the local Ollama instance.
-- **SSE streaming for all providers** — `"stream": true` works everywhere, including Claude and Codex OAuth. The proxy translates provider-specific SSE formats into OpenAI-compatible delta chunks, including streaming tool call deltas.
+- **SSE streaming for all providers** — `"stream": true` works everywhere, including Claude and Codex OAuth. The proxy translates provider-specific SSE formats into OpenAI-compatible delta chunks, emits heartbeat comments while providers are silent, and enforces the caller’s overall `timeout` as the stream budget.
 
 ## Why Docker, Not `pip install`
 
