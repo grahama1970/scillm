@@ -5,10 +5,13 @@ WORKDIR /app
 
 RUN apt-get update && apt-get install -y build-essential git curl && rm -rf /var/lib/apt/lists/*
 
-# Install Node.js (for Gemini CLI OAuth)
+# Install Node.js and headless model/agent CLIs.
+# /v1/scillm/exec can call Gemini, Codex, or Claude CLIs when the matching
+# runner is selected. Command templates remain configurable through
+# SCILLM_CODEX_EXEC_TEMPLATE and SCILLM_CLAUDE_PRINT_TEMPLATE.
 RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
     && apt-get install -y nodejs \
-    && npm install -g @google/gemini-cli \
+    && npm install -g @google/gemini-cli @openai/codex @anthropic-ai/claude-code \
     && rm -rf /var/lib/apt/lists/*
 
 # Install latest OpenCode binary for live model discovery.
