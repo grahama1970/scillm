@@ -2,14 +2,57 @@
   <img src="docs/assets/scillm-header.webp" alt="scillm local multi-provider LLM proxy console" width="100%" />
 </p>
 
-<h3 align="center">One proxy. Any provider. Zero glue code.</h3>
+<h3 align="center">One proxy. Any provider. Zero provider glue in your application.</h3>
 <p align="center">Agents and humans call <code>/scillm</code> — it routes, retries, and repairs.</p>
+<p align="center"><em>Name:</em> informal “single control plane for LLM calls” — say <strong>skill-um</strong> or <strong>sci-L-M</strong>.</p>
 
 ---
 
-Single-tenant LLM proxy that unifies your **paid subscriptions** (Claude Max, Codex Pro) and **API keys** (Gemini, Chutes, DeepSeek, GLM) behind one OpenAI-compatible endpoint. No provider-specific code — just `httpx.post("http://localhost:4001/v1/chat/completions", json={"model": "claude-sonnet-4-6", ...})` and scillm handles OAuth token refresh, format translation, SSE streaming, retries, and failover automatically. Works with any model name: `claude-*`, `gpt-*`, `gemini-*`, `Org/Model`, or `model:tag`.
+scillm is a single-tenant LLM proxy. It unifies **paid subscriptions** (Claude Max, Codex Pro) and **API keys** (Gemini, Chutes, DeepSeek, GLM) behind one OpenAI-compatible endpoint.
+
+Your app keeps one calling shape: `httpx.post("http://localhost:4001/v1/chat/completions", ...)` with a model name like `claude-sonnet-4-6`, `gpt-5.5`, or a configured group such as `text`.
+
+The proxy handles OAuth refresh, format translation, SSE streaming, retries, and failover. Provider-specific glue lives in scillm config, not in your codebase.
+
+## Before you start
+
+| Requirement | Notes |
+|-------------|--------|
+| **Docker + Compose** | v2 recommended (`docker compose`, not legacy `docker-compose` only) |
+| **Host OS** | **Linux** is the primary target. macOS and WSL2 often work but `network_mode: host` behaves differently; expect extra port-mapping tweaks on non-Linux. |
+| **Free ports** | **4001** scillm proxy · **8529** ArangoDB · **8601/8602** embedding (text / multimodal) · **8444** utls-proxy (Codex) · OpenCode serve port when `SCILLM_OPENCODE_SERVE_ENABLED=1` (see compose) |
+| **`network_mode: host`** | Default compose uses host networking so scillm can reach **local Ollama** and host-mounted OAuth dirs. The proxy is reachable on **localhost** and typically your LAN; treat that as a deployment choice, not “localhost only.” |
+| **Disk** | Embedding images download model weights on first use; reserve **several GB** on the Docker data root if you enable the embedding profile. |
+| **RAM** | **8 GB+** host RAM for core stack; more if you run embedding + OpenCode serve together. |
+
+## Glossary (first-use)
+
+| Term | Meaning |
+|------|---------|
+| **QRA** | Question–Reasoning–Answer structured extraction (common in compliance / SPARTA pipelines) |
+| **TEE** | Trusted Execution Environment attestation hooks where configured |
+| **VLM** | Vision-language model (image + text in one call) |
+| **SSE** | Server-Sent Events streaming (`text/event-stream`) |
+| **NDJSON** | Newline-delimited JSON (one JSON object per line; used for exec `stream-json`) |
+| **DAG** | Directed acyclic graph of exec / harness nodes |
+| **Project agent** | **Your** orchestrator (Cursor agent, harness, script): picks the surface, validates artifacts, owns merge authority — not a built-in scillm daemon |
+| **Pi** | Optional **exec lane** via the Pi CLI fork for low-overhead Kimi/Chutes runs; **not** required to run the proxy |
+| **utls / JA3** | TLS fingerprint proxy sidecar for Codex (`utls-proxy` on **8444**); presents a browser-like JA3 fingerprint to Cloudflare-protected endpoints |
 
 ## Quick Start
+
+### Which surface should I use?
+
+| I want to… | Use |
+|------------|-----|
+| Ask one question / classify / critique / VLM a screenshot | `POST /v1/chat/completions` |
+| Run a pipeline gate or one bounded CLI shot | `scillm exec …` or exec graph node |
+| Delegate a bounded repo investigation (tools/skills, optional patch) | `POST /v1/scillm/opencode/runs` |
+| Stream reasoning, permissions, DAG parent/child, steer | `POST /v1/scillm/opencode/transport/*` |
+| Multi-turn Codex authorship in a leased worktree | `/v1/scillm/agents/*` |
+
+Full matrix: [Invocation surfaces](#invocation-surfaces) below.
+
 
 ### Option A: Standalone (Recommended for new users)
 
@@ -31,7 +74,7 @@ curl -s http://localhost:4001/health/liveliness
 curl http://localhost:4001/v1/chat/completions \
   -H "Authorization: Bearer sk-dev-proxy-123" \
   -H "Content-Type: application/json" \
-  -d '{"model":"text","messages":[{"role":"user","content":"hi"}]}'
+  -d '{"model":"text","messages":[{"role":"user","content": "In one sentence, what is an LLM proxy useful for?"}]}'
 ```
 
 **Services started:**
@@ -49,33 +92,43 @@ Minimal deployment — assumes memory service (:8601) is already running on host
 docker compose -p scillm -f deploy/docker/compose.scillm.core.yml up -d --build
 ```
 
-## Provider Setup
+### Upgrade
 
-Most providers need zero code — just credentials on disk or in `.env`.
+```bash
+cd /path/to/scillm
+git pull
+docker compose -p scillm -f deploy/docker/compose.scillm.core.yml build scillm-proxy utls-proxy
+docker compose -p scillm -f deploy/docker/compose.scillm.core.yml up -d
+```
 
-| Provider | What to do | Model names |
-|----------|-----------|-------------|
-| **Claude** | Nothing (if using Claude Code — token is already in `~/.claude/.credentials.json`) | `claude-sonnet-4-6`, `claude-haiku-4-5` |
-| **Codex** | One-time: `npm install -g @openai/codex && codex login` | `gpt-5.5` |
-| **Gemini** | Add `GEMINI_API_KEY=...` to `.env` ([get key](https://aistudio.google.com/apikey)) | `gemini-2.5-flash`, `gemini-3-flash-preview` |
-| **GLM** | Add `GLM_API_Key=...` to `.env` ([z.ai](https://z.ai)) | `text-glm` (glm-5.1) |
-| **Chutes** | Add `CHUTES_API_KEY` + `CHUTES_API_BASE` to `.env` | `text` (default), or any `Org/Model` from Chutes catalog |
-| **DeepSeek** | Add `DEEPSEEK_API=...` to `.env` | `text-deepseek` |
-| **OpenCode Go** | Add `OPENCODE_GO_API_KEY=...` to `.env` | `opencode-go/kimi-k2.6`, `opencode-go/deepseek-v4-pro`, `opencode-go/minimax-m2.7` |
-| **OpenCode serve** | `SCILLM_OPENCODE_SERVE_ENABLED=1` in compose; `OPENCODE_SERVER_PASSWORD` when starting serve (mirror in `.env`) | Agent profiles via `POST /v1/scillm/opencode/runs` — **not** chat model names |
-| **Ollama** | `ollama pull model:tag` (local, no auth) | Any `model:tag` |
+Re-run `bash scripts/sanity_all_endpoints.sh` (or your project’s sanity script) after provider credential changes.
 
-After adding credentials, rebuild: `docker compose -p scillm -f deploy/docker/compose.scillm.core.yml up -d --build`
+### Uninstall / cleanup
 
-**Check what's working:** `curl http://localhost:4001/v1/scillm/auth -H "Authorization: Bearer sk-dev-proxy-123"`
-
-**List OpenCode Go models:** `curl http://localhost:4001/v1/scillm/opencode-go/models -H "Authorization: Bearer sk-dev-proxy-123"` refreshes via the Docker-installed `opencode models --refresh opencode-go` CLI by default, then falls back to `opencode serve` and a built-in registry. The Docker compose mounts the host OpenCode auth/config/cache so the container sees the same connected `opencode-go` provider as your host CLI.
-
-Makefile shortcuts: `make proxy-rebuild` (build+start), `make proxy-up`, `make proxy-down`, `make proxy-logs`
-
-**Container details:** Single Python process (uvicorn, :4001). Separate `utls-proxy` sidecar (:8444) for Codex TLS fingerprinting. `network_mode: host` (for local Ollama access), config mounted from `local/proxy_server_config.yaml`, health check every 15s. Ollama available via `--profile local`.
+```bash
+docker compose -p scillm -f deploy/docker/compose.scillm.core.yml down -v   # removes compose volumes
+# Optional: remove local OAuth mounts, Arango data dir, and .scillm artifact dirs you created
+```
 
 ## Invocation surfaces
+
+### OpenCode Go vs OpenCode serve (do not confuse)
+
+| Name | What it is | How you invoke it |
+|------|------------|-------------------|
+| **OpenCode Go** | Chat completions through the proxy | Model prefix `opencode-go/…` on `POST /v1/chat/completions` (one-shot HTTP) |
+| **OpenCode serve** | Multi-step **agent session** with tools/skills | `POST /v1/scillm/opencode/runs` with an **agent profile** (`build`, `scillm-debugger`, …) — **not** a chat model id |
+
+OpenCode serve is **not** “serve mode” of OpenCode Go; it is a separate sidecar + API surface.
+
+### Spectrum: one-shot → standing worker
+
+```text
+one-shot chat ──► bounded exec node ──► bounded OpenCode session ──► standing Codex agent
+     │                    │                      │                           │
+ POST /v1/chat      scillm exec /           POST …/opencode/runs        /v1/scillm/agents/*
+ completions         exec graph              (+ transport for SSE)
+```
 
 scillm is not only a chat proxy. Pick the surface by **job**, not by “strongest model”:
 
@@ -115,115 +168,10 @@ curl -s -X POST http://localhost:4001/v1/scillm/opencode/runs \
 
 Full contract: [`docs/SCILLM_OPENCODE_SERVE.md`](docs/SCILLM_OPENCODE_SERVE.md). Agent/skill reference: [`skills/scillm/SKILL.md`](skills/scillm/SKILL.md).
 
-## Exec Workers
-
-`scillm exec` is the bounded worker layer for agentic tasks. It is separate from
-ordinary one-shot `/v1/chat/completions` calls:
-
-| Command/profile | Runner | Backing model | Notes |
-|-----------------|--------|---------------|-------|
-| `scillm exec pi-chutes-kimi` | `pi_exec` | Pi CLI over Chutes `moonshotai/Kimi-K2.6-TEE` | Preferred low-overhead Chutes Kimi exec lane. Uses the local Pi fork via `/home/graham/bin/pi`, which points at `/home/graham/workspace/experiments/pi-mono`, and runs with `--thinking off`. Override binary/model with `SCILLM_PI_BINARY` and `SCILLM_PI_CHUTES_KIMI_MODEL`. |
-| `scillm exec pi-opencode-kimi` | `pi_exec` | Pi CLI over OpenCode Go `kimi-k2.5` | Preferred Pi route when Chutes Kimi produces empty/no-write exec output. Uses Pi's native `opencode-go` provider support and `OPENCODE_API_KEY`; override with `SCILLM_PI_OPENCODE_KIMI_MODEL`. |
-| `scillm exec oc-chutes-deepseek` | `opencode_exec` | OpenCode CLI over Chutes `chutes/moonshotai/Kimi-K2.6-TEE` by default | OpenCode worker lane. Override with `SCILLM_OPENCODE_CHUTES_DEEPSEEK_MODEL`. |
-| `scillm exec codex-gpt-5.5` | `codex_exec` | Codex CLI `gpt-5.5` | Bounded `codex exec --json` worker. Not the same as chat `model: "gpt-5.5"`. API accepts deprecated alias `gpt-5.5` on `codex_exec`. Override with `SCILLM_CODEX_EXEC_MODEL`, `--codex-model`, `--reasoning-effort`. |
-| `scillm exec codex-vision` | `codex_exec` | Codex CLI `gpt-5.3-codex` (default) | Vision/heavy Codex exec lane. Override with `SCILLM_CODEX_EXEC_MODEL_VISION`. |
-| `scillm exec cursor-auto` | `cursor_exec` | Cursor CLI `auto` | Bounded writes with `--cursor-force` and `--allow-write`. |
-| `scillm exec cursor-plan` | `cursor_exec` | Cursor CLI plan mode | Read-only diagnose (`--mode plan`, no `--force`). |
-| `scillm exec cursor-composer-2.5` | `cursor_exec` | Cursor CLI composer model | Profile-only; do not pass through chat completions. |
-| `oc-*` and `opencode-go/*` | HTTP chat/batch routes | OpenCode Go API | These are one-shot Scillm model routes, not exec workers. |
-
-
-### Exec monitoring and timeouts (chat ≠ cursor)
-
-**Chat / batch** (`/v1/chat/completions`, batch stream): SSE heartbeat comments, caller
-`timeout` budget, and automatic timeout estimation from `llm_call_log` p95 — see features
-below.
-
-**`cursor_exec`** (`scillm exec cursor-auto`, `cursor-plan`, …): progress is **stream-json
-NDJSON**, not chat SSE. scillm parses stdout line-by-line, appends
-`.scillm/cursor-headless/<run_ctx>/cursor-events.jsonl` during the run, resets idle on
-semantic events (`tool_call`, `assistant`, `thinking`, …), and completes on a terminal
-`{"type":"result",...}` (process may be terminated without waiting for exit). Monitor:
-
-- `/tmp/scillm-exec/<run_id>/events.jsonl` or `GET /v1/scillm/exec/{run_id}/events`
-- Terminal fields: `stream_completed`, `result_event`, `tool_call_count`, `text`
-
-Use `timeout_s` / `idle_timeout_s` on the exec payload as **fail-closed backstops only** —
-not as the primary scheduling signal. Full contract: [`docs/SCILLM_EXEC.md`](docs/SCILLM_EXEC.md).
-
-Exec profiles are profile-only. Do not pass raw chat aliases such as
-`chutes-kimi`, direct `chutes/...` model ids, or `opencode-go/*` ids to
-`scillm exec`. For workspace mutation, use `--sandbox workspace-write` plus one
-or more `--allow-write` paths; the runtime snapshots the workspace and fails the
-node if Pi/OpenCode writes outside the allowlist.
-
-Docker mounts `/home/graham/.pi/agent` into the proxy container so the local Pi
-fork sees the same provider registry and auth as the host CLI.
-
-```bash
-scillm exec pi-chutes-kimi \
-  --cwd /home/graham/workspace/project \
-  --sandbox read-only \
-  --prompt 'Inspect the bounded failure and return JSON only.'
-
-scillm exec pi-opencode-kimi \
-  --cwd /home/graham/workspace/project \
-  --sandbox read-only \
-  --prompt 'Inspect the bounded failure and return JSON only.'
-
-scillm exec pi-chutes-kimi \
-  --cwd /tmp/canary \
-  --sandbox workspace-write \
-  --allow-write allowed/ \
-  --prompt 'Create allowed/result.json and return JSON proof.'
-```
-
-## Security
-
-scillm is designed for **local development and trusted networks**. The default configuration uses:
-
-- A static bearer token (`sk-dev-proxy-123`) — set `SCILLM_MASTER_KEY` in `.env` to override.
-- `network_mode: host` — required for local Ollama access. In production, switch to port mapping (`-p 4001:4001`) behind a reverse proxy with TLS.
-- API keys in `.env` — acceptable for dev. In production, use Docker Secrets, Vault, or your cloud's secrets manager.
-
-scillm does not implement multi-tenant auth, key rotation, or per-client access control. It's designed for single-user research and engineering workflows.
-
-For local blast-radius control, scillm can enforce optional `caller_profiles`
-keyed by `X-Caller-Skill`. These are not users, teams, or virtual keys; they
-are local safety rules for known callers. Profiles can restrict model
-aliases/pools, deny dangerous model patterns, require `scillm_metadata` keys
-such as `batch_id` and `item_id`, block tools/files/images/PDFs/streaming, and
-cap provider timeout. See `registry/caller_profiles.example.yaml` for a minimal
-copyable profile set.
-
-## What You Get
-
-Every provider scillm targets speaks OpenAI-compatible API (`/v1/chat/completions`). Provider-specific handler code is unnecessary for this use case. Adding a provider is 5 lines of YAML. The proxy handles format translation (OpenAI tools → Anthropic/Codex/Gemini native), OAuth token management, streaming SSE normalization, and fallback cascading — not a framework, just the code that does the work.
-
-- **Tool use across all providers** — Send OpenAI-format `tools` and `tool_choice`. The proxy translates to each provider's native format: Anthropic tool blocks for Claude, flattened Responses API for Codex, native function calling for Gemini. Streaming tool call deltas work everywhere.
-- **Wall-time retry budget** — Providers with hot/cold cycling return 503 now but may be back in 20 seconds. Fixed retry counts fail here. scillm retries on a clock — keep trying for 90 seconds, not 3 attempts.
-- **Batch iterator with request-response pairing** — Fire 200 parallel requests, results arrive out of order. scillm's `as_completed` iterator pairs every response with its original request.
-- **Opaque metadata round-trip** — Send `scillm_metadata` (any dict) in the request. The proxy strips it before the LLM sees it, then staples it back onto the response. The LLM cannot fabricate these values — use it for ArangoDB `_key` correlation in batch pipelines.
-- **JSON repair inside retry loop** — LLM responses with trailing commas, missing braces, or markdown fences wrapping JSON are repaired automatically instead of wasting the call.
-- **Auto multimodal routing** — Pass an image and scillm figures it out. No model selection needed — the proxy detects images in messages and reroutes to a vision model automatically.
-- **VLM routing** — Images can go directly to `gpt-5.5` through Codex OAuth, to `vlm-chutes` for higher-throughput VLM work, or through the legacy `vlm` cascade. Avoid the generic `vlm` alias when Gemini quota limits matter because it starts with Gemini.
-- **Gemini free-to-paid key rotation** — Gemini free and paid keys are separate groups. A 429 on the free key cascades immediately to the paid key — no wasted retries on an exhausted quota.
-- **Cold-start warmup** — Chutes models that return 503 (cold) trigger a background warmup API call that posts a bounty for miners. The proxy falls through to the next deployment immediately. On startup, configured Chutes models are pre-warmed.
-- **Bounded concurrency queue** — Chutes.ai has a 5-connection limit. Exceed it and you get a 429 with a 90-second penalty. scillm queues overflow instead of rejecting it. Queue timeout is 600s (10 min) — large batches drain rather than fail.
-- **Batch-friendly error semantics** — Queue exhaustion returns 503 (service unavailable), not 429 (rate limit). 429s come only from upstream providers. Abuse guard is disabled for authenticated callers — no cascade failures from transient errors.
-- **Automatic timeout estimation (chat/batch)** — For `/v1/chat/completions` and batch routes, scillm queries historical latency data (p95 from `llm_call_log`) and sets per-call provider budgets. For long streaming chat calls, use a short connect timeout, SSE heartbeat/idle liveness, and an explicit overall budget. Does **not** replace `cursor_exec` stream-json supervision — see [Exec monitoring](#exec-monitoring-and-timeouts-chat--cursor) above.
-- **Source grounding verification** — Pass source text, scillm verifies the response is grounded using fuzzy matching, retries with progressive prompts if not.
-- **Dynamic fallback chains** — For Chutes models, the ENTIRE fallback chain is built from real-time utilization data. All available models are scored by utilization + rate-limit ratio, sorted best-first, and tried in order. 429s never reach the client — the router cascades through the utilization-sorted chain automatically.
-- **Fallback cascade with circuit breaker** — `text` uses Chutes DeepSeek-family fallbacks. VLM direct targets are preferred for quota-sensitive image work: `gpt-5.5` for Codex OAuth or `vlm-chutes` for Chutes VLM. The legacy `vlm` alias still starts with Gemini. 3 failures trigger a 20-second cooldown per group.
-- **Non-TEE fast-fail routing** — Multi-model Chutes groups try non-TEE first (better throughput) with 1 retry, then fall through to TEE. No 8-retry stall on cold non-TEE models.
-- **Native system prompts** — Claude gets an array of system blocks (matches Claude Code CLI). Codex gets the `instructions` field. No fake user-message hacks.
-- **Claude PDF support** — Send PDFs via `data:application/pdf;base64,...` in `image_url` or as Anthropic-native `type:document` blocks. Both formats auto-translate.
-- **5xx-specific backoff** — Server errors (503) get different retry timing than rate limits (429).
-- **Gemini native file support** — Send PDFs, images, and ZIP archives via `inlineData` parts when targeting Gemini. ZIP files are auto-exploded into individual parts (text as text, binaries as native `inlineData`).
-- **Ollama auto-routing** — Any locally-pulled Ollama model works without a config entry. The proxy auto-detects unknown model names and routes them to the local Ollama instance.
-- **SSE streaming for all providers** — `"stream": true` works everywhere, including Claude and Codex OAuth. The proxy translates provider-specific SSE formats into OpenAI-compatible delta chunks, emits heartbeat comments while providers are silent, and enforces the caller’s overall `timeout` as the stream budget.
-
 ## Why Docker, Not `pip install`
+
+
+**Hybrid library model:** The supported default is **HTTP** to `localhost:4001`. Optional Python helpers (e.g. `scillm.batch`, `scillm.paved`) exist for batch iteration and grounding; you do not need to import them to use the proxy.
 
 scillm runs as a **persistent proxy service**, not a library you import. This is deliberate:
 
@@ -239,7 +187,7 @@ The `src/scillm/batch.py` and `src/scillm/paved/chat.py` modules are also import
 
 scillm started because cheap LLM providers (Chutes, DeepSeek) are unreliable — 503s, timeouts, rate limits with 90-second penalties. Fixed retry counts don't work when a provider might be back in 20 seconds or down for 5 minutes. scillm was built to make flaky providers reliable: wall-time retry budgets, circuit breakers, fallback cascades. The multi-provider unification came later as a natural extension.
 
-If you already have Claude Max and Codex Pro subscriptions plus a few API keys, scillm turns them into one endpoint with zero glue code. Here's what you'd need without it:
+If you already have Claude Max and Codex Pro subscriptions plus a few API keys, scillm turns them into one endpoint with zero provider glue in your application. Here's what you'd need without it:
 
 | Capability | Without scillm | With scillm |
 |------------|---------------|-------------|
@@ -273,6 +221,155 @@ If you already have Claude Max and Codex Pro subscriptions plus a few API keys, 
 
 **What scillm is not:** A general-purpose proxy platform. It has 8 providers, not 1,600. No SSO, no RBAC, no dashboards. It's a single-user tool for engineers who already pay for Claude Max and Codex Pro and want one `httpx.post()` call that works with everything — including the parts (OAuth bridging, JSON repair, file handling, VLM routing) that no multi-provider proxy offers.
 
+## What You Get
+
+Every provider scillm targets speaks OpenAI-compatible `/v1/chat/completions`. Adding a provider is usually a **small YAML block** in `proxy_server_config.yaml`. The proxy handles format translation, OAuth refresh, SSE normalization, and fallback cascading.
+
+### Routing and resilience
+
+- **Wall-time retry budget** — Providers with hot/cold cycling return 503 now but may be back in 20 seconds. Fixed retry counts fail here. scillm retries on a clock — keep trying for 90 seconds, not 3 attempts.
+- **JSON repair inside retry loop** — LLM responses with trailing commas, missing braces, or markdown fences wrapping JSON are repaired automatically instead of wasting the call.
+- **Auto multimodal routing** — Pass an image and scillm figures it out. No model selection needed — the proxy detects images in messages and reroutes to a vision model automatically.
+- **VLM routing** — Images can go directly to `gpt-5.5` through Codex OAuth, to `vlm-chutes` for higher-throughput VLM work, or through the legacy `vlm` cascade. Avoid the generic `vlm` alias when Gemini quota limits matter because it starts with Gemini.
+- **Gemini free-to-paid key rotation** — Gemini free and paid keys are separate groups. A 429 on the free key cascades immediately to the paid key — no wasted retries on an exhausted quota.
+- **Cold-start warmup** — Chutes models that return 503 (cold) trigger a background warmup API call that posts a bounty for miners. The proxy falls through to the next deployment immediately. On startup, configured Chutes models are pre-warmed.
+- **Bounded concurrency queue** — Chutes.ai has a 5-connection limit. Exceed it and you get a 429 with a 90-second penalty. scillm queues overflow instead of rejecting it. Queue timeout is 600s (10 min) — large batches drain rather than fail.
+- **Batch-friendly error semantics** — Queue exhaustion returns 503 (service unavailable), not 429 (rate limit). 429s come only from upstream providers. Abuse guard is disabled for authenticated callers — no cascade failures from transient errors.
+- **Automatic timeout estimation (chat/batch)** — For `/v1/chat/completions` and batch routes, scillm queries historical latency data (p95 from `llm_call_log`) and sets per-call provider budgets. For long streaming chat calls, use a short connect timeout, SSE heartbeat/idle liveness, and an explicit overall budget. Does **not** replace `cursor_exec` stream-json supervision — see [Exec monitoring](#exec-monitoring-and-timeouts-chat--cursor).
+- **Dynamic fallback chains** — For Chutes models, the ENTIRE fallback chain is built from real-time utilization data. All available models are scored by utilization + rate-limit ratio, sorted best-first, and tried in order. 429s never reach the client — the router cascades through the utilization-sorted chain automatically.
+- **Fallback cascade with circuit breaker** — `text` uses Chutes DeepSeek-family fallbacks. VLM direct targets are preferred for quota-sensitive image work: `gpt-5.5` for Codex OAuth or `vlm-chutes` for Chutes VLM. The legacy `vlm` alias still starts with Gemini. 3 failures trigger a 20-second cooldown per group.
+- **Non-TEE fast-fail routing** — Multi-model Chutes groups try non-TEE first (better throughput) with 1 retry, then fall through to TEE. No 8-retry stall on cold non-TEE models.
+- **5xx-specific backoff** — Server errors (503) get different retry timing than rate limits (429).
+- **Ollama auto-routing** — Any locally-pulled Ollama model works without a config entry. The proxy auto-detects unknown model names and routes them to the local Ollama instance.
+- **SSE streaming for all providers** — `"stream": true` works everywhere, including Claude and Codex OAuth. The proxy translates provider-specific SSE formats into OpenAI-compatible delta chunks, emits heartbeat comments while providers are silent, and enforces the caller’s overall `timeout` as the stream budget.
+
+### Format translation and providers
+
+- **Tool use across all providers** — Send OpenAI-format `tools` and `tool_choice`. The proxy translates to each provider's native format: Anthropic tool blocks for Claude, flattened Responses API for Codex, native function calling for Gemini. Streaming tool call deltas work everywhere.
+- **Native system prompts** — Claude gets an array of system blocks (matches Claude Code CLI). Codex gets the `instructions` field. No fake user-message hacks.
+- **Claude PDF support** — Send PDFs via `data:application/pdf;base64,...` in `image_url` or as Anthropic-native `type:document` blocks. Both formats auto-translate.
+- **Gemini native file support** — Send PDFs, images, and ZIP archives via `inlineData` parts when targeting Gemini. ZIP files are auto-exploded into individual parts (text as text, binaries as native `inlineData`).
+
+### Batch and streaming
+
+- **Batch iterator with request-response pairing** — Fire 200 parallel requests, results arrive out of order. scillm's `as_completed` iterator pairs every response with its original request.
+- **Opaque metadata round-trip** — Send `scillm_metadata` (any dict) in the request. The proxy strips it before the LLM sees it, then staples it back onto the response. The LLM cannot fabricate these values — use it for ArangoDB `_key` correlation in batch pipelines.
+
+### Files and multimodal
+
+- **Source grounding verification** — Pass source text, scillm verifies the response is grounded using fuzzy matching, retries with progressive prompts if not.
+
+
+### Observability and ops
+
+- **Prometheus metrics** — Request counts, latency, and provider health at `GET /metrics` (when enabled).
+- **Status and auth probes** — `GET /health/liveliness`, `GET /v1/status`, `GET /v1/scillm/auth` for quick sanity checks.
+- **Call logging** — Optional `llm_call_log` in ArangoDB for latency history and batch correlation.
+- **Budget headers** — Spend caps via `budgets:` in config; see [Budget and spend caps](#budget-and-spend-caps).
+
+## Provider Setup
+
+Most providers need zero code — just credentials on disk or in `.env`.
+
+| Provider | What to do | Model names |
+|----------|-----------|-------------|
+| **Claude** | Nothing (if using Claude Code — token is already in `~/.claude/.credentials.json`) | `claude-sonnet-4-6`, `claude-haiku-4-5` |
+| **Codex** | One-time on host: `npm install -g @openai/codex && codex login` (creates `~/.codex/auth.json`; mount into container) | `gpt-5.5` |
+| **Gemini** | Add `GEMINI_API_KEY=...` to `.env` ([get key](https://aistudio.google.com/apikey)) | `gemini-2.5-flash`, `gemini-3-flash-preview` |
+| **GLM** | Add `GLM_API_Key=...` to `.env` ([z.ai](https://z.ai)) | `text-glm` (glm-5.1) |
+| **Chutes** | Add `CHUTES_API_KEY` + `CHUTES_API_BASE` to `.env` | `text` (default), or any `Org/Model` from Chutes catalog |
+| **DeepSeek** | Add `DEEPSEEK_API=...` to `.env` | `text-deepseek` |
+| **OpenCode Go** | Add `OPENCODE_GO_API_KEY=...` to `.env` | `opencode-go/kimi-k2.6`, `opencode-go/deepseek-v4-pro`, `opencode-go/minimax-m2.7` |
+| **OpenCode serve** | `SCILLM_OPENCODE_SERVE_ENABLED=1` in compose; `OPENCODE_SERVER_PASSWORD` when starting serve (mirror in `.env`) | Agent profiles via `POST /v1/scillm/opencode/runs` — **not** chat model names |
+| **Ollama** | `ollama pull model:tag` (local, no auth) | Any `model:tag` |
+
+After adding credentials, rebuild: `docker compose -p scillm -f deploy/docker/compose.scillm.core.yml up -d --build`
+
+**Check what's working:** `curl http://localhost:4001/v1/scillm/auth -H "Authorization: Bearer sk-dev-proxy-123"`
+
+**List OpenCode Go models:** `curl http://localhost:4001/v1/scillm/opencode-go/models -H "Authorization: Bearer sk-dev-proxy-123"` refreshes via the Docker-installed `opencode models --refresh opencode-go` CLI by default, then falls back to `opencode serve` and a built-in registry. The Docker compose mounts the host OpenCode auth/config/cache so the container sees the same connected `opencode-go` provider as your host CLI.
+
+Makefile shortcuts: `make proxy-rebuild` (build+start), `make proxy-up`, `make proxy-down`, `make proxy-logs`
+
+**Container details:** Single Python process (uvicorn, :4001). Separate `utls-proxy` sidecar (:8444) for Codex TLS fingerprinting. `network_mode: host` (for local Ollama access), config mounted from `local/proxy_server_config.yaml`, health check every 15s. Ollama available via `--profile local`.
+
+## Exec Workers
+
+**Cursor** profiles assume the **Cursor CLI/agent is installed locally** on the host; scillm shells out to it; there is no cloud Cursor API in the provider table.
+
+### Advanced: Pi exec lanes (optional)
+
+Pi lanes (`pi-chutes-kimi`, `pi-opencode-kimi`, …) require `PI_BIN` pointing at your Pi CLI and optional `PI_WORKSPACE`. They are **optional** low-overhead exec runners, not part of the default Docker image.
+
+`scillm exec` is the bounded worker layer for agentic tasks. It is separate from
+ordinary one-shot `/v1/chat/completions` calls:
+
+| Command/profile | Runner | Backing model | Notes |
+|-----------------|--------|---------------|-------|
+| `scillm exec pi-chutes-kimi` | `pi_exec` | Pi CLI over Chutes `moonshotai/Kimi-K2.6-TEE` | Preferred low-overhead Chutes Kimi exec lane. Uses the local Pi fork (`$PI_BIN` on the host, forwarded into the container) and runs with `--thinking off`. Override binary/model with `SCILLM_PI_BINARY` and `SCILLM_PI_CHUTES_KIMI_MODEL`. |
+| `scillm exec pi-opencode-kimi` | `pi_exec` | Pi CLI over OpenCode Go `kimi-k2.5` | Preferred Pi route when Chutes Kimi produces empty/no-write exec output. Uses Pi's native `opencode-go` provider support and `OPENCODE_API_KEY`; override with `SCILLM_PI_OPENCODE_KIMI_MODEL`. |
+| `scillm exec oc-chutes-deepseek` | `opencode_exec` | OpenCode CLI over Chutes `chutes/moonshotai/Kimi-K2.6-TEE` by default | OpenCode worker lane. Override with `SCILLM_OPENCODE_CHUTES_DEEPSEEK_MODEL`. |
+| `scillm exec codex-gpt-5.5` | `codex_exec` | Codex CLI `gpt-5.5` | Bounded `codex exec --json` worker. Not the same as chat `model: "gpt-5.5"`. API accepts deprecated alias `gpt-5.5` on `codex_exec`. Override with `SCILLM_CODEX_EXEC_MODEL`, `--codex-model`, `--reasoning-effort`. |
+| `scillm exec codex-vision` | `codex_exec` | Codex CLI `gpt-5.3-codex` (default) | Vision/heavy Codex exec lane. Override with `SCILLM_CODEX_EXEC_MODEL_VISION`. |
+| `scillm exec cursor-auto` | `cursor_exec` | Cursor CLI `auto` | Bounded writes with `--cursor-force` and `--allow-write`. |
+| `scillm exec cursor-plan` | `cursor_exec` | Cursor CLI plan mode | Read-only diagnose (`--mode plan`, no `--force`). |
+| `scillm exec cursor-composer-2.5` | `cursor_exec` | Cursor CLI composer model | Profile-only; do not pass through chat completions. |
+| `oc-*` and `opencode-go/*` | HTTP chat/batch routes | OpenCode Go API | These are one-shot Scillm model routes, not exec workers. |
+
+
+### Exec monitoring and timeouts (chat ≠ cursor)
+**Chat / batch:** SSE heartbeats and caller timeouts (see features below).
+
+**`cursor_exec`:** streams **NDJSON** progress; tail `GET /v1/scillm/exec/{run_id}/events` or `.scillm/cursor-headless/.../cursor-events.jsonl`. Full stream contract: [`docs/SCILLM_EXEC.md`](docs/SCILLM_EXEC.md).
+
+## Troubleshooting
+
+| Symptom | Likely cause | What to do |
+|---------|--------------|------------|
+| **401 Unauthorized** | Wrong/missing bearer | Match `Authorization: Bearer …` to `SCILLM_MASTER_KEY` in `.env`; probe `GET /v1/scillm/auth` |
+| **503** on Chutes / cold model | Provider warming or cascade exhausted | Retry; check `GET /v1/status`; verify Chutes API key and model slug |
+| **429 / rate limit** | Provider or local concurrency guard | Back off; reduce batch width; check ops quota skills |
+| **OAuth / auth errors** (Claude, Codex) | Stale token in mounted dir | Re-login on host (`claude login`, `codex login`), restart proxy so mounts refresh |
+| **Empty JSON / truncated reasoning** | `max_tokens` too low on reasoning models | Omit `max_tokens` or raise it; see provider notes in skill reference |
+| **OpenCode serve unreachable** | Sidecar disabled or password mismatch | `SCILLM_OPENCODE_SERVE_ENABLED=1`; align `OPENCODE_SERVER_PASSWORD`; `bash scripts/sanity_opencode_serve.sh` |
+
+**Logs**
+
+```bash
+docker compose -p scillm -f deploy/docker/compose.scillm.core.yml logs -f scillm-proxy
+docker compose -p scillm -f deploy/docker/compose.scillm.core.yml logs -f utls-proxy
+```
+
+Structured call history (when Arango logging is enabled): `llm_call_log` collection — see [`docs/SCILLM_EXEC.md`](docs/SCILLM_EXEC.md) and project skill reference.
+
+## Security
+
+### If you expose scillm beyond localhost
+
+Default compose is aimed at **trusted dev machines**. If you must expose the API:
+
+1. Put **TLS** in front (reverse proxy: Caddy, nginx, Traefik).
+2. **Rotate** `SCILLM_MASTER_KEY`; never ship the dev default.
+3. **Firewall** so only known clients reach port 4001 (and do not publish Arango/embedding ports).
+4. Prefer **bridge networking + explicit port maps** over `network_mode: host` on shared servers.
+5. Review OAuth mount paths and file permissions on the host.
+
+scillm is designed for **local development and trusted networks**. The default configuration uses:
+
+- A static bearer token (`sk-dev-proxy-123`) — set `SCILLM_MASTER_KEY` in `.env` to override.
+- `network_mode: host` — required for local Ollama access. In production, switch to port mapping (`-p 4001:4001`) behind a reverse proxy with TLS.
+- API keys in `.env` — acceptable for dev. In production, use Docker Secrets, Vault, or your cloud's secrets manager.
+
+scillm does not implement multi-tenant auth, key rotation, or per-client access control. It's designed for single-user research and engineering workflows.
+
+For local blast-radius control, scillm can enforce optional `caller_profiles`
+keyed by `X-Caller-Skill`. These are not users, teams, or virtual keys; they
+are local safety rules for known callers. Profiles can restrict model
+aliases/pools, deny dangerous model patterns, require `scillm_metadata` keys
+such as `batch_id` and `item_id`, block tools/files/images/PDFs/streaming, and
+cap provider timeout. See `registry/caller_profiles.example.yaml` for a minimal
+copyable profile set.
+
 ## How to Call It
 
 ### `/scillm` skill
@@ -294,7 +391,7 @@ The proxy speaks standard OpenAI. Any existing code or SDK works — just point 
 ```python
 from openai import OpenAI
 client = OpenAI(base_url="http://localhost:4001/v1", api_key="sk-dev-proxy-123")
-r = client.chat.completions.create(model="text", messages=[{"role": "user", "content": "hi"}])
+r = client.chat.completions.create(model="text", messages=[{"role": "user", "content": "In one sentence, what is an LLM proxy useful for?"}])
 ```
 
 Both paths hit the same Docker proxy at `localhost:4001`.
@@ -480,6 +577,16 @@ Results carry `grounding_score` (float) and `grounding_attempts` (int). Uses `ra
 
 ## Architecture
 
+```mermaid
+flowchart LR
+  Client[Client / project agent] -->|HTTP :4001| Scillm[scillm proxy]
+  Scillm -->|API keys / OAuth| Providers[Chutes · Gemini · Claude · DeepSeek · GLM · Ollama]
+  Scillm -->|Codex OAuth traffic| UTLS[utls-proxy :8444]
+  UTLS -->|Chrome JA3 fingerprint| Codex[chatgpt.com / Codex API]
+  Scillm -.->|optional| OCserve[OpenCode serve]
+  Scillm -.->|optional| Arango[(ArangoDB :8529)]
+```
+
 **Request flow:**
 ```
 Client → scillm :4001 (Python) → Provider API
@@ -495,7 +602,12 @@ Client → scillm :4001 (Python) → Provider API
 
 **Config:** `local/proxy_server_config.yaml` — single source of truth for models, providers, and fallback chains.
 
+
+**Model naming:** `gpt-5.5` is the **chat** Codex OAuth model for `POST /v1/chat/completions`. `gpt-5.3-codex` is the default backing model for **`scillm exec codex-vision`** (bounded CLI worker). They are different surfaces, not duplicate aliases.
+
 ## Model Groups
+
+> **VLM routing:** Prefer **`gpt-5.5`** or **`vlm-chutes`** when Gemini quota is tight. The **`vlm`** group is a legacy cascade that may try Gemini first.
 
 Callers say `model: "text"` — the proxy picks the provider. When models change, update the config. Callers never change.
 
@@ -525,9 +637,39 @@ Auto-routing handles most model names without config entries. Claude and Codex u
 
 ## Adding Your Own Models
 
-Most providers are auto-routed by model name — see the Provider Setup table above. No config entry needed for Claude, Codex, Gemini, Chutes `Org/Model`, or Ollama `model:tag`.
+### Minimal `proxy_server_config.yaml` (annotated)
 
-For providers that need a custom API base or key, add 5 lines of YAML:
+Mounted at `local/proxy_server_config.yaml` in the default compose stack:
+
+```yaml
+# Top-level model group: clients pass the group id as "model"
+model_groups:
+  text:                          # group id → POST model: "text"
+    description: "Default text cascade"
+    models:                      # ordered list: primary + fallbacks
+      - deepseek/deepseek-chat
+      - gemini/gemini-2.5-flash
+
+  my-custom:                     # add a group in a small YAML block
+    description: "Team-specific route"
+    models:
+      - chutes/Qwen/Qwen3-235B-A22B-Instruct-2507
+
+budgets:
+  default:
+    daily_usd: 25.0
+```
+
+Point `model` at a **group id** (e.g. `text`, `my-custom`), not always a raw provider string.
+
+### Budget and spend caps
+
+- **`GET /v1/budget`** returns per-caller usage vs configured caps (when budgeting is enabled in config).
+- Configure limits under `budgets:` in `local/proxy_server_config.yaml` (see example above) and/or environment overrides documented in `.env.example`.
+- When a cap is exceeded, the proxy returns a **budget-exceeded** error rather than silently routing to a cheaper model.
+
+
+Most providers are auto-routed by model name — see the Provider Setup table above. No config entry needed for Claude, Codex, Gemini, Chutes `Org/Model`, or Ollama `model:tag`.
 
 For providers that need a custom API base or key, add an entry to `local/proxy_server_config.yaml`:
 
@@ -645,6 +787,31 @@ curl -X POST http://localhost:8601/query -H "Content-Type: application/json" -d 
 ## License
 
 MIT License.
+
+## FAQ
+
+**What does `GET /v1/status` look like?**
+
+```bash
+curl -s http://localhost:4001/v1/status -H "Authorization: Bearer sk-dev-proxy-123" | python3 -m json.tool | head -40
+```
+
+Use this for a quick health snapshot before digging into `docker compose logs`.
+
+**Can I use LangChain / OpenAI SDK / LiteLLM client?**  
+Yes. Point the client at `http://localhost:4001/v1` and use your scillm bearer token. scillm speaks OpenAI-compatible chat completions.
+
+**Does scillm serve embeddings?**  
+The compose stack can run embedding services on **8601/8602** for memory/RAG pipelines. Chat/completions routing is separate; see embedding compose profile and `.env.example`.
+
+**Can I run without Docker?**  
+Possible for development (`uvicorn` + local config) but **Docker is the supported path** (OAuth mounts, utls-proxy sidecar, OpenCode serve). The README and sanity scripts assume compose.
+
+**Is `vlm` the right model alias?**  
+Prefer **`gpt-5.5`** or **`vlm-chutes`** when Gemini quota matters. **`vlm`** is a **legacy cascade** that may try Gemini first.
+
+**What does “scillm” mean?**  
+Informal name for a **single control plane** for LLM calls. Pronounce it **“skill-um”** (like the agent skill command) or **“sci-L-M”** — pick one in your team and stay consistent.
 
 ## Documentation
 
