@@ -1,8 +1,5 @@
 <p align="center">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/logo/SciLLM_balanced.dark.svg" />
-    <img src="docs/assets/logo/SciLLM_balanced.animated.light.svg" alt="scillm" width="400" />
-  </picture>
+  <img src="docs/assets/scillm-header.webp" alt="scillm local multi-provider LLM proxy console" width="100%" />
 </p>
 
 <h3 align="center">One proxy. Any provider. Zero glue code.</h3>
