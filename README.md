@@ -62,6 +62,7 @@ Most providers need zero code — just credentials on disk or in `.env`.
 | **Chutes** | Add `CHUTES_API_KEY` + `CHUTES_API_BASE` to `.env` | `text` (default), or any `Org/Model` from Chutes catalog |
 | **DeepSeek** | Add `DEEPSEEK_API=...` to `.env` | `text-deepseek` |
 | **OpenCode Go** | Add `OPENCODE_GO_API_KEY=...` to `.env` | `opencode-go/kimi-k2.6`, `opencode-go/deepseek-v4-pro`, `opencode-go/minimax-m2.7` |
+| **OpenCode serve** | `SCILLM_OPENCODE_SERVE_ENABLED=1` in compose; `OPENCODE_SERVER_PASSWORD` when starting serve (mirror in `.env`) | Agent profiles via `POST /v1/scillm/opencode/runs` — **not** chat model names |
 | **Ollama** | `ollama pull model:tag` (local, no auth) | Any `model:tag` |
 
 After adding credentials, rebuild: `docker compose -p scillm -f deploy/docker/compose.scillm.core.yml up -d --build`
@@ -73,6 +74,109 @@ After adding credentials, rebuild: `docker compose -p scillm -f deploy/docker/co
 Makefile shortcuts: `make proxy-rebuild` (build+start), `make proxy-up`, `make proxy-down`, `make proxy-logs`
 
 **Container details:** Single Python process (uvicorn, :4001). Separate `utls-proxy` sidecar (:8444) for Codex TLS fingerprinting. `network_mode: host` (for local Ollama access), config mounted from `local/proxy_server_config.yaml`, health check every 15s. Ollama available via `--profile local`.
+
+## Invocation surfaces
+
+scillm is not only a chat proxy. Pick the surface by **job**, not by “strongest model”:
+
+| Surface | Endpoint | Use when | Project-agent collaboration |
+|---------|----------|----------|----------------------------|
+| **Chat** | `POST /v1/chat/completions` | One-shot reasoning, critique, classification, VLM | None — text/JSON back |
+| **Exec** | `scillm exec …` or `POST /v1/scillm/exec` | Deterministic pipelines; LLM at gates; bounded headless CLI | Single artifact per node; not an interactive coding loop |
+| **OpenCode serve** | `POST /v1/scillm/opencode/runs` | Bounded **coding/patch delegate**: read/grep/tools/skills in one session | **Yes** — project agent launches, validates diff/text, merges or forks retry |
+| **OpenCode transport** | `POST /v1/scillm/opencode/transport/*` | Same family as serve, plus DAG parent/child, **SSE** reasoning/permissions, steer | **Yes** — course correction on long investigations |
+| **Standing agents** | `/v1/scillm/agents/*` | Multi-turn **Codex** authorship in a leased worktree | **Yes** — handoff → lease → turn → result; memory stays in `/memory` |
+
+### Why OpenCode serve (between chat and exec)
+
+**Chat** returns one completion — no repo tool loop. **`scillm exec`** runs a **single** bounded headless worker (`codex exec`, Pi, one-shot `opencode run` with skills/shell denied in generated config) — good for pipeline **gates**, not for “investigate this repo and propose a patch.”
+
+**OpenCode serve** is the **tier‑1.5 coding delegate**: a bounded OpenCode session with an **agent profile** (`build`, `scillm-debugger`, …), native tools, and an optional Agent Skills allowlist. The **project agent** still owns the goal, `/memory` recall, deterministic validation, and **merge authority**. The serve worker returns **evidence** (`assistant_text`, `events.jsonl`, optional `diff` under `.scillm/opencode-serve/`); harness validators and the project agent decide pass/fail — OpenCode output is not auto-merged.
+
+Use **standing `/v1/scillm/agents/*`** when you need a **long-lived Codex** worker across many turns in an isolated worktree. Use **transport** when the harness or `/agent-debugger` needs **streaming** supervision and fork/steer (see [OpenCode transport v1](docs/SCILLM_OPENCODE_TRANSPORT_V1.md)).
+
+**Enable and verify:**
+
+```bash
+# compose: SCILLM_OPENCODE_SERVE_ENABLED=1 (see deploy/docker/compose.scillm.core.yml)
+docker compose -p scillm -f deploy/docker/compose.scillm.core.yml up -d --build opencode-serve scillm-proxy
+bash scripts/sanity_opencode_serve.sh
+```
+
+**Minimal serve run** (agent profile — not `opencode-go/kimi-k2.6`):
+
+```bash
+curl -s -X POST http://localhost:4001/v1/scillm/opencode/runs \
+  -H "Authorization: Bearer sk-dev-proxy-123" \
+  -H "X-Caller-Skill: my-project" \
+  -H "Content-Type: application/json" \
+  -d '{"prompt":"Inspect tests/test_foo.py and explain the failure. Do not edit.","agent":"build","skills":["memory","scillm"],"timeout_s":600}'
+```
+
+Full contract: [`docs/SCILLM_OPENCODE_SERVE.md`](docs/SCILLM_OPENCODE_SERVE.md). Agent/skill reference: [`skills/scillm/SKILL.md`](skills/scillm/SKILL.md).
+
+## Exec Workers
+
+`scillm exec` is the bounded worker layer for agentic tasks. It is separate from
+ordinary one-shot `/v1/chat/completions` calls:
+
+| Command/profile | Runner | Backing model | Notes |
+|-----------------|--------|---------------|-------|
+| `scillm exec pi-chutes-kimi` | `pi_exec` | Pi CLI over Chutes `moonshotai/Kimi-K2.6-TEE` | Preferred low-overhead Chutes Kimi exec lane. Uses the local Pi fork via `/home/graham/bin/pi`, which points at `/home/graham/workspace/experiments/pi-mono`, and runs with `--thinking off`. Override binary/model with `SCILLM_PI_BINARY` and `SCILLM_PI_CHUTES_KIMI_MODEL`. |
+| `scillm exec pi-opencode-kimi` | `pi_exec` | Pi CLI over OpenCode Go `kimi-k2.5` | Preferred Pi route when Chutes Kimi produces empty/no-write exec output. Uses Pi's native `opencode-go` provider support and `OPENCODE_API_KEY`; override with `SCILLM_PI_OPENCODE_KIMI_MODEL`. |
+| `scillm exec oc-chutes-deepseek` | `opencode_exec` | OpenCode CLI over Chutes `chutes/moonshotai/Kimi-K2.6-TEE` by default | OpenCode worker lane. Override with `SCILLM_OPENCODE_CHUTES_DEEPSEEK_MODEL`. |
+| `scillm exec codex-gpt-5.5` | `codex_exec` | Codex CLI `gpt-5.5` | Bounded `codex exec --json` worker. Not the same as chat `model: "gpt-5.5"`. API accepts deprecated alias `gpt-5.5` on `codex_exec`. Override with `SCILLM_CODEX_EXEC_MODEL`, `--codex-model`, `--reasoning-effort`. |
+| `scillm exec codex-vision` | `codex_exec` | Codex CLI `gpt-5.3-codex` (default) | Vision/heavy Codex exec lane. Override with `SCILLM_CODEX_EXEC_MODEL_VISION`. |
+| `scillm exec cursor-auto` | `cursor_exec` | Cursor CLI `auto` | Bounded writes with `--cursor-force` and `--allow-write`. |
+| `scillm exec cursor-plan` | `cursor_exec` | Cursor CLI plan mode | Read-only diagnose (`--mode plan`, no `--force`). |
+| `scillm exec cursor-composer-2.5` | `cursor_exec` | Cursor CLI composer model | Profile-only; do not pass through chat completions. |
+| `oc-*` and `opencode-go/*` | HTTP chat/batch routes | OpenCode Go API | These are one-shot Scillm model routes, not exec workers. |
+
+
+### Exec monitoring and timeouts (chat ≠ cursor)
+
+**Chat / batch** (`/v1/chat/completions`, batch stream): SSE heartbeat comments, caller
+`timeout` budget, and automatic timeout estimation from `llm_call_log` p95 — see features
+below.
+
+**`cursor_exec`** (`scillm exec cursor-auto`, `cursor-plan`, …): progress is **stream-json
+NDJSON**, not chat SSE. scillm parses stdout line-by-line, appends
+`.scillm/cursor-headless/<run_ctx>/cursor-events.jsonl` during the run, resets idle on
+semantic events (`tool_call`, `assistant`, `thinking`, …), and completes on a terminal
+`{"type":"result",...}` (process may be terminated without waiting for exit). Monitor:
+
+- `/tmp/scillm-exec/<run_id>/events.jsonl` or `GET /v1/scillm/exec/{run_id}/events`
+- Terminal fields: `stream_completed`, `result_event`, `tool_call_count`, `text`
+
+Use `timeout_s` / `idle_timeout_s` on the exec payload as **fail-closed backstops only** —
+not as the primary scheduling signal. Full contract: [`docs/SCILLM_EXEC.md`](docs/SCILLM_EXEC.md).
+
+Exec profiles are profile-only. Do not pass raw chat aliases such as
+`chutes-kimi`, direct `chutes/...` model ids, or `opencode-go/*` ids to
+`scillm exec`. For workspace mutation, use `--sandbox workspace-write` plus one
+or more `--allow-write` paths; the runtime snapshots the workspace and fails the
+node if Pi/OpenCode writes outside the allowlist.
+
+Docker mounts `/home/graham/.pi/agent` into the proxy container so the local Pi
+fork sees the same provider registry and auth as the host CLI.
+
+```bash
+scillm exec pi-chutes-kimi \
+  --cwd /home/graham/workspace/project \
+  --sandbox read-only \
+  --prompt 'Inspect the bounded failure and return JSON only.'
+
+scillm exec pi-opencode-kimi \
+  --cwd /home/graham/workspace/project \
+  --sandbox read-only \
+  --prompt 'Inspect the bounded failure and return JSON only.'
+
+scillm exec pi-chutes-kimi \
+  --cwd /tmp/canary \
+  --sandbox workspace-write \
+  --allow-write allowed/ \
+  --prompt 'Create allowed/result.json and return JSON proof.'
+```
 
 ## Security
 
@@ -107,7 +211,7 @@ Every provider scillm targets speaks OpenAI-compatible API (`/v1/chat/completion
 - **Cold-start warmup** — Chutes models that return 503 (cold) trigger a background warmup API call that posts a bounty for miners. The proxy falls through to the next deployment immediately. On startup, configured Chutes models are pre-warmed.
 - **Bounded concurrency queue** — Chutes.ai has a 5-connection limit. Exceed it and you get a 429 with a 90-second penalty. scillm queues overflow instead of rejecting it. Queue timeout is 600s (10 min) — large batches drain rather than fail.
 - **Batch-friendly error semantics** — Queue exhaustion returns 503 (service unavailable), not 429 (rate limit). 429s come only from upstream providers. Abuse guard is disabled for authenticated callers — no cascade failures from transient errors.
-- **Automatic timeout estimation** — No more guessing provider timeouts. scillm queries historical latency data (p95 from `llm_call_log`) and sets per-call provider budgets automatically. For long streaming calls, use a short connect timeout, heartbeat/idle liveness, and an explicit overall budget instead of fixed 15s response caps.
+- **Automatic timeout estimation (chat/batch)** — For `/v1/chat/completions` and batch routes, scillm queries historical latency data (p95 from `llm_call_log`) and sets per-call provider budgets. For long streaming chat calls, use a short connect timeout, SSE heartbeat/idle liveness, and an explicit overall budget. Does **not** replace `cursor_exec` stream-json supervision — see [Exec monitoring](#exec-monitoring-and-timeouts-chat--cursor) above.
 - **Source grounding verification** — Pass source text, scillm verifies the response is grounded using fuzzy matching, retries with progressive prompts if not.
 - **Dynamic fallback chains** — For Chutes models, the ENTIRE fallback chain is built from real-time utilization data. All available models are scored by utilization + rate-limit ratio, sorted best-first, and tried in order. 429s never reach the client — the router cascades through the utilization-sorted chain automatically.
 - **Fallback cascade with circuit breaker** — `text` uses Chutes DeepSeek-family fallbacks. VLM direct targets are preferred for quota-sensitive image work: `gpt-5.5` for Codex OAuth or `vlm-chutes` for Chutes VLM. The legacy `vlm` alias still starts with Gemini. 3 failures trigger a 20-second cooldown per group.
@@ -486,7 +590,7 @@ Test files: `tests/test_proxy_e2e.py` (contract tests), `tests/test_proxy_advers
 
 **Composes with:** `/task-monitor`, `/create-evidence-case`, `/analytics`, `/create-figure`, `/llm-eval-lab`
 
-**Full reference:** [`skills/scillm/SKILL.md`](skills/scillm/SKILL.md) — code examples for single calls, batch calls, Claude/Codex OAuth, ZIP/PDF file sending, VLM auto-routing, and source grounding.
+**Agent reference:** [`skills/scillm/SKILL.md`](skills/scillm/SKILL.md) — workflow map and surface picker. **Deep detail:** [`skills/scillm/references/`](skills/scillm/references/) (batch, OAuth, serve, transport, agents).
 
 ## Ops Endpoints
 
@@ -502,6 +606,13 @@ Test files: `tests/test_proxy_e2e.py` (contract tests), `tests/test_proxy_advers
 | `GET /v1/scillm/active-calls` | Raw active-call rows for debugging; not the dashboard pool source of truth |
 | `POST /v1/scillm/active-calls/purge` | Purge stale in-memory active-call rows |
 | `POST /v1/scillm/batch/completions` | Server-side batch completions using `model_pool` |
+| `GET /v1/scillm/opencode/health` | OpenCode serve connectivity |
+| `GET /v1/scillm/opencode/agents` | OpenCode agent profiles on serve |
+| `POST /v1/scillm/opencode/runs` | Bounded OpenCode coding/patch run (main serve entry) |
+| `POST /v1/scillm/opencode/serve/debugger/run` | Serve run with default debugger agent |
+| `GET /v1/scillm/opencode/events` | Live OpenCode SSE bus (`curl -N`) |
+| `GET /v1/scillm/agents/registry` | Standing Codex workers (check `workers` length) |
+| `POST /v1/scillm/agents/{worker_id}/turn` | Deliver handoff to standing worker |
 | `GET /v1/models` | OpenAI-compatible model list |
 | `GET /v1/budget` | Current daily spend and remaining budget |
 | `GET /v1/scillm/logs` | Cost summary by model for a given date |
@@ -534,3 +645,17 @@ curl -X POST http://localhost:8601/query -H "Content-Type: application/json" -d 
 ## License
 
 MIT License.
+
+## Documentation
+
+| Doc | Audience | Contents |
+|-----|----------|----------|
+| [Invocation surfaces](#invocation-surfaces) (this README) | Humans onboarding | When to use chat vs exec vs OpenCode serve vs transport vs standing agents |
+| [`skills/scillm/SKILL.md`](skills/scillm/SKILL.md) | Project agents / slash `/scillm` | Workflow map, surface picker, minimal examples |
+| [`skills/scillm/references/`](skills/scillm/references/) | Agents (on demand) | Batch, OAuth, files, serve, transport, standing agents |
+| [`docs/SCILLM_OPENCODE_SERVE.md`](docs/SCILLM_OPENCODE_SERVE.md) | OpenCode serve operators | `POST /v1/scillm/opencode/runs`, env, Docker sidecar, fork, skills allowlist, artifacts |
+| [`docs/SCILLM_OPENCODE_TRANSPORT_V1.md`](docs/SCILLM_OPENCODE_TRANSPORT_V1.md) | Harness / agent-debugger | DAG parent/child, **SSE** reasoning/permissions, transport `events.jsonl` |
+| [`docs/SCILLM_OPENCODE_INTEGRATION.md`](docs/SCILLM_OPENCODE_INTEGRATION.md) | Integrators | Fail-closed control plane; do not call raw serve ports from product code |
+| [`docs/interactive-agents/README.md`](docs/interactive-agents/README.md) | Standing Codex workers | `/v1/scillm/agents/*` handoff → lease → turn; see [routing](docs/interactive-agents/routing.md) |
+| [`docs/SCILLM_EXEC.md`](docs/SCILLM_EXEC.md) | Exec graphs | `scillm exec`, cursor stream-json, exec artifacts |
+
