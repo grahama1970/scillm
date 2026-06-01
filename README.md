@@ -619,7 +619,7 @@ Callers say `model: "text"` — the proxy picks the provider. When models change
 | `text-gemini-3` | Google | Gemini 3 Flash Preview (free) | → text-gemini-3-paid |
 | `vlm` | Google | Gemini 2.5 Flash (free key) | Legacy cascade; avoid for quota-sensitive VLM work |
 | `vlm-claude` | Anthropic (OAuth) | Claude Sonnet | Images + PDFs |
-| `vlm-codex` | OpenAI (OAuth) | GPT-5.3 Codex | Images + PDFs |
+| `vlm-codex` | OpenAI (OAuth) | `gpt-5.3-codex` | Images + PDFs (chat/VLM group; exec vision: `scillm exec codex-vision`) |
 | `vlm-chutes` | Chutes | GLM-4.6V | Higher-throughput image calls |
 | `gpt-5.5` | OpenAI (OAuth) | Codex high-reasoning model via `~/.codex` | Direct text + image calls |
 | `opencode-go/deepseek-v4-flash` | OpenCode Go | DeepSeek V4 Flash through OpenCode Go/Fireworks | (none) |
