@@ -1109,6 +1109,25 @@ def _tool_rows(message: dict[str, Any] | None) -> list[dict[str, Any]]:
   return [row for row in _summarize_message_parts(message) if row.get("type") in _TOOL_PART_TYPES]
 
 
+def _message_tool_call_finish(message: dict[str, Any] | None) -> bool:
+  if not isinstance(message, dict):
+    return False
+  info = message.get("info") if isinstance(message.get("info"), dict) else {}
+  finish = info.get("finish")
+  if isinstance(finish, str) and finish.strip().casefold() in {"tool-calls", "tool_calls", "tool-call", "tool_call"}:
+    return True
+  parts = message.get("parts")
+  if not isinstance(parts, list):
+    return False
+  for part in parts:
+    if not isinstance(part, dict) or str(part.get("type") or "") != "step-finish":
+      continue
+    reason = part.get("reason")
+    if isinstance(reason, str) and reason.strip().casefold() in {"tool-calls", "tool_calls", "tool-call", "tool_call"}:
+      return True
+  return False
+
+
 def _pending_tool_rows(message: dict[str, Any] | None) -> list[dict[str, Any]]:
   pending: list[dict[str, Any]] = []
   for row in _tool_rows(message):
@@ -1179,7 +1198,9 @@ def _tool_scope_violation_rows(
 
 
 def _awaiting_terminal_text_after_tools(message: dict[str, Any] | None) -> bool:
-  return bool(_tool_rows(message)) and not bool(_extract_message_text_parts(message))
+  return bool(_tool_rows(message)) and (
+    not bool(_extract_message_text_parts(message)) or _message_tool_call_finish(message)
+  )
 
 
 def _message_info_fields(message: dict[str, Any] | None) -> dict[str, Any]:
@@ -1232,6 +1253,7 @@ def _summarize_messages_thread(
   terminal_text = _extract_message_text_parts(last_assistant) if last_assistant else ""
   reasoning_text = _extract_message_reasoning_parts(last_assistant) if last_assistant else ""
   excerpt = _extract_message_excerpt(last_assistant) if last_assistant else ""
+  tool_call_finish = _message_tool_call_finish(last_assistant)
   return {
     "schema": "scillm.opencode_run.timeout_summary.v1",
     "message_count": len(messages),
@@ -1245,9 +1267,10 @@ def _summarize_messages_thread(
     "last_tool_scope_violations": scope_violations[-8:],
     "last_tool_scope_violation_count": len(scope_violations),
     "last_assistant_has_tool_calls": bool(tool_calls),
+    "last_assistant_tool_call_finish": tool_call_finish,
     "last_assistant_terminal_text_chars": len(terminal_text),
     "last_assistant_reasoning_chars": len(reasoning_text),
-    "last_assistant_waiting_terminal_text": bool(tool_calls) and not terminal_text,
+    "last_assistant_waiting_terminal_text": bool(tool_calls) and (not terminal_text or tool_call_finish),
     "last_assistant_reasoning_only": bool(reasoning_text) and not terminal_text and not tool_calls,
     "last_tool_message": _message_info_fields(last_tool_assistant) if last_tool_assistant else None,
     **info_fields,
@@ -1313,6 +1336,8 @@ def _build_terminal_blocker(
     "last_pending_tool_count": timeout_summary.get("last_pending_tool_count", 0),
     "last_tool_scope_violations": timeout_summary.get("last_tool_scope_violations") or [],
     "last_tool_scope_violation_count": timeout_summary.get("last_tool_scope_violation_count", 0),
+    "last_assistant_tool_call_finish": bool(timeout_summary.get("last_assistant_tool_call_finish")),
+    "last_assistant_terminal_text_chars": timeout_summary.get("last_assistant_terminal_text_chars", 0),
     "diff_count": diff_evidence.get("diff_count", 0),
     "changed_paths": diff_evidence.get("changed_paths") or [],
     "diff_source": diff_evidence.get("diff_source", ""),
@@ -1324,6 +1349,8 @@ def _build_terminal_blocker(
     blocker["primary_reason"] = "tool_scope_violation"
   elif timeout_summary.get("last_pending_tool_count", 0):
     blocker["primary_reason"] = "pending_tool_unresolved"
+  elif timeout_summary.get("last_assistant_tool_call_finish"):
+    blocker["primary_reason"] = "tool_call_turn_without_terminal_text"
   elif timeout_summary.get("last_assistant_waiting_terminal_text"):
     blocker["primary_reason"] = "tool_completed_without_terminal_text"
   elif timeout_summary.get("last_assistant_reasoning_only"):
@@ -1454,7 +1481,7 @@ async def _latest_assistant_message(
     if _message_role(item) in {"", "assistant"}:
       text = _extract_message_text_parts(item)
       pending_tools = _pending_tool_rows(item)
-      if text and not pending_tools:
+      if text and not pending_tools and not _message_tool_call_finish(item):
         return text, item, []
       if pending_tools:
         return "", item, pending_tools

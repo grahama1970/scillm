@@ -1160,6 +1160,70 @@ async def test_execute_run_times_out_when_tool_completes_without_terminal_text(t
     assert "run_completed" not in events
 
 
+@pytest.mark.asyncio
+async def test_execute_run_blocks_tool_call_finish_with_commentary_text(tmp_path: Path) -> None:
+    from scillm.proxy import opencode_serve_api as api_mod
+
+    run = OpenCodeServeRun(
+        run_id="oc-tool-call-finish-commentary",
+        artifact_root=tmp_path,
+        caller_skill="pdf-lab",
+        agent="build",
+        session_id="sess-tool-call-finish-commentary",
+        request_payload={"prompt": "patch"},
+        directory=str(tmp_path),
+    )
+    spec = OpenCodeRunRequest(prompt="patch", agent="build", wait=False, timeout_s=10)
+    receipt = SkillViewReceipt((), (), (), None)
+    tool_call_message = {
+        "info": {"role": "assistant", "id": "msg-tool-call", "finish": "tool-calls"},
+        "parts": [
+            {"type": "step-start"},
+            {"type": "text", "text": "I will inspect the worktree first."},
+            {
+                "type": "tool",
+                "tool": "todowrite",
+                "state": {"status": "completed", "input": {"todos": []}, "output": "[]"},
+            },
+            {"type": "step-finish", "reason": "tool-calls"},
+        ],
+    }
+
+    mock_client = AsyncMock()
+    mock_client.__aenter__.return_value = mock_client
+    mock_client.__aexit__.return_value = None
+    mock_client.send_prompt_async = AsyncMock(return_value=None)
+    mock_client.list_messages = AsyncMock(return_value=[tool_call_message])
+    mock_client.session_status_map = AsyncMock(return_value={"sess-tool-call-finish-commentary": {"status": "idle"}})
+    mock_client.diff = AsyncMock(return_value=[])
+
+    clock = {"value": 0.0}
+
+    def _advance_clock() -> float:
+        clock["value"] += 0.5
+        return clock["value"]
+
+    with (
+        patch("scillm.proxy.opencode_serve_api.OpenCodeServeClient", return_value=mock_client),
+        patch("scillm.proxy.opencode_serve_api.time.monotonic", side_effect=_advance_clock),
+        patch("scillm.proxy.opencode_serve_api.asyncio.sleep", AsyncMock()),
+    ):
+        result = await api_mod._execute_run(run, spec, skill_receipt=receipt)
+
+    assert result["status"] == "timeout"
+    blocker = result["terminal_blocker"]
+    assert blocker["primary_reason"] == "tool_call_turn_without_terminal_text"
+    assert blocker["last_assistant_tool_call_finish"] is True
+    assert blocker["last_assistant_terminal_text_chars"] > 0
+    events = [
+        json.loads(line)["event"]
+        for line in run.events_path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    assert "assistant_waiting_for_terminal_text" in events
+    assert "run_completed" not in events
+
+
 def test_opencode_run_timeout_returns_terminal_status(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("SCILLM_OPENCODE_SERVE_OUTPUT_DIR", str(tmp_path))
 
