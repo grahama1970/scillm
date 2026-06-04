@@ -1647,3 +1647,124 @@ def test_opencode_run_client_disconnect_finalizes(
         if line.strip()
     ]
     assert any(e.get("event") == "run_disconnected" for e in events)
+
+
+def test_opencode_run_blocks_reasoning_only_completion(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("SCILLM_OPENCODE_SERVE_OUTPUT_DIR", str(tmp_path))
+
+    app = FastAPI()
+    app.add_exception_handler(ProxyError, proxy_error_handler)
+    app.include_router(create_opencode_serve_router(lambda _request: None), prefix="/v1/scillm")
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    message = {
+        "info": {"role": "assistant", "id": "msg-reasoning", "completed": 1},
+        "parts": [
+            {"type": "step-start"},
+            {"type": "reasoning", "text": "Considering memory and tasks"},
+            {"type": "text", "text": ""},
+        ],
+    }
+    messages = [
+        {"info": {"role": "user", "id": "msg-user"}, "parts": [{"type": "text", "text": "patch"}]},
+        message,
+    ]
+
+    mock_client = AsyncMock()
+    mock_client.__aenter__.return_value = mock_client
+    mock_client.__aexit__.return_value = None
+    mock_client.list_agents = AsyncMock(return_value=[{"name": "build"}])
+    mock_client.create_session = AsyncMock(return_value={"id": "sess-reasoning", "directory": str(workspace)})
+    mock_client.register_mcp = AsyncMock()
+    mock_client.send_message = AsyncMock(return_value=message)
+    mock_client.list_messages = AsyncMock(return_value=messages)
+    mock_client.session_status_map = AsyncMock(return_value={"sess-reasoning": {"status": "idle"}})
+    mock_client.diff = AsyncMock(return_value=[])
+    mock_client.abort = AsyncMock(return_value=True)
+    mock_client.kill_session = AsyncMock(return_value={"session_id": "sess-reasoning", "aborted": True, "deleted": True})
+
+    with patch("scillm.proxy.opencode_serve_api.OpenCodeServeClient", return_value=mock_client):
+        client = TestClient(app)
+        resp = client.post(
+            "/v1/scillm/opencode/runs",
+            headers={"X-Caller-Skill": "pdf-lab"},
+            json={
+                "prompt": "patch delegate must start with tools",
+                "agent": "build",
+                "cwd": str(workspace),
+                "timeout_s": 30,
+                "patch_mode": "live",
+            },
+        )
+
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["status"] == "timeout"
+    assert body["terminal_blocker"]["primary_reason"] == "reasoning_only_no_terminal_text"
+    assert body["timeout_summary"]["last_assistant_terminal_text_chars"] == 0
+    assert body["timeout_summary"]["last_assistant_reasoning_chars"] > 0
+    assert body["patch_delegate_status"] == "PATCH_DELEGATE_BLOCKED"
+    events = [
+        json.loads(line)
+        for line in (tmp_path / body["run_id"] / "events.jsonl").read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    assert any(e.get("event") == "assistant_waiting_for_terminal_text" for e in events)
+    assert not any(e.get("event") == "run_completed" for e in events)
+
+
+def test_serve_dialog_post_labels_active_child_as_side_channel(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("SCILLM_OPENCODE_SERVE_OUTPUT_DIR", str(tmp_path))
+    run_dir = tmp_path / "oc-dialog-active"
+    run_dir.mkdir()
+    (run_dir / "status.json").write_text(
+        json.dumps(
+            {
+                "run_id": "oc-dialog-active",
+                "state": "running",
+                "phase": "prompting",
+                "session_id": "sess-dialog-active",
+                "caller_skill": "pdf-lab",
+                "agent": "build",
+                "cwd": str(tmp_path),
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    app = FastAPI()
+    app.add_exception_handler(ProxyError, proxy_error_handler)
+    app.include_router(create_opencode_serve_router(lambda _request: None), prefix="/v1/scillm")
+
+    mock_client = AsyncMock()
+    mock_client.__aenter__.return_value = mock_client
+    mock_client.__aexit__.return_value = None
+    mock_client.session_status_map = AsyncMock(return_value={"sess-dialog-active": {"status": "busy"}})
+    mock_client.send_message = AsyncMock(return_value={"info": {"id": "msg-note"}})
+
+    with patch("scillm.proxy.opencode_serve.OpenCodeServeClient", return_value=mock_client):
+        client = TestClient(app)
+        resp = client.post(
+            "/v1/scillm/opencode/runs/oc-dialog-active/dialog",
+            headers={"X-Caller-Skill": "pdf-lab"},
+            json={"speaker": "Project agent", "body": "Use the preset path."},
+        )
+
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["delivery_mode"] == "side_channel_no_interrupt"
+    assert body["steering_supported"] is False
+    assert body["active_turn_interrupt_supported"] is False
+    assert "does not interrupt" in body["project_agent_message"]
+    assert mock_client.send_message.await_args.kwargs["no_reply"] is True
+    events = [
+        json.loads(line)
+        for line in (run_dir / "events.jsonl").read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    assert any(e.get("event") == "dialog.delivery" and e.get("delivery_mode") == "side_channel_no_interrupt" for e in events)

@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from scillm.proxy.opencode_serve import OpenCodeServeSettings, load_opencode_serve_settings
+from scillm.proxy.opencode_serve import session_is_busy
 from scillm.proxy.opencode_transport import format_dialog_message
 from scillm.proxy.errors import ProxyError
 from scillm.proxy import opencode_serve_api as serve_api
@@ -473,16 +474,57 @@ async def post_serve_dialog_message(
         "created_at": time.time(),
     }
     append_serve_dialog_turn(run, turn)
+    status_payload: dict[str, Any] = {}
+    if run.status_path.is_file():
+        try:
+            status_payload = json.loads(run.status_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            status_payload = {}
+    run_state = str(status_payload.get("state") or "").strip().lower()
+    run_phase = str(status_payload.get("phase") or "").strip().lower()
+    active_turn = run_state == "running" or run_phase in {"prompting", "delivering"}
+    delivery_mode = "recorded_only"
+    steering_payload: dict[str, Any] | None = None
+    session_status: dict[str, Any] | None = None
     if run.session_id:
         from scillm.proxy.opencode_serve import OpenCodeServeClient, text_parts
 
         async with OpenCodeServeClient() as client:
-            await client.send_message(
+            try:
+                status_map = await client.session_status_map(directory=run.directory)
+            except Exception:
+                status_map = {}
+            busy = session_is_busy(status_map, run.session_id)
+            session_status = status_map.get(run.session_id) if isinstance(status_map, dict) else None
+            no_reply = active_turn or busy
+            steering_payload = await client.send_message(
                 run.session_id,
                 parts=text_parts(turn["text"]),
-                no_reply=True,
+                no_reply=no_reply,
                 directory=run.directory,
                 agent=run.agent or None,
             )
-    return {"schema": "scillm.opencode_serve.dialog_post.v1", "turn": turn}
-
+            delivery_mode = "side_channel_no_interrupt" if no_reply else "steering_turn_sent"
+    run.emit(
+        "dialog.delivery",
+        message_id=message_id,
+        delivery_mode=delivery_mode,
+        active_turn=active_turn,
+        session_status=session_status,
+    )
+    return {
+        "schema": "scillm.opencode_serve.dialog_post.v1",
+        "turn": turn,
+        "delivery_mode": delivery_mode,
+        "steering_supported": delivery_mode == "steering_turn_sent",
+        "active_turn_interrupt_supported": False,
+        "active_turn": active_turn,
+        "session_status": session_status,
+        "opencode_message": steering_payload,
+        "project_agent_message": (
+            "Dialog post was appended as a side-channel note because the child turn is active; "
+            "it does not interrupt or steer the in-flight model turn."
+            if delivery_mode == "side_channel_no_interrupt"
+            else "Dialog post was sent as a new OpenCode message because the child session was idle."
+        ),
+    }

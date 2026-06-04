@@ -163,6 +163,11 @@ TERMINAL_DELIVERY_STATES = {
     DELIVERY_BLOCKED,
 }
 
+VISIBLE_TERMINAL_DELIVERY_STATES = TERMINAL_DELIVERY_STATES | {
+    DELIVERY_COMPLETED,
+    DELIVERY_FAILED,
+}
+
 PINNED_OPENCODE_VERSION = os.environ.get("SCILLM_OPENCODE_PINNED_VERSION", "1.14.31")
 
 
@@ -427,6 +432,21 @@ def list_transport_run_index() -> list[dict[str, object]]:
                 state = json.loads(state_path.read_text(encoding="utf-8"))
                 st = state_path.stat()
                 transport_run_id = str(state.get("transport_run_id") or ent.name)
+                active_child: dict[str, Any] | None = None
+                try:
+                    active_child_obj = TransportState.from_dict(state).active_child()
+                    active_child = active_child_obj.to_dict() if active_child_obj else None
+                except Exception:
+                    active_child = None
+                wrapper_state = state.get("state")
+                wrapper_phase = state.get("phase")
+                projected_state = wrapper_state
+                projected_phase = wrapper_phase
+                if active_child is not None:
+                    child_delivery = str(active_child.get("delivery_state") or "").strip()
+                    if child_delivery and child_delivery not in VISIBLE_TERMINAL_DELIVERY_STATES:
+                        projected_state = "running"
+                        projected_phase = f"active_child:{child_delivery}"
                 row = {
                     "transport_run_id": transport_run_id,
                     "run_id": transport_run_id,
@@ -435,8 +455,20 @@ def list_transport_run_index() -> list[dict[str, object]]:
                     "dag_node_id": state.get("dag_node_id"),
                     "mtime_ms": int(st.st_mtime * 1000),
                     "updated_at": state.get("updated_at"),
-                    "state": state.get("state"),
-                    "phase": state.get("phase"),
+                    "state": projected_state,
+                    "phase": projected_phase,
+                    "wrapper_state": wrapper_state,
+                    "wrapper_phase": wrapper_phase,
+                    "active_child": active_child,
+                    "active_child_delivery_state": (
+                        str(active_child.get("delivery_state") or "") if active_child else ""
+                    ),
+                    "active_child_session_id": (
+                        str(active_child.get("child_session_id") or "") if active_child else ""
+                    ),
+                    "active_child_run_id": (
+                        str(active_child.get("subagent_run_id") or "") if active_child else ""
+                    ),
                     "session_id": state.get("session_id"),
                 }
             except (OSError, json.JSONDecodeError, TypeError):

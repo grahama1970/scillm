@@ -1000,6 +1000,23 @@ def _extract_message_text_parts(message: dict[str, Any], *, max_chars: int = 400
   return text[:max_chars]
 
 
+def _extract_message_reasoning_parts(message: dict[str, Any], *, max_chars: int = 4000) -> str:
+  """Collect reasoning text for diagnostics; never use it as terminal assistant text."""
+  parts = message.get("parts")
+  chunks: list[str] = []
+  if isinstance(parts, list):
+    for part in parts:
+      if not isinstance(part, dict) or part.get("type") != "reasoning":
+        continue
+      for key in ("text", "reasoning", "content"):
+        value = part.get(key)
+        if isinstance(value, str) and value.strip():
+          chunks.append(value.strip())
+          break
+  text = "\n".join(chunks).strip()
+  return text[:max_chars]
+
+
 def _format_message_for_dialog(message: dict[str, Any]) -> str:
   """Render OpenCode message parts as markdown for transport-style dialog."""
   chunks: list[str] = []
@@ -1212,7 +1229,8 @@ def _summarize_messages_thread(
         tool_errors.append(row)
     pending_tools = _pending_tool_rows(tool_context)
   scope_violations = _tool_scope_violation_rows(pending_tools, run_directory=run_directory)
-  terminal_text = _extract_message_text_parts(tool_context) if tool_context else ""
+  terminal_text = _extract_message_text_parts(last_assistant) if last_assistant else ""
+  reasoning_text = _extract_message_reasoning_parts(last_assistant) if last_assistant else ""
   excerpt = _extract_message_excerpt(last_assistant) if last_assistant else ""
   return {
     "schema": "scillm.opencode_run.timeout_summary.v1",
@@ -1228,7 +1246,9 @@ def _summarize_messages_thread(
     "last_tool_scope_violation_count": len(scope_violations),
     "last_assistant_has_tool_calls": bool(tool_calls),
     "last_assistant_terminal_text_chars": len(terminal_text),
+    "last_assistant_reasoning_chars": len(reasoning_text),
     "last_assistant_waiting_terminal_text": bool(tool_calls) and not terminal_text,
+    "last_assistant_reasoning_only": bool(reasoning_text) and not terminal_text and not tool_calls,
     "last_tool_message": _message_info_fields(last_tool_assistant) if last_tool_assistant else None,
     **info_fields,
   }
@@ -1306,6 +1326,8 @@ def _build_terminal_blocker(
     blocker["primary_reason"] = "pending_tool_unresolved"
   elif timeout_summary.get("last_assistant_waiting_terminal_text"):
     blocker["primary_reason"] = "tool_completed_without_terminal_text"
+  elif timeout_summary.get("last_assistant_reasoning_only"):
+    blocker["primary_reason"] = "reasoning_only_no_terminal_text"
   elif timeout_summary.get("message_count", 0) > 1 and not sentinel_observed:
     blocker["primary_reason"] = "timeout_before_terminal_sentinel"
   elif not timeout_summary.get("last_assistant_excerpt"):
@@ -1430,9 +1452,7 @@ async def _latest_assistant_message(
   messages = await client.list_messages(session_id, limit=50, directory=directory)
   for item in reversed(messages):
     if _message_role(item) in {"", "assistant"}:
-      text = _extract_message_text_parts(item) or (
-        _extract_message_excerpt(item) if not _tool_rows(item) else ""
-      )
+      text = _extract_message_text_parts(item)
       pending_tools = _pending_tool_rows(item)
       if text and not pending_tools:
         return text, item, []
@@ -1977,17 +1997,20 @@ async def _execute_run(
 
       assistant_text, message = ("", None)
       if isinstance(sync_message, dict):
-        assistant_text = extract_assistant_text(sync_message)
-        if assistant_text:
+        sync_excerpt = _extract_message_excerpt(sync_message)
+        assistant_text = _extract_message_text_parts(sync_message) or extract_assistant_text(sync_message)
+        if assistant_text or sync_excerpt or _tool_rows(sync_message):
           message = sync_message
-          _emit_first_delta_once(message, assistant_text)
+          _emit_first_delta_once(message, assistant_text or sync_excerpt)
           pending_tools = _pending_tool_rows(message)
           if pending_tools and _emit_scope_violation_once(pending_tools):
             return await _timeout_run_result(run, spec, receipt=receipt, timeout_s=timeout_s)
           if pending_tools or _awaiting_terminal_text_after_tools(message):
             assistant_text = ""
+          elif not assistant_text and _extract_message_excerpt(message):
+            run.emit("assistant_waiting_for_terminal_text", reason="non_terminal_assistant_delta")
       if not spec.wait:
-        assistant_text, message, delta = await _wait_for_first_assistant_or_tool_delta(
+        delta_text, message, delta = await _wait_for_first_assistant_or_tool_delta(
           client,
           run,
           deadline=deadline,
@@ -1997,11 +2020,14 @@ async def _execute_run(
           return await _timeout_run_result(run, spec, receipt=receipt, timeout_s=timeout_s)
         first_delta_emitted = True
         run.emit("first_assistant_or_tool_delta", **delta)
+        assistant_text = _extract_message_text_parts(message)
         pending_tools = _pending_tool_rows(message)
         if pending_tools and _emit_scope_violation_once(pending_tools):
           return await _timeout_run_result(run, spec, receipt=receipt, timeout_s=timeout_s)
         if pending_tools or _awaiting_terminal_text_after_tools(message):
           assistant_text = ""
+        elif not assistant_text and delta_text:
+          run.emit("assistant_waiting_for_terminal_text", reason="non_terminal_assistant_delta")
 
       status_map = await _poll_until_idle(client, run.session_id, deadline=deadline, directory=run.directory)
 

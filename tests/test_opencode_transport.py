@@ -154,6 +154,47 @@ def test_build_transport_observation_shape(tmp_path: Path, monkeypatch: pytest.M
     assert obs["scillm_events_stream"].endswith("/otr-obs/events/stream")
 
 
+def test_transport_run_index_projects_active_child_state(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from scillm.proxy.opencode_transport import ChildAttempt, TransportState, TransportStore, list_transport_run_index
+
+    transport_dir = tmp_path / "transport"
+    monkeypatch.setenv("SCILLM_OPENCODE_TRANSPORT_DIR", str(transport_dir))
+    monkeypatch.setenv("SCILLM_OPENCODE_SERVE_OUTPUT_DIR", str(tmp_path / "serve"))
+    child = ChildAttempt(
+        subagent_run_id="oc-pdf-lab-p45-d4f3-default-e2e",
+        role="patch",
+        child_session_id="ses_16c3f0096ffe9dOmNNpicQ5kTM",
+        agent="build",
+        attempt_id=1,
+        delivery_state="posted",
+        active=True,
+    )
+    state = TransportState(
+        transport_run_id="otr-wrapper-completed",
+        dag_node_id="pdf_lab",
+        parent_session_id="ses-parent",
+        workspace=str(tmp_path),
+        active_subagent_run_id=child.subagent_run_id,
+        children=[child.to_dict()],
+    )
+    store = TransportStore(transport_dir)
+    store.save(state)
+    state_path = store.state_path(state.transport_run_id)
+    data = json.loads(state_path.read_text(encoding="utf-8"))
+    data["state"] = "completed"
+    data["phase"] = "done"
+    state_path.write_text(json.dumps(data), encoding="utf-8")
+
+    row = next(r for r in list_transport_run_index() if r["run_id"] == "otr-wrapper-completed")
+    assert row["state"] == "running"
+    assert row["phase"] == "active_child:posted"
+    assert row["wrapper_state"] == "completed"
+    assert row["active_child_run_id"] == "oc-pdf-lab-p45-d4f3-default-e2e"
+    assert row["active_child_session_id"] == "ses_16c3f0096ffe9dOmNNpicQ5kTM"
+
+
 
 
 def test_transport_capabilities_endpoint(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
