@@ -1419,6 +1419,7 @@ def test_serve_run_dialog_for_transport_room(tmp_path, monkeypatch):
         "session_id": "ses_bridge",
         "caller_skill": "pdf-lab",
         "human_monitor": {
+            "session_title": "pdf_lab bridge run",
             "scillm_chat_monitor_url": "http://127.0.0.1:4001/v1/scillm/opencode/runs/oc-transport-bridge/monitor?token=t",
         },
     }
@@ -1448,7 +1449,20 @@ def test_serve_run_dialog_for_transport_room(tmp_path, monkeypatch):
     )
 
     index = list_serve_run_index()
-    assert any(r["transport_run_id"] == "oc-transport-bridge" for r in index)
+    indexed = next(r for r in index if r["transport_run_id"] == "oc-transport-bridge")
+    assert indexed["run_id"] == "oc-transport-bridge"
+    assert indexed["id"] == "oc-transport-bridge"
+    assert indexed["title"] == "pdf_lab bridge run"
+    assert indexed["state"] == "completed"
+    assert indexed["phase"] is None
+    assert indexed["session_id"] == "ses_bridge"
+    assert indexed["human_monitor_url"].endswith("/monitor?token=t")
+    from scillm.proxy.opencode_transport import list_transport_run_index
+
+    transport_index = list_transport_run_index()
+    transport_row = next(r for r in transport_index if r["run_id"] == "oc-transport-bridge")
+    assert transport_row["run_kind"] == "opencode_serve"
+    assert transport_row["title"] == "pdf_lab bridge run"
     run = load_serve_run("oc-transport-bridge")
     dialog = build_serve_dialog_response(run)
     assert dialog["run_kind"] == "opencode_serve"

@@ -426,16 +426,36 @@ def list_transport_run_index() -> list[dict[str, object]]:
             try:
                 state = json.loads(state_path.read_text(encoding="utf-8"))
                 st = state_path.stat()
+                transport_run_id = str(state.get("transport_run_id") or ent.name)
                 row = {
-                    "transport_run_id": str(state.get("transport_run_id") or ent.name),
+                    "transport_run_id": transport_run_id,
+                    "run_id": transport_run_id,
+                    "id": transport_run_id,
+                    "title": state.get("title") or state.get("dag_node_id") or transport_run_id,
                     "dag_node_id": state.get("dag_node_id"),
                     "mtime_ms": int(st.st_mtime * 1000),
+                    "updated_at": state.get("updated_at"),
+                    "state": state.get("state"),
+                    "phase": state.get("phase"),
+                    "session_id": state.get("session_id"),
                 }
             except (OSError, json.JSONDecodeError, TypeError):
                 continue
             prev = by_id.get(row["transport_run_id"])
             if not prev or int(row["mtime_ms"]) > int(prev.get("mtime_ms") or 0):
                 by_id[str(row["transport_run_id"])] = row
+    try:
+        from scillm.proxy.opencode_serve_dialog import list_serve_run_index
+
+        for row in list_serve_run_index():
+            run_id = str(row.get("run_id") or row.get("transport_run_id") or row.get("id") or "")
+            if not run_id:
+                continue
+            prev = by_id.get(run_id)
+            if not prev or int(row.get("mtime_ms") or 0) > int(prev.get("mtime_ms") or 0):
+                by_id[run_id] = row
+    except Exception:
+        pass
     rows = list(by_id.values())
     rows.sort(key=lambda r: int(r.get("mtime_ms") or 0), reverse=True)
     return rows
