@@ -1030,6 +1030,74 @@ async def test_execute_run_does_not_complete_while_tool_call_pending(tmp_path: P
 
 
 @pytest.mark.asyncio
+async def test_execute_run_blocks_pending_tool_outside_run_directory(tmp_path: Path) -> None:
+    from scillm.proxy import opencode_serve_api as api_mod
+
+    isolated = tmp_path / "pdf_oxide" / "artifacts" / "pdf_lab" / "case" / "clean_head_worktree"
+    isolated.mkdir(parents=True)
+    parent_checkout = tmp_path / "pdf_oxide"
+    run = OpenCodeServeRun(
+        run_id="oc-scope-violation",
+        artifact_root=tmp_path / "runs",
+        caller_skill="pdf-lab",
+        agent="build",
+        session_id="sess-scope-violation",
+        request_payload={"prompt": "patch"},
+        directory=str(isolated),
+    )
+    spec = OpenCodeRunRequest(prompt="patch", agent="build", wait=False, timeout_s=10)
+    receipt = SkillViewReceipt((), (), (), None)
+    pending_message = {
+        "info": {"role": "assistant", "id": "msg-1"},
+        "parts": [
+            {"type": "reasoning", "text": "I will search for list code."},
+            {
+                "type": "tool",
+                "tool": "glob",
+                "state": {
+                    "status": "running",
+                    "input": {
+                        "pattern": "python/**/*list*",
+                        "path": str(parent_checkout),
+                    },
+                },
+            },
+        ],
+    }
+
+    mock_client = AsyncMock()
+    mock_client.__aenter__.return_value = mock_client
+    mock_client.__aexit__.return_value = None
+    mock_client.send_prompt_async = AsyncMock(return_value=None)
+    mock_client.list_messages = AsyncMock(return_value=[pending_message])
+    mock_client.session_status_map = AsyncMock(return_value={"sess-scope-violation": {"status": "busy"}})
+    mock_client.diff = AsyncMock(return_value=[])
+    mock_client.abort = AsyncMock(return_value=True)
+
+    with patch("scillm.proxy.opencode_serve_api.OpenCodeServeClient", return_value=mock_client):
+        result = await api_mod._execute_run(run, spec, skill_receipt=receipt)
+
+    assert result["status"] == "timeout"
+    blocker = result["terminal_blocker"]
+    assert blocker["primary_reason"] == "tool_scope_violation"
+    assert blocker["last_tool_scope_violation_count"] == 1
+    violation = blocker["last_tool_scope_violations"][0]["scope_violation"]
+    assert violation["input_key"] == "path"
+    assert violation["resolved_path"] == str(parent_checkout.resolve())
+    assert violation["allowed_root"] == str(isolated.resolve())
+    assert result["diff_evidence"]["diff_count"] == 0
+    mock_client.abort.assert_awaited_once_with("sess-scope-violation", directory=str(isolated))
+    events = [
+        json.loads(line)["event"]
+        for line in run.events_path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    assert "assistant_tool_scope_violation" in events
+    assert "run_timeout" in events
+    assert "run_completed" not in events
+
+
+@pytest.mark.asyncio
 async def test_execute_run_times_out_when_tool_completes_without_terminal_text(tmp_path: Path) -> None:
     from scillm.proxy import opencode_serve_api as api_mod
 

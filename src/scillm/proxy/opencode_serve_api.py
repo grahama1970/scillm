@@ -1105,6 +1105,62 @@ def _pending_tool_rows(message: dict[str, Any] | None) -> list[dict[str, Any]]:
   return pending
 
 
+_TOOL_PATH_INPUT_KEYS = ("path", "filePath", "filepath", "cwd", "dir", "directory", "root")
+
+
+def _resolve_tool_input_path(raw: str, *, run_directory: str) -> Path | None:
+  text = raw.strip()
+  if not text:
+    return None
+  base = Path(run_directory).resolve()
+  candidate = Path(text)
+  if not candidate.is_absolute():
+    candidate = base / candidate
+  return candidate.resolve()
+
+
+def _path_is_relative_to(path: Path, base: Path) -> bool:
+  try:
+    path.relative_to(base)
+    return True
+  except ValueError:
+    return False
+
+
+def _tool_scope_violation_rows(
+  pending_tools: list[dict[str, Any]],
+  *,
+  run_directory: str | None,
+) -> list[dict[str, Any]]:
+  if not run_directory:
+    return []
+  base = Path(run_directory).resolve()
+  violations: list[dict[str, Any]] = []
+  for row in pending_tools:
+    state = row.get("state")
+    if not isinstance(state, dict):
+      continue
+    inputs = state.get("input")
+    if not isinstance(inputs, dict):
+      continue
+    for key in _TOOL_PATH_INPUT_KEYS:
+      raw = inputs.get(key)
+      if not isinstance(raw, str):
+        continue
+      resolved = _resolve_tool_input_path(raw, run_directory=run_directory)
+      if resolved is None or _path_is_relative_to(resolved, base):
+        continue
+      violation = dict(row)
+      violation["scope_violation"] = {
+        "input_key": key,
+        "input_path": raw,
+        "resolved_path": str(resolved),
+        "allowed_root": str(base),
+      }
+      violations.append(violation)
+  return violations
+
+
 def _awaiting_terminal_text_after_tools(message: dict[str, Any] | None) -> bool:
   return bool(_tool_rows(message)) and not bool(_extract_message_text_parts(message))
 
@@ -1125,7 +1181,11 @@ def _message_info_fields(message: dict[str, Any] | None) -> dict[str, Any]:
   return out
 
 
-def _summarize_messages_thread(messages: list[dict[str, Any]]) -> dict[str, Any]:
+def _summarize_messages_thread(
+  messages: list[dict[str, Any]],
+  *,
+  run_directory: str | None = None,
+) -> dict[str, Any]:
   user_count = sum(1 for item in messages if _message_role(item) == "user")
   assistant_count = sum(1 for item in messages if _message_role(item) in {"", "assistant"})
   last_message = messages[-1] if messages else None
@@ -1151,6 +1211,7 @@ def _summarize_messages_thread(messages: list[dict[str, Any]]) -> dict[str, Any]
       if state in {"error", "failed", "failure"} or row.get("error"):
         tool_errors.append(row)
     pending_tools = _pending_tool_rows(tool_context)
+  scope_violations = _tool_scope_violation_rows(pending_tools, run_directory=run_directory)
   terminal_text = _extract_message_text_parts(tool_context) if tool_context else ""
   excerpt = _extract_message_excerpt(last_assistant) if last_assistant else ""
   return {
@@ -1163,6 +1224,8 @@ def _summarize_messages_thread(messages: list[dict[str, Any]]) -> dict[str, Any]
     "last_tool_errors": tool_errors[-8:],
     "last_pending_tools": pending_tools[-8:],
     "last_pending_tool_count": len(pending_tools),
+    "last_tool_scope_violations": scope_violations[-8:],
+    "last_tool_scope_violation_count": len(scope_violations),
     "last_assistant_has_tool_calls": bool(tool_calls),
     "last_assistant_terminal_text_chars": len(terminal_text),
     "last_assistant_waiting_terminal_text": bool(tool_calls) and not terminal_text,
@@ -1228,6 +1291,8 @@ def _build_terminal_blocker(
     "last_tool_errors": timeout_summary.get("last_tool_errors") or [],
     "last_pending_tools": timeout_summary.get("last_pending_tools") or [],
     "last_pending_tool_count": timeout_summary.get("last_pending_tool_count", 0),
+    "last_tool_scope_violations": timeout_summary.get("last_tool_scope_violations") or [],
+    "last_tool_scope_violation_count": timeout_summary.get("last_tool_scope_violation_count", 0),
     "diff_count": diff_evidence.get("diff_count", 0),
     "changed_paths": diff_evidence.get("changed_paths") or [],
     "diff_source": diff_evidence.get("diff_source", ""),
@@ -1235,6 +1300,8 @@ def _build_terminal_blocker(
   }
   if timeout_summary.get("last_tool_errors"):
     blocker["primary_reason"] = "tool_error"
+  elif timeout_summary.get("last_tool_scope_violation_count", 0):
+    blocker["primary_reason"] = "tool_scope_violation"
   elif timeout_summary.get("last_pending_tool_count", 0):
     blocker["primary_reason"] = "pending_tool_unresolved"
   elif timeout_summary.get("last_assistant_waiting_terminal_text"):
@@ -1585,7 +1652,7 @@ async def _disconnect_run_result(
     "fork_at_message_id": spec.fork_at_message_id,
   }
   last_event = _last_run_event(run)
-  timeout_summary = _summarize_messages_thread(messages_snapshot)
+  timeout_summary = _summarize_messages_thread(messages_snapshot, run_directory=run.directory)
   partial_assistant_text = str(timeout_summary.get("last_assistant_excerpt") or "")
   if not partial_assistant_text and message is not None:
     partial_assistant_text = _extract_message_excerpt(message)
@@ -1724,7 +1791,7 @@ async def _timeout_run_result(
     "parent_session_id": spec.fork_from_session_id,
     "fork_at_message_id": spec.fork_at_message_id,
   }
-  timeout_summary = _summarize_messages_thread(messages_snapshot)
+  timeout_summary = _summarize_messages_thread(messages_snapshot, run_directory=run.directory)
   sentinel_required = _is_patch_delegate(spec, run.caller_skill)
   if not partial_assistant_text:
     partial_assistant_text = str(timeout_summary.get("last_assistant_excerpt") or "")
@@ -1859,6 +1926,23 @@ async def _execute_run(
         first_delta_emitted = True
         run.emit("first_assistant_or_tool_delta", **delta)
 
+      def _emit_scope_violation_once(pending_tools: list[dict[str, Any]]) -> bool:
+        violations = _tool_scope_violation_rows(pending_tools, run_directory=run.directory)
+        if not violations:
+          return False
+        first = violations[0].get("scope_violation") if isinstance(violations[0], dict) else {}
+        run.emit(
+          "assistant_tool_scope_violation",
+          pending_tool_count=len(pending_tools),
+          violation_count=len(violations),
+          tool=violations[0].get("tool") if isinstance(violations[0], dict) else None,
+          input_key=first.get("input_key") if isinstance(first, dict) else None,
+          input_path=first.get("input_path") if isinstance(first, dict) else None,
+          resolved_path=first.get("resolved_path") if isinstance(first, dict) else None,
+          allowed_root=first.get("allowed_root") if isinstance(first, dict) else None,
+        )
+        return True
+
       async def _deliver_prompt() -> dict[str, Any] | None:
         run.emit("prompt_delivery_started", delivery="sync" if spec.wait else "async")
         if spec.wait:
@@ -1897,7 +1981,10 @@ async def _execute_run(
         if assistant_text:
           message = sync_message
           _emit_first_delta_once(message, assistant_text)
-          if _pending_tool_rows(message) or _awaiting_terminal_text_after_tools(message):
+          pending_tools = _pending_tool_rows(message)
+          if pending_tools and _emit_scope_violation_once(pending_tools):
+            return await _timeout_run_result(run, spec, receipt=receipt, timeout_s=timeout_s)
+          if pending_tools or _awaiting_terminal_text_after_tools(message):
             assistant_text = ""
       if not spec.wait:
         assistant_text, message, delta = await _wait_for_first_assistant_or_tool_delta(
@@ -1910,7 +1997,10 @@ async def _execute_run(
           return await _timeout_run_result(run, spec, receipt=receipt, timeout_s=timeout_s)
         first_delta_emitted = True
         run.emit("first_assistant_or_tool_delta", **delta)
-        if _pending_tool_rows(message) or _awaiting_terminal_text_after_tools(message):
+        pending_tools = _pending_tool_rows(message)
+        if pending_tools and _emit_scope_violation_once(pending_tools):
+          return await _timeout_run_result(run, spec, receipt=receipt, timeout_s=timeout_s)
+        if pending_tools or _awaiting_terminal_text_after_tools(message):
           assistant_text = ""
 
       status_map = await _poll_until_idle(client, run.session_id, deadline=deadline, directory=run.directory)
@@ -1921,6 +2011,8 @@ async def _execute_run(
             client, run.session_id, directory=run.directory
           )
           if pending_tools:
+            if _emit_scope_violation_once(pending_tools):
+              return await _timeout_run_result(run, spec, receipt=receipt, timeout_s=timeout_s)
             run.emit("assistant_tool_pending", pending_tool_count=len(pending_tools))
             await asyncio.sleep(1.0)
             status_map = await client.session_status_map()
