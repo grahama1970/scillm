@@ -988,6 +988,18 @@ def _extract_message_excerpt(message: dict[str, Any], *, max_chars: int = 4000) 
   return extract_assistant_text(message)[:max_chars]
 
 
+def _extract_message_text_parts(message: dict[str, Any], *, max_chars: int = 4000) -> str:
+  """Collect final assistant text parts, excluding reasoning-only preambles."""
+  parts = message.get("parts")
+  chunks: list[str] = []
+  if isinstance(parts, list):
+    for part in parts:
+      if isinstance(part, dict) and part.get("type") == "text" and part.get("text"):
+        chunks.append(str(part["text"]))
+  text = "\n".join(chunks).strip()
+  return text[:max_chars]
+
+
 def _format_message_for_dialog(message: dict[str, Any]) -> str:
   """Render OpenCode message parts as markdown for transport-style dialog."""
   chunks: list[str] = []
@@ -1044,6 +1056,59 @@ def _summarize_message_parts(message: dict[str, Any]) -> list[dict[str, Any]]:
   return rows
 
 
+_TOOL_PART_TYPES = {"tool", "tool-call", "tool_call", "tool-invocation"}
+_PENDING_TOOL_STATUSES = {"", "pending", "queued", "running", "working", "in_progress", "started"}
+_TERMINAL_TOOL_STATUSES = {
+  "cancelled",
+  "canceled",
+  "complete",
+  "completed",
+  "done",
+  "error",
+  "failed",
+  "failure",
+  "rejected",
+  "success",
+}
+
+
+def _tool_state_status(row: dict[str, Any]) -> str:
+  state = row.get("state")
+  if isinstance(state, dict):
+    for key in ("status", "state", "phase"):
+      value = state.get(key)
+      if isinstance(value, str):
+        return value.strip().casefold()
+    return ""
+  if isinstance(state, str):
+    return state.strip().casefold()
+  status = row.get("status")
+  return status.strip().casefold() if isinstance(status, str) else ""
+
+
+def _tool_rows(message: dict[str, Any] | None) -> list[dict[str, Any]]:
+  if not isinstance(message, dict):
+    return []
+  return [row for row in _summarize_message_parts(message) if row.get("type") in _TOOL_PART_TYPES]
+
+
+def _pending_tool_rows(message: dict[str, Any] | None) -> list[dict[str, Any]]:
+  pending: list[dict[str, Any]] = []
+  for row in _tool_rows(message):
+    status = _tool_state_status(row)
+    if row.get("error"):
+      continue
+    if status in _TERMINAL_TOOL_STATUSES:
+      continue
+    if status in _PENDING_TOOL_STATUSES or not status:
+      pending.append(row)
+  return pending
+
+
+def _awaiting_terminal_text_after_tools(message: dict[str, Any] | None) -> bool:
+  return bool(_tool_rows(message)) and not bool(_extract_message_text_parts(message))
+
+
 def _message_info_fields(message: dict[str, Any] | None) -> dict[str, Any]:
   if not isinstance(message, dict):
     return {}
@@ -1069,16 +1134,24 @@ def _summarize_messages_thread(messages: list[dict[str, Any]]) -> dict[str, Any]
     if _message_role(item) in {"", "assistant"}:
       last_assistant = item
       break
+  last_tool_assistant: dict[str, Any] | None = None
+  for item in reversed(messages):
+    if _message_role(item) in {"", "assistant"} and _tool_rows(item):
+      last_tool_assistant = item
+      break
+  tool_context = last_tool_assistant or last_assistant
   info_fields = _message_info_fields(last_assistant or last_message)
   tool_calls: list[dict[str, Any]] = []
   tool_errors: list[dict[str, Any]] = []
-  if last_assistant:
-    for row in _summarize_message_parts(last_assistant):
-      if row.get("type") in {"tool", "tool-call", "tool_call", "tool-invocation"}:
-        tool_calls.append(row)
-        state = str(row.get("state") or "").casefold()
-        if state in {"error", "failed", "failure"} or row.get("error"):
-          tool_errors.append(row)
+  pending_tools: list[dict[str, Any]] = []
+  if tool_context:
+    for row in _tool_rows(tool_context):
+      tool_calls.append(row)
+      state = _tool_state_status(row)
+      if state in {"error", "failed", "failure"} or row.get("error"):
+        tool_errors.append(row)
+    pending_tools = _pending_tool_rows(tool_context)
+  terminal_text = _extract_message_text_parts(tool_context) if tool_context else ""
   excerpt = _extract_message_excerpt(last_assistant) if last_assistant else ""
   return {
     "schema": "scillm.opencode_run.timeout_summary.v1",
@@ -1088,6 +1161,12 @@ def _summarize_messages_thread(messages: list[dict[str, Any]]) -> dict[str, Any]
     "last_assistant_excerpt": excerpt,
     "last_tool_calls": tool_calls[-8:],
     "last_tool_errors": tool_errors[-8:],
+    "last_pending_tools": pending_tools[-8:],
+    "last_pending_tool_count": len(pending_tools),
+    "last_assistant_has_tool_calls": bool(tool_calls),
+    "last_assistant_terminal_text_chars": len(terminal_text),
+    "last_assistant_waiting_terminal_text": bool(tool_calls) and not terminal_text,
+    "last_tool_message": _message_info_fields(last_tool_assistant) if last_tool_assistant else None,
     **info_fields,
   }
 
@@ -1098,15 +1177,13 @@ def _first_assistant_or_tool_delta(messages: list[dict[str, Any]]) -> tuple[str,
     if _message_role(item) not in {"", "assistant"}:
       continue
     text = _extract_message_excerpt(item)
-    tool_calls = [
-      row
-      for row in _summarize_message_parts(item)
-      if row.get("type") in {"tool", "tool-call", "tool_call", "tool-invocation"}
-    ]
+    tool_calls = _tool_rows(item)
+    pending_tools = _pending_tool_rows(item)
     if text or tool_calls:
       return text, item, {
         "assistant_chars": len(text),
         "tool_count": len(tool_calls),
+        "pending_tool_count": len(pending_tools),
         "first_tool": tool_calls[0] if tool_calls else None,
         **_message_info_fields(item),
       }
@@ -1149,6 +1226,8 @@ def _build_terminal_blocker(
     "last_assistant_excerpt": timeout_summary.get("last_assistant_excerpt") or "",
     "last_tool_calls": timeout_summary.get("last_tool_calls") or [],
     "last_tool_errors": timeout_summary.get("last_tool_errors") or [],
+    "last_pending_tools": timeout_summary.get("last_pending_tools") or [],
+    "last_pending_tool_count": timeout_summary.get("last_pending_tool_count", 0),
     "diff_count": diff_evidence.get("diff_count", 0),
     "changed_paths": diff_evidence.get("changed_paths") or [],
     "diff_source": diff_evidence.get("diff_source", ""),
@@ -1156,6 +1235,10 @@ def _build_terminal_blocker(
   }
   if timeout_summary.get("last_tool_errors"):
     blocker["primary_reason"] = "tool_error"
+  elif timeout_summary.get("last_pending_tool_count", 0):
+    blocker["primary_reason"] = "pending_tool_unresolved"
+  elif timeout_summary.get("last_assistant_waiting_terminal_text"):
+    blocker["primary_reason"] = "tool_completed_without_terminal_text"
   elif timeout_summary.get("message_count", 0) > 1 and not sentinel_observed:
     blocker["primary_reason"] = "timeout_before_terminal_sentinel"
   elif not timeout_summary.get("last_assistant_excerpt"):
@@ -1276,14 +1359,21 @@ async def _latest_assistant_message(
   session_id: str,
   *,
   directory: str | None = None,
-) -> tuple[str, dict[str, Any] | None]:
+) -> tuple[str, dict[str, Any] | None, list[dict[str, Any]]]:
   messages = await client.list_messages(session_id, limit=50, directory=directory)
   for item in reversed(messages):
     if _message_role(item) in {"", "assistant"}:
-      text = _extract_message_excerpt(item)
-      if text:
-        return text, item
-  return "", None
+      text = _extract_message_text_parts(item) or (
+        _extract_message_excerpt(item) if not _tool_rows(item) else ""
+      )
+      pending_tools = _pending_tool_rows(item)
+      if text and not pending_tools:
+        return text, item, []
+      if pending_tools:
+        return "", item, pending_tools
+      if _tool_rows(item):
+        return "", item, []
+  return "", None, []
 
 
 async def _wait_for_first_assistant_or_tool_delta(
@@ -1341,7 +1431,14 @@ async def _maybe_patch_delegate_followup(
     await _poll_until_idle(client, run.session_id, deadline=follow_deadline, directory=run.directory)
   except ProxyError:
     pass
-  text, message = await _latest_assistant_message(client, run.session_id, directory=run.directory)
+  text, message, pending_tools = await _latest_assistant_message(
+    client,
+    run.session_id,
+    directory=run.directory,
+  )
+  if pending_tools:
+    run.emit("patch_delegate_followup_pending_tools", pending_tool_count=len(pending_tools))
+    return assistant_text, message
   if text:
     return text, message
   if isinstance(payload, dict):
@@ -1800,6 +1897,8 @@ async def _execute_run(
         if assistant_text:
           message = sync_message
           _emit_first_delta_once(message, assistant_text)
+          if _pending_tool_rows(message) or _awaiting_terminal_text_after_tools(message):
+            assistant_text = ""
       if not spec.wait:
         assistant_text, message, delta = await _wait_for_first_assistant_or_tool_delta(
           client,
@@ -1811,14 +1910,26 @@ async def _execute_run(
           return await _timeout_run_result(run, spec, receipt=receipt, timeout_s=timeout_s)
         first_delta_emitted = True
         run.emit("first_assistant_or_tool_delta", **delta)
+        if _pending_tool_rows(message) or _awaiting_terminal_text_after_tools(message):
+          assistant_text = ""
 
       status_map = await _poll_until_idle(client, run.session_id, deadline=deadline, directory=run.directory)
 
       if not assistant_text:
         while time.monotonic() < deadline:
-          assistant_text, message = await _latest_assistant_message(
+          assistant_text, message, pending_tools = await _latest_assistant_message(
             client, run.session_id, directory=run.directory
           )
+          if pending_tools:
+            run.emit("assistant_tool_pending", pending_tool_count=len(pending_tools))
+            await asyncio.sleep(1.0)
+            status_map = await client.session_status_map()
+            continue
+          if _awaiting_terminal_text_after_tools(message):
+            run.emit("assistant_waiting_for_terminal_text")
+            await asyncio.sleep(1.0)
+            status_map = await client.session_status_map()
+            continue
           if assistant_text:
             _emit_first_delta_once(message, assistant_text)
             break
@@ -1828,6 +1939,8 @@ async def _execute_run(
               break
           await asyncio.sleep(1.0)
           status_map = await client.session_status_map()
+      if not assistant_text:
+        return await _timeout_run_result(run, spec, receipt=receipt, timeout_s=timeout_s)
       if not _patch_delegate_terminal_sentinel(assistant_text):
         assistant_text, follow_message = await _maybe_patch_delegate_followup(
           client,

@@ -966,6 +966,132 @@ async def test_execute_run_emits_prompt_delivery_and_first_delta_events(tmp_path
     assert "first_assistant_or_tool_delta" in events
 
 
+@pytest.mark.asyncio
+async def test_execute_run_does_not_complete_while_tool_call_pending(tmp_path: Path) -> None:
+    from scillm.proxy import opencode_serve_api as api_mod
+
+    run = OpenCodeServeRun(
+        run_id="oc-pending-tool",
+        artifact_root=tmp_path,
+        caller_skill="pdf-lab",
+        agent="build",
+        session_id="sess-pending-tool",
+        request_payload={"prompt": "patch"},
+        directory=str(tmp_path),
+    )
+    spec = OpenCodeRunRequest(prompt="patch", agent="build", wait=False, timeout_s=10)
+    receipt = SkillViewReceipt((), (), (), None)
+    pending_message = {
+        "info": {"role": "assistant", "id": "msg-1"},
+        "parts": [
+            {"type": "reasoning", "text": "I will inspect the file first."},
+            {
+                "type": "tool",
+                "tool": "read",
+                "state": {"status": "pending", "input": {}, "raw": ""},
+            },
+        ],
+    }
+    completed_message = {
+        "info": {"role": "assistant", "id": "msg-1"},
+        "parts": [
+            {"type": "reasoning", "text": "I inspected the file and found the issue."},
+            {
+                "type": "tool",
+                "tool": "read",
+                "state": {"status": "completed", "input": {"filePath": "src/foo.py"}, "raw": ""},
+            },
+            {"type": "text", "text": "PATCH_DELEGATE_BLOCKED reason=no writable target in fixture"},
+        ],
+    }
+
+    mock_client = AsyncMock()
+    mock_client.__aenter__.return_value = mock_client
+    mock_client.__aexit__.return_value = None
+    mock_client.send_prompt_async = AsyncMock(return_value=None)
+    mock_client.list_messages = AsyncMock(side_effect=[[pending_message], [pending_message], [completed_message]])
+    mock_client.session_status_map = AsyncMock(return_value={"sess-pending-tool": {"status": "idle"}})
+    mock_client.diff = AsyncMock(return_value=[])
+
+    with patch("scillm.proxy.opencode_serve_api.OpenCodeServeClient", return_value=mock_client):
+        result = await api_mod._execute_run(run, spec, skill_receipt=receipt)
+
+    assert result["status"] == "completed"
+    assert "PATCH_DELEGATE_BLOCKED" in result["assistant_text"]
+    assert mock_client.list_messages.await_count >= 3
+    events = [
+        json.loads(line)["event"]
+        for line in run.events_path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    assert "first_assistant_or_tool_delta" in events
+    assert "assistant_tool_pending" in events
+    assert events.index("assistant_tool_pending") < events.index("run_completed")
+
+
+@pytest.mark.asyncio
+async def test_execute_run_times_out_when_tool_completes_without_terminal_text(tmp_path: Path) -> None:
+    from scillm.proxy import opencode_serve_api as api_mod
+
+    run = OpenCodeServeRun(
+        run_id="oc-completed-tool-no-text",
+        artifact_root=tmp_path,
+        caller_skill="pdf-lab",
+        agent="build",
+        session_id="sess-completed-tool-no-text",
+        request_payload={"prompt": "patch"},
+        directory=str(tmp_path),
+    )
+    spec = OpenCodeRunRequest(prompt="patch", agent="build", wait=False, timeout_s=10)
+    receipt = SkillViewReceipt((), (), (), None)
+    completed_tool_message = {
+        "info": {"role": "assistant", "id": "msg-1"},
+        "parts": [
+            {"type": "reasoning", "text": "I ran the requested command."},
+            {
+                "type": "tool",
+                "tool": "bash",
+                "state": {
+                    "status": "completed",
+                    "input": {"command": "sleep 8 && echo ISSUE9_SLEEP_DONE"},
+                    "output": "ISSUE9_SLEEP_DONE\n",
+                },
+            },
+        ],
+    }
+
+    mock_client = AsyncMock()
+    mock_client.__aenter__.return_value = mock_client
+    mock_client.__aexit__.return_value = None
+    mock_client.send_prompt_async = AsyncMock(return_value=None)
+    mock_client.list_messages = AsyncMock(return_value=[completed_tool_message])
+    mock_client.session_status_map = AsyncMock(return_value={"sess-completed-tool-no-text": {"status": "idle"}})
+    mock_client.diff = AsyncMock(return_value=[])
+
+    clock = {"value": 0.0}
+
+    def _advance_clock() -> float:
+        clock["value"] += 0.5
+        return clock["value"]
+
+    with (
+        patch("scillm.proxy.opencode_serve_api.OpenCodeServeClient", return_value=mock_client),
+        patch("scillm.proxy.opencode_serve_api.time.monotonic", side_effect=_advance_clock),
+        patch("scillm.proxy.opencode_serve_api.asyncio.sleep", AsyncMock()),
+    ):
+        result = await api_mod._execute_run(run, spec, skill_receipt=receipt)
+
+    assert result["status"] == "timeout"
+    assert result["terminal_blocker"]["primary_reason"] == "tool_completed_without_terminal_text"
+    events = [
+        json.loads(line)["event"]
+        for line in run.events_path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    assert "assistant_waiting_for_terminal_text" in events
+    assert "run_completed" not in events
+
+
 def test_opencode_run_timeout_returns_terminal_status(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("SCILLM_OPENCODE_SERVE_OUTPUT_DIR", str(tmp_path))
 
