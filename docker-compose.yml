@@ -39,6 +39,11 @@ services:
       - "./local/proxy_server_config.yaml:/app/config.yaml:ro"
       - "./chutes/middleware:/app/chutes/middleware"
       - "/run/user/1000/embry/memory.sock:/run/user/1000/embry/memory.sock"
+      # OpenCode transport receives host workspace paths; the proxy must see the
+      # same paths to verify materialized changes instead of reporting
+      # workspace_missing.
+      - "${HOME}/workspace:/home/graham/workspace"
+      - "/mnt/storage12tb:/mnt/storage12tb"
     depends_on:
       redis:
         condition: service_healthy
