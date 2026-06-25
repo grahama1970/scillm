@@ -35,9 +35,12 @@ from scillm.proxy.opencode_transport import (
     assistant_text_blocker,
     enrich_event,
     git_diff_empty,
+    git_status_snapshot,
     is_opencode_message_aborted_error,
+    materialized_changes_since,
     message_id_from_payload,
     opencode_message_error,
+    workspace_write_lacks_materialization,
 )
 from scillm.proxy.opencode_transport_events import (
     merge_reasoning_excerpt,
@@ -115,6 +118,7 @@ class TransportMessageStream:
         self.reasoning_excerpt = ""
         self.idle_seen = False
         self.seen_permission_ids: set[str] = set()
+        self.materialization_before: dict[str, Any] | None = None
         self._send_task: asyncio.Task[None] | None = None
         self._relay_task: asyncio.Task[None] | None = None
 
@@ -406,6 +410,30 @@ class TransportMessageStream:
             self.child.delivery_state = DELIVERY_ACTED
             self.transport._update_child(self.state, self.child)
 
+        materialization = materialized_changes_since(
+            Path(self.state.workspace),
+            self.materialization_before,
+        )
+        if (
+            self.child.mode == "workspace_write"
+            and self.assistant_text
+            and workspace_write_lacks_materialization(materialization, diff)
+        ):
+            return self.transport.mark_child_blocked(
+                self.state,
+                self.child,
+                reason="no_materialized_change",
+                message_id=self.message_id,
+                payload=self.message_payload or {},
+                effective_model=self.model or "",
+                extra={
+                    "failure_type": "materialization_missing",
+                    "materialization": materialization,
+                    "opencode_diff": diff,
+                    "assistant_text_trusted_as_change_proof": False,
+                },
+            )
+
         if self.child.mode == "propose_patches" and not git_diff_empty(Path(self.state.workspace)):
             self.child.delivery_state = DELIVERY_FAILED
             self.transport._update_child(self.state, self.child)
@@ -446,6 +474,7 @@ class TransportMessageStream:
             "assistant_text": self.assistant_text,
             "reasoning_excerpt": self.reasoning_excerpt,
             "diff": diff,
+            "materialization": materialization,
             "message": self.message_payload,
             "events_stream": (
                 f"/v1/scillm/opencode/transport/runs/{self.state.transport_run_id}/events/stream"
@@ -488,6 +517,7 @@ class TransportMessageStream:
         await self._emit({"event_type": "message.queued", "severity": "info", "prompt": self.prompt})
 
         self._relay_task = asyncio.create_task(self._relay())
+        self.materialization_before = git_status_snapshot(Path(self.state.workspace))
         self._send_task = asyncio.create_task(self._send_message())
         started = time.monotonic()
         next_heartbeat = started + self.heartbeat_s

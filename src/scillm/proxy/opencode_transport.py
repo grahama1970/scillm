@@ -1086,6 +1086,101 @@ def git_diff_empty(workspace: Path) -> bool:
         return False
 
 
+def git_status_snapshot(workspace: Path) -> dict[str, Any]:
+    """Return git status rows scoped to workspace, preserving preexisting dirt."""
+    try:
+        resolved_workspace = workspace.resolve(strict=False)
+        if not resolved_workspace.exists():
+            return {
+                "is_git": False,
+                "workspace": str(resolved_workspace),
+                "workspace_exists": False,
+                "entries": [],
+                "error": "workspace_missing",
+            }
+        env = os.environ.copy()
+        env["GIT_CONFIG_COUNT"] = "1"
+        env["GIT_CONFIG_KEY_0"] = "safe.directory"
+        env["GIT_CONFIG_VALUE_0"] = str(resolved_workspace)
+        root_proc = subprocess.run(
+            ["git", "-C", str(resolved_workspace), "rev-parse", "--show-toplevel"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            env=env,
+        )
+        if root_proc.returncode != 0:
+            return {
+                "is_git": False,
+                "workspace": str(resolved_workspace),
+                "workspace_exists": True,
+                "entries": [],
+                "error": root_proc.stderr.strip() or None,
+            }
+        git_root = Path(root_proc.stdout.strip()).resolve()
+        env["GIT_CONFIG_VALUE_0"] = str(git_root)
+        try:
+            rel = os.path.relpath(resolved_workspace, git_root)
+            pathspec = "." if rel == "." else rel
+        except ValueError:
+            pathspec = str(resolved_workspace)
+        proc = subprocess.run(
+            ["git", "-C", str(git_root), "status", "--porcelain=v1", "--untracked-files=all", "--", pathspec],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            env=env,
+        )
+        if proc.returncode != 0:
+            return {"is_git": True, "entries": [], "error": proc.stderr.strip()}
+        entries = sorted(line for line in proc.stdout.splitlines() if line.strip())
+        return {
+            "is_git": True,
+            "workspace": str(resolved_workspace),
+            "workspace_exists": True,
+            "git_root": str(git_root),
+            "pathspec": pathspec,
+            "entries": entries,
+        }
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return {
+            "is_git": False,
+            "workspace": str(workspace),
+            "workspace_exists": False,
+            "entries": [],
+            "error": str(exc),
+        }
+
+
+def materialized_changes_since(workspace: Path, before: dict[str, Any] | None) -> dict[str, Any]:
+    after = git_status_snapshot(workspace)
+    before_entries = set((before or {}).get("entries") or [])
+    after_entries = set(after.get("entries") or [])
+    new_entries = sorted(after_entries - before_entries)
+    return {
+        "is_git": bool(after.get("is_git")),
+        "workspace": after.get("workspace") or (before or {}).get("workspace"),
+        "workspace_exists": bool(after.get("workspace_exists")),
+        "git_root": after.get("git_root"),
+        "pathspec": after.get("pathspec"),
+        "before_count": len(before_entries),
+        "after_count": len(after_entries),
+        "new_entries": new_entries,
+        "materialized_change": bool(new_entries),
+        "error": after.get("error") or (before or {}).get("error"),
+    }
+
+
+def workspace_write_lacks_materialization(materialization: dict[str, Any], diff: Any) -> bool:
+    if materialization.get("materialized_change"):
+        return False
+    if materialization.get("is_git"):
+        return True
+    if not materialization.get("workspace_exists"):
+        return True
+    return not bool(diff)
+
+
 class OpenCodeTransport:
     """Parent/child session orchestration with sync-only authoritative messages."""
 
@@ -1665,6 +1760,7 @@ class OpenCodeTransport:
             )
             overlay = build_skills_system_overlay(receipt)
             system = merge_system_prompt(system, overlay)
+        materialization_before = git_status_snapshot(Path(state.workspace))
         payload = await client.send_message(
             child.child_session_id,
             agent=child.agent,
@@ -1798,6 +1894,27 @@ class OpenCodeTransport:
             child.delivery_state = DELIVERY_ACTED
             self._update_child(state, child)
 
+        materialization = materialized_changes_since(Path(state.workspace), materialization_before)
+        if (
+            child.mode == "workspace_write"
+            and assistant_text
+            and workspace_write_lacks_materialization(materialization, diff)
+        ):
+            return self.mark_child_blocked(
+                state,
+                child,
+                reason="no_materialized_change",
+                message_id=message_id,
+                payload=payload if isinstance(payload, dict) else {},
+                effective_model=effective_model,
+                extra={
+                    "failure_type": "materialization_missing",
+                    "materialization": materialization,
+                    "opencode_diff": diff,
+                    "assistant_text_trusted_as_change_proof": False,
+                },
+            )
+
         if child.mode == "propose_patches" and not git_diff_empty(Path(state.workspace)):
             child.delivery_state = DELIVERY_FAILED
             self._update_child(state, child)
@@ -1824,6 +1941,7 @@ class OpenCodeTransport:
             "delivery_state": child.delivery_state,
             "assistant_text": assistant_text,
             "diff": diff,
+            "materialization": materialization,
             "message": payload,
         }
         self.store.append_event(
@@ -2266,7 +2384,7 @@ class OpenCodeTransport:
                 model=effective_model,
             ),
         )
-        return {
+        result = {
             "schema": "scillm.opencode_transport.message.v1",
             "transport_run_id": state.transport_run_id,
             "subagent_run_id": child.subagent_run_id,
@@ -2277,6 +2395,9 @@ class OpenCodeTransport:
             "diff": [],
             "message": payload,
         }
+        if extra_event:
+            result.update(extra_event)
+        return result
 
     async def _latest_assistant(
         self,

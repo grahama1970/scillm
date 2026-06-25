@@ -224,6 +224,37 @@ def test_transport_capabilities_endpoint(tmp_path: Path, monkeypatch: pytest.Mon
     assert body["opencode_version"] == "1.15.13"
 
 
+def test_loop2_capabilities_endpoint_projects_required_transport_surfaces(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("SCILLM_OPENCODE_SERVE_OUTPUT_DIR", str(tmp_path))
+    app = FastAPI()
+    app.add_exception_handler(ProxyError, proxy_error_handler)
+    app.include_router(create_opencode_serve_router(lambda _request: None), prefix="/v1/scillm")
+
+    class _Settings:
+        base_url = "http://127.0.0.1:4098"
+
+    mock_client = AsyncMock()
+    mock_client.__aenter__.return_value = mock_client
+    mock_client.__aexit__.return_value = None
+    mock_client.settings = _Settings()
+    mock_client.health.return_value = {"health": {"version": "1.15.13"}}
+
+    with patch("scillm.proxy.opencode_transport_api.OpenCodeServeClient", return_value=mock_client):
+        client = TestClient(app)
+        resp = client.get(
+            "/v1/scillm/loop2/capabilities",
+            headers={"X-Caller-Skill": "loop2"},
+        )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["schema"] == "scillm.loop2.capabilities.v1"
+    assert body["loop2_api"] is True
+    assert body["caller_skill_header_required"] is True
+    assert "POST /v1/scillm/opencode/transport/runs" in body["required_endpoints"]
+
+
 def test_transport_create_and_message_flow(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("SCILLM_OPENCODE_SERVE_OUTPUT_DIR", str(tmp_path))
     app = FastAPI()
@@ -892,6 +923,130 @@ async def test_post_message_sync_blocks_on_concrete_worker_blocker(
     assert events[-1]["blocked_reason"] == "permission_denied"
 
 
+@pytest.mark.asyncio
+async def test_post_message_sync_blocks_workspace_write_without_materialized_change(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from scillm.proxy.opencode_transport import ChildAttempt, TransportState, TransportStore
+
+    subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.email", "test@example.invalid"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=tmp_path, check=True)
+    (tmp_path / "target.txt").write_text("before\n", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "-m", "initial"], cwd=tmp_path, check=True, capture_output=True)
+
+    monkeypatch.setenv("SCILLM_OPENCODE_TRANSPORT_WORKER_MODEL", "gpt-5.5")
+    store = TransportStore(tmp_path / "transport")
+    transport = OpenCodeTransport(store=store)
+    transport.prepare_worker_prompt = AsyncMock(return_value=("change target", []))
+    transport.mirror_worker_dispatch = AsyncMock()
+    transport.mirror_worker_completed = AsyncMock()
+    child = ChildAttempt(
+        subagent_run_id="otr-no-change-patch-1",
+        role="patch",
+        child_session_id="ses-child",
+        agent="build",
+        attempt_id=1,
+        mode="workspace_write",
+        agent_id="patch-worker",
+    )
+    state = TransportState(
+        transport_run_id="otr-no-change",
+        dag_node_id="node-1",
+        parent_session_id="ses-parent",
+        workspace=str(tmp_path),
+        opencode_url="http://127.0.0.1:4098",
+        active_subagent_run_id=child.subagent_run_id,
+        children=[child.to_dict()],
+    )
+    store.save(state)
+    payload = {
+        "info": {"id": "msg-no-change", "role": "assistant"},
+        "parts": [{"type": "text", "text": "I changed target.txt."}],
+    }
+    client = AsyncMock()
+    client.session_status_map = AsyncMock(return_value={})
+    client.send_message = AsyncMock(return_value=payload)
+    client.diff = AsyncMock(return_value=[])
+
+    result = await transport.post_message_sync(
+        client,
+        state,
+        child,
+        prompt="do work",
+        timeout_s=30,
+        wait_idle=False,
+    )
+
+    assert result["delivery_state"] == "blocked"
+    assert result["failure_type"] == "materialization_missing"
+    assert result["blocked_reason"] == "no_materialized_change"
+    assert result["assistant_text_trusted_as_change_proof"] is False
+    assert result["materialization"]["materialized_change"] is False
+    assert result["opencode_diff"] == []
+    transport.mirror_worker_completed.assert_not_awaited()
+    loaded = store.load("otr-no-change")
+    assert loaded.active_subagent_run_id == ""
+    assert loaded.children[0]["delivery_state"] == "blocked"
+
+
+@pytest.mark.asyncio
+async def test_post_message_sync_blocks_workspace_write_when_workspace_uninspectable(tmp_path: Path) -> None:
+    from scillm.proxy.opencode_transport import ChildAttempt, TransportState, TransportStore
+
+    missing_workspace = tmp_path / "missing-workspace"
+    store = TransportStore(tmp_path / "transport")
+    transport = OpenCodeTransport(store=store)
+    transport.prepare_worker_prompt = AsyncMock(return_value=("change target", []))
+    transport.mirror_worker_dispatch = AsyncMock()
+    transport.mirror_worker_completed = AsyncMock()
+    child = ChildAttempt(
+        subagent_run_id="otr-missing-workspace-patch-1",
+        role="patch",
+        child_session_id="ses-child",
+        agent="build",
+        attempt_id=1,
+        mode="workspace_write",
+        agent_id="patch-worker",
+    )
+    state = TransportState(
+        transport_run_id="otr-missing-workspace",
+        dag_node_id="node-1",
+        parent_session_id="ses-parent",
+        workspace=str(missing_workspace),
+        opencode_url="http://127.0.0.1:4098",
+        active_subagent_run_id=child.subagent_run_id,
+        children=[child.to_dict()],
+    )
+    store.save(state)
+    payload = {
+        "info": {"id": "msg-no-change", "role": "assistant"},
+        "parts": [{"type": "text", "text": "I changed target.txt."}],
+    }
+    client = AsyncMock()
+    client.session_status_map = AsyncMock(return_value={})
+    client.send_message = AsyncMock(return_value=payload)
+    client.diff = AsyncMock(return_value=[])
+
+    result = await transport.post_message_sync(
+        client,
+        state,
+        child,
+        prompt="do work",
+        timeout_s=30,
+        wait_idle=False,
+    )
+
+    assert result["delivery_state"] == "blocked"
+    assert result["failure_type"] == "materialization_missing"
+    assert result["blocked_reason"] == "no_materialized_change"
+    assert result["materialization"]["workspace_exists"] is False
+    assert result["materialization"]["error"] == "workspace_missing"
+    assert result["opencode_diff"] == []
+    transport.mirror_worker_completed.assert_not_awaited()
+
+
 def test_model_body_value_maps_gpt_alias_to_provider_object() -> None:
     from scillm.proxy.opencode_serve import _model_body_value
 
@@ -1023,6 +1178,80 @@ def test_transport_message_stream_rejects_nonempty_git_diff_in_propose_patches(
             body = "".join(resp.iter_text())
     assert "write_allowlist_violation" in body or "empty git diff" in body
     assert "message.completed" not in body
+
+
+@pytest.mark.asyncio
+async def test_transport_message_stream_blocks_workspace_write_without_materialized_change(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from scillm.proxy.opencode_transport import ChildAttempt, TransportState, TransportStore
+
+    subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.email", "test@example.invalid"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=tmp_path, check=True)
+    (tmp_path / "target.txt").write_text("before\n", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "-m", "initial"], cwd=tmp_path, check=True, capture_output=True)
+
+    store = TransportStore(tmp_path / "transport")
+    transport = OpenCodeTransport(store=store)
+    transport.prepare_worker_prompt = AsyncMock(return_value=("change target", []))
+    transport.mirror_worker_dispatch = AsyncMock()
+    transport.mirror_worker_completed = AsyncMock()
+    child = ChildAttempt(
+        subagent_run_id="otr-stream-no-change-patch-1",
+        role="patch",
+        child_session_id="ses-child",
+        agent="build",
+        attempt_id=1,
+        mode="workspace_write",
+        agent_id="patch-worker",
+    )
+    state = TransportState(
+        transport_run_id="otr-stream-no-change",
+        dag_node_id="node-1",
+        parent_session_id="ses-parent",
+        workspace=str(tmp_path),
+        opencode_url="http://127.0.0.1:4098",
+        active_subagent_run_id=child.subagent_run_id,
+        children=[child.to_dict()],
+    )
+    store.save(state)
+    payload = {
+        "info": {"id": "msg-no-change", "role": "assistant"},
+        "parts": [{"type": "text", "text": "I changed target.txt."}],
+    }
+    client = AsyncMock()
+    client.session_status_map = AsyncMock(return_value={})
+    client.send_message = AsyncMock(return_value=payload)
+    client.diff = AsyncMock(return_value=[])
+    client.iter_event_stream = lambda: _iter_opencode_sse(
+        _opencode_sse_bytes("session.idle", session_id="ses-child")
+    )
+    client.abort = AsyncMock(return_value=True)
+
+    rows = [
+        row
+        async for row in transport.iter_transport_message_stream(
+            client,
+            state,
+            child,
+            prompt="do work",
+            timeout_s=30,
+            heartbeat_s=1,
+            wait_idle=False,
+        )
+    ]
+
+    terminal = rows[-1]
+    assert terminal["event_type"] == "message.blocked"
+    result = terminal["result"]
+    assert result["delivery_state"] == "blocked"
+    assert result["failure_type"] == "materialization_missing"
+    assert result["blocked_reason"] == "no_materialized_change"
+    assert result["materialization"]["materialized_change"] is False
+    assert result["opencode_diff"] == []
+    transport.mirror_worker_completed.assert_not_awaited()
 
 def test_parse_dialog_speaker_and_human_classification() -> None:
     from scillm.proxy.opencode_transport import (
