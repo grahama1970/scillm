@@ -10,8 +10,18 @@ caller_profiles:
     allow_streaming: false
     max_timeout_s: 60
 
+  create-evidence-case:
+    allowed_models: [gemini-flash]
+    deny_model_patterns: ["gpt-*", "codex-*", "claude-*", "vlm-*", "qra-*"]
+    allow_tools: false
+    allow_files: false
+    allow_images: false
+    allow_pdfs: false
+    allow_streaming: false
+    max_timeout_s: 60
+
   pdf-extraction-review:
-    allowed_models: [vlm-chutes, vlm-claude, gpt-5.5]
+    allowed_models: [vlm-claude, gpt-5.5]
     allow_images: true
     allow_pdfs: true
     allow_tools: false

@@ -4,6 +4,19 @@ import httpx
 import pytest
 
 from chutes.middleware.caller_policy import CallerPolicyMiddleware, policy_target_model, request_capabilities
+
+
+def test_example_profile_routes_evidence_case_to_gemini_only() -> None:
+    from pathlib import Path
+
+    import yaml
+
+    profile_path = Path(__file__).parents[1] / "registry" / "caller_profiles.example.yaml"
+    profile = yaml.safe_load(profile_path.read_text())["caller_profiles"]["create-evidence-case"]
+
+    assert profile["allowed_models"] == ["gemini-flash"]
+    assert "qra-*" in profile["deny_model_patterns"]
+    assert profile["allow_streaming"] is False
 from scillm.proxy.config import CallerProfile, Deployment, GeneralSettings, ModelGroup, ProxyConfig, load_config
 from scillm.proxy.middleware import MiddlewareReject
 from scillm.proxy import app as proxy_app
@@ -12,7 +25,7 @@ from scillm.proxy import app as proxy_app
 def _request(
     *,
     caller: str = "create-qras",
-    model: str = "text",
+    model: str = "qra-deepseek-pool",
     messages: object | None = None,
     metadata: dict | None = None,
     **extra,
@@ -32,7 +45,7 @@ def _policy_config() -> ProxyConfig:
     return ProxyConfig(
         caller_profiles={
             "create-qras": CallerProfile(
-                allowed_models=["qra-deepseek-pool", "text"],
+                allowed_models=["qra-deepseek-pool"],
                 deny_model_patterns=["gpt-*", "claude-*", "vlm-*"],
                 require_scillm_metadata=["batch_id", "item_id"],
                 allow_tools=False,
@@ -43,7 +56,7 @@ def _policy_config() -> ProxyConfig:
                 max_timeout_s=60,
             ),
             "pdf-extraction-review": CallerProfile(
-                allowed_models=["vlm", "text-gemini"],
+                allowed_models=["vlm", "gemini-flash"],
                 allow_tools=False,
                 allow_images=True,
                 allow_pdfs=True,
@@ -111,7 +124,7 @@ async def test_profile_rejects_tools_and_files():
     }]
     with pytest.raises(MiddlewareReject) as image_exc:
         await file_middleware.pre_call(
-            _request(caller="no-files", messages=image_messages)
+            _request(caller="no-files", model="vlm", messages=image_messages)
         )
     assert "files are not allowed" in image_exc.value.message
 
@@ -154,7 +167,7 @@ async def test_deny_patterns_apply_to_fallback_chain():
 
 def test_multimodal_text_request_policy_target_is_vlm():
     request = _request(
-        model="text",
+        model="vlm",
         messages=[{
             "role": "user",
             "content": [
@@ -173,13 +186,13 @@ def test_config_loads_caller_profiles(tmp_path):
     config_path.write_text(
         """
 model_list:
-  - model_name: text
+  - model_name: qra-deepseek-pool
     scillm_params:
-      model: deepseek-ai/DeepSeek-V3.2-TEE
+      model: Qwen/Qwen3.6-27B-TEE
       api_base: https://llm.chutes.ai/v1
 caller_profiles:
   create-qras:
-    allowed_models: [qra-deepseek-pool, text]
+    allowed_models: [qra-deepseek-pool]
     require_scillm_metadata: [batch_id, item_id]
     allow_tools: "false"
     allow_files: false
@@ -204,12 +217,12 @@ async def test_capabilities_endpoint_reports_profiles_and_adapters(monkeypatch: 
         ProxyConfig(
             general=GeneralSettings(master_key=""),
             model_groups={
-                "text": ModelGroup(
-                    name="text",
-                    deployments=[Deployment(model="deepseek-ai/DeepSeek-V3.2-TEE", api_base="https://llm.chutes.ai/v1")],
+                "Qwen/Qwen3.6-27B-TEE": ModelGroup(
+                    name="Qwen/Qwen3.6-27B-TEE",
+                    deployments=[Deployment(model="Qwen/Qwen3.6-27B-TEE", api_base="https://llm.chutes.ai/v1")],
                 )
             },
-            caller_profiles={"worker": CallerProfile(allowed_models=["text"], allow_tools=False)},
+            caller_profiles={"worker": CallerProfile(allowed_models=["Qwen/Qwen3.6-27B-TEE"], allow_tools=False)},
         ),
     )
 
@@ -220,6 +233,36 @@ async def test_capabilities_endpoint_reports_profiles_and_adapters(monkeypatch: 
     assert response.status_code == 200
     data = response.json()
     assert data["version"] == 1
-    assert "text" in data["model_groups"]
+    assert "Qwen/Qwen3.6-27B-TEE" in data["model_groups"]
     assert "opencode_go" in data["adapters"]
     assert data["caller_profiles"]["worker"]["allow_tools"] is False
+
+
+def test_chutes_config_inventory_reports_stale_provider_models(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(
+        proxy_app,
+        "_config",
+        ProxyConfig(
+            general=GeneralSettings(master_key=""),
+            model_groups={
+                "deepseek-ai/DeepSeek-V3.2-TEE": ModelGroup(
+                    name="deepseek-ai/DeepSeek-V3.2-TEE",
+                    deployments=[Deployment(model="deepseek-ai/DeepSeek-V3.2-TEE", api_base="https://llm.chutes.ai/v1")],
+                ),
+                "deepseek-ai/DeepSeek-V3.1-TEE": ModelGroup(
+                    name="deepseek-ai/DeepSeek-V3.1-TEE",
+                    deployments=[Deployment(model="deepseek-ai/DeepSeek-V3.1-TEE", api_base="https://llm.chutes.ai/v1")],
+                ),
+            },
+            fallbacks={"deepseek-ai/DeepSeek-V3.2-TEE": ["deepseek-ai/DeepSeek-V3.1-TEE"]},
+            aliases={},
+        ),
+    )
+
+    inventory = proxy_app._chutes_config_inventory(["deepseek-ai/DeepSeek-V3.2-TEE"])
+
+    assert inventory["status"] == "config_drift"
+    assert inventory["configured_available_models"] == ["deepseek-ai/DeepSeek-V3.2-TEE"]
+    assert inventory["configured_unavailable_models"] == ["deepseek-ai/DeepSeek-V3.1-TEE"]
+    assert inventory["unavailable_fallback_targets"] == ["deepseek-ai/DeepSeek-V3.1-TEE"]
+    assert inventory["alias_resolutions"] == {}
