@@ -494,6 +494,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--caller-skill", default=os.getenv("X_CALLER_SKILL", "scillm-generate-image"))
     parser.add_argument("--timeout-s", type=float, default=None)
+    parser.add_argument(
+        "--first-event-timeout-s",
+        type=float,
+        default=float(os.getenv("SCILLM_IMAGE_FIRST_EVENT_TIMEOUT_S", "30")),
+        help="Maximum wait for the first Codex JSON event.",
+    )
     parser.add_argument("--json", action="store_true", dest="json_out")
     return parser
 
@@ -508,6 +514,7 @@ def main(argv: list[str] | None = None) -> int:
                 cwd=args.cwd,
                 receipt_path=args.receipt,
                 timeout_s=args.timeout_s,
+                first_event_s=args.first_event_timeout_s,
                 events_out=args.events_out,
             )
         else:
