@@ -6,7 +6,7 @@ import pytest
 from chutes.middleware.caller_policy import CallerPolicyMiddleware, policy_target_model, request_capabilities
 
 
-def test_example_profile_routes_evidence_case_to_gemini_only() -> None:
+def test_example_profile_limits_evidence_case_to_approved_live_lanes() -> None:
     from pathlib import Path
 
     import yaml
@@ -14,7 +14,10 @@ def test_example_profile_routes_evidence_case_to_gemini_only() -> None:
     profile_path = Path(__file__).parents[1] / "registry" / "caller_profiles.example.yaml"
     profile = yaml.safe_load(profile_path.read_text())["caller_profiles"]["create-evidence-case"]
 
-    assert profile["allowed_models"] == ["gemini-flash"]
+    assert profile["allowed_models"] == [
+        "gemini-flash",
+        "deepseek-ai/DeepSeek-V3.2-TEE",
+    ]
     assert "qra-*" in profile["deny_model_patterns"]
     assert profile["allow_streaming"] is False
 from scillm.proxy.config import CallerProfile, Deployment, GeneralSettings, ModelGroup, ProxyConfig, load_config

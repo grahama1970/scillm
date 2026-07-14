@@ -11,7 +11,7 @@ caller_profiles:
     max_timeout_s: 60
 
   create-evidence-case:
-    allowed_models: [gemini-flash]
+    allowed_models: [gemini-flash, deepseek-ai/DeepSeek-V3.2-TEE]
     deny_model_patterns: ["gpt-*", "codex-*", "claude-*", "vlm-*", "qra-*"]
     allow_tools: false
     allow_files: false
