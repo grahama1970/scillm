@@ -32,6 +32,7 @@ from scillm.proxy.providers.opencode_go import (
     list_opencode_go_models_from_server,
     static_opencode_go_models,
 )
+from scillm.proxy.providers.codex_models import codex_catalog_payload, discover_codex_models
 from scillm.proxy.router import Router
 from scillm.proxy.router import ProxyError as RouterProxyError
 from scillm.proxy.streaming import DEFAULT_STREAM_HEARTBEAT_S, SSE_HEADERS, sse_liveness_wrapper, stream_response
@@ -2037,7 +2038,8 @@ async def openai_models(request: Request):
         for m in ["claude-sonnet-4-6", "claude-opus-4-6", "claude-haiku-4-5"]:
             auto_models.append({"id": m, "object": "model", "created": int(_start_time), "owned_by": "anthropic-oauth"})
     if is_codex_available():
-        for m in ["gpt-5.5", "gpt-5.3-codex", "gpt-5.2-codex"]:
+        discovered_codex = discover_codex_models()
+        for m in [model.slug for model in discovered_codex] or ["gpt-5.5"]:
             auto_models.append({"id": m, "object": "model", "created": int(_start_time), "owned_by": "codex-oauth"})
     if _config.gemini_api_base:
         for m in ["gemini-2.5-flash", "gemini-2.5-pro", "gemini-3-flash-preview", "gemini-3.1-pro-preview", "gemini-2.5-flash-lite"]:
@@ -2070,6 +2072,8 @@ async def scillm_providers(request: Request):
 
     from scillm.proxy.providers.auth import is_anthropic_available, is_codex_available
 
+    codex_catalog = codex_catalog_payload()
+    codex_models = [str(item["id"]) for item in codex_catalog["models"]]
     providers = {
         "configured": {
             name: {
@@ -2089,7 +2093,8 @@ async def scillm_providers(request: Request):
             "codex": {
                 "available": is_codex_available(),
                 "pattern": "gpt-* | codex-*",
-                "examples": ["gpt-5.5", "gpt-5.3-codex", "gpt-5.2-codex"],
+                "examples": codex_models[:5] or ["gpt-5.5"],
+                "catalog": codex_catalog,
                 "auth": "OAuth via ~/.codex/auth.json",
                 "note": "temperature/max_tokens not supported",
             },

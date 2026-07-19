@@ -32,6 +32,7 @@ from scillm.proxy.config import Deployment, ModelGroup, ProxyConfig, RetryPolicy
 from scillm.proxy.providers.auth import is_anthropic_available, is_codex_available
 from scillm.proxy.providers.claude import claude_completion, claude_completion_stream
 from scillm.proxy.providers.codex import codex_completion, codex_completion_stream
+from scillm.proxy.providers.codex_models import discover_codex_models, resolve_codex_model
 from scillm.proxy.providers.opencode_go import (
     ENDPOINT_CHAT_COMPLETIONS,
     ENDPOINT_MESSAGES,
@@ -543,8 +544,14 @@ class Router:
         # Uses OAuth token from ~/.pi/agent/auth.json.
         _codex_prefixes = ("codex", "gpt", "o1", "o3", "o4")
         if any(name.lower().startswith(p) for p in _codex_prefixes) and is_codex_available():
+            discovered = discover_codex_models()
+            resolved = resolve_codex_model(name, discovered)
+            if discovered and resolved is None:
+                logger.warning("Codex model {!r} is absent from the discovered catalog", name)
+                return None
+            routed_model = resolved.slug if resolved is not None else name
             dep = Deployment(
-                model=name,
+                model=routed_model,
                 api_base="https://api.openai.com",
                 api_key="oauth",
                 timeout=120,
@@ -552,7 +559,7 @@ class Router:
             )
             group = ModelGroup(name=name, deployments=[dep])
             self._config.model_groups[name] = group
-            logger.info("Auto-created Codex OAuth group for model {!r}", name)
+            logger.info("Auto-created Codex OAuth group {!r} routed to {!r}", name, routed_model)
             return group
 
         # Auto-create Gemini group for model names starting with "gemini"

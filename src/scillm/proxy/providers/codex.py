@@ -17,8 +17,24 @@ from loguru import logger
 
 from scillm.proxy.providers import make_chunk_id, sse_chunk, sse_done, sse_format, streaming_timeout
 from scillm.proxy.providers.auth import get_codex_credentials
+from scillm.proxy.providers.codex_models import discover_codex_models, resolve_codex_model
 
 CODEX_API_URL = "https://chatgpt.com/backend-api/codex/responses"
+
+
+def _apply_codex_reasoning(body: dict[str, Any], model: str, effort: Any) -> None:
+    if not isinstance(effort, str) or effort.strip().lower() == "none":
+        return
+    normalized = effort.strip().lower()
+    discovered = discover_codex_models()
+    model_info = resolve_codex_model(model, discovered)
+    if discovered and model_info is not None and normalized not in model_info.reasoning_efforts:
+        allowed = ", ".join(model_info.reasoning_efforts)
+        raise ValueError(
+            f"Codex model {model!r} does not advertise reasoning effort {normalized!r}; "
+            f"available efforts: {allowed}"
+        )
+    body["reasoning"] = {"effort": normalized}
 
 
 def _openai_tools_to_codex(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -257,6 +273,7 @@ async def codex_completion(
         "text": {"verbosity": "medium"},
         "include": ["reasoning.encrypted_content"],
     }
+    _apply_codex_reasoning(body, model, kwargs.get("reasoning_effort"))
     # ChatGPT Codex backend does NOT support: temperature, max_output_tokens, top_p
 
     # Tool use: translate OpenAI Chat tools to Codex Responses API format
@@ -330,6 +347,7 @@ async def codex_completion_stream(
         "text": {"verbosity": "medium"},
         "include": ["reasoning.encrypted_content"],
     }
+    _apply_codex_reasoning(body, model, kwargs.get("reasoning_effort"))
 
     # Tool use: translate OpenAI Chat tools to Codex Responses API format
     if "tools" in kwargs and kwargs["tools"]:
