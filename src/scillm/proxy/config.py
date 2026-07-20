@@ -13,11 +13,13 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit, urlunsplit
 
 import yaml
 from loguru import logger
 
 _ENV_RE = re.compile(r"^os\.environ/([\w|]+)$")
+_OLLAMA_DOCKER_BASE = "http://ollama:11434"
 
 
 # ---------------------------------------------------------------------------
@@ -175,6 +177,68 @@ def _parse_model_groups(model_list: list[dict[str, Any]]) -> dict[str, ModelGrou
     return {name: ModelGroup(name=name, deployments=deps) for name, deps in groups.items()}
 
 
+def _running_in_docker() -> bool:
+    """Return whether the proxy is running inside a Docker-style container."""
+    flag = os.environ.get("SCILLM_RUNNING_IN_DOCKER")
+    if flag is not None:
+        return flag.strip().lower() in {"1", "true", "yes", "on"}
+    return Path("/.dockerenv").exists() or Path("/run/.containerenv").exists()
+
+
+def _with_openai_v1_suffix(base: str) -> str:
+    """Ensure the OpenAI-compatible base URL ends with /v1."""
+    stripped = base.rstrip("/")
+    if stripped.endswith("/v1"):
+        return stripped
+    return f"{stripped}/v1"
+
+
+def _normalize_ollama_base_for_runtime(base: str | None) -> str | None:
+    """Rewrite container-local Ollama loopback URLs to the Compose service DNS."""
+    if not base:
+        return base
+
+    normalized = _with_openai_v1_suffix(base)
+    parsed = urlsplit(normalized)
+    if not _running_in_docker():
+        return normalized
+    if parsed.hostname not in {"127.0.0.1", "localhost", "0.0.0.0"}:
+        return normalized
+    if parsed.port != 11434:
+        return normalized
+
+    docker_base = os.environ.get("SCILLM_DOCKER_OLLAMA_BASE", _OLLAMA_DOCKER_BASE)
+    replacement = urlsplit(_with_openai_v1_suffix(docker_base))
+    return urlunsplit((replacement.scheme, replacement.netloc, replacement.path, "", ""))
+
+
+def _normalize_ollama_deployments_for_runtime(
+    model_groups: dict[str, ModelGroup],
+) -> dict[str, ModelGroup]:
+    """Normalize configured Ollama deployments without mutating dataclasses."""
+    out: dict[str, ModelGroup] = {}
+    for name, group in model_groups.items():
+        deployments: list[Deployment] = []
+        changed = False
+        for dep in group.deployments:
+            normalized_base = _normalize_ollama_base_for_runtime(dep.api_base)
+            if normalized_base != dep.api_base:
+                changed = True
+                deployments.append(
+                    Deployment(
+                        model=dep.model,
+                        api_base=normalized_base,
+                        api_key=dep.api_key,
+                        timeout=dep.timeout,
+                        custom_llm_provider=dep.custom_llm_provider,
+                    )
+                )
+            else:
+                deployments.append(dep)
+        out[name] = ModelGroup(name=group.name, deployments=deployments) if changed else group
+    return out
+
+
 def _parse_fallbacks(fallback_list: list[dict[str, Any]] | None) -> dict[str, list[str]]:
     """Parse fallbacks list-of-single-key-dicts into a flat dict."""
     if not fallback_list:
@@ -288,7 +352,9 @@ def load_config(path: str | Path) -> ProxyConfig:
     resolved = _resolve_dict(raw)
 
     general = _parse_general(resolved.get("general_settings"))
-    model_groups = _parse_model_groups(resolved.get("model_list", []))
+    model_groups = _normalize_ollama_deployments_for_runtime(
+        _parse_model_groups(resolved.get("model_list", []))
+    )
 
     router = resolved.get("router_settings", {})
     fallbacks = _parse_fallbacks(router.get("fallbacks"))
@@ -308,9 +374,7 @@ def load_config(path: str | Path) -> ProxyConfig:
                 ollama_base = dep.api_base
                 break
     if ollama_base:
-        # Ensure /v1 suffix — the openai SDK needs it for correct path construction
-        if not ollama_base.rstrip("/").endswith("/v1"):
-            ollama_base = ollama_base.rstrip("/") + "/v1"
+        ollama_base = _normalize_ollama_base_for_runtime(ollama_base)
         logger.info("Ollama auto-routing enabled (base={})", ollama_base)
 
     # Auto-detect Chutes base URL and API key from env or sniff from text group
