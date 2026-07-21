@@ -285,7 +285,7 @@ Most providers need zero code — just credentials on disk or in `.env`.
 
 After adding credentials, rebuild: `docker compose -p scillm -f deploy/docker/compose.scillm.core.yml up -d --build`
 
-**Check what's working:** `curl http://localhost:4001/v1/scillm/auth -H "Authorization: Bearer sk-dev-proxy-123"`
+**Check what's working:** `SCILLM_PROXY_KEY="${SCILLM_MASTER_KEY:-${LITELLM_MASTER_KEY:-${SCILLM_PROXY_KEY:-sk-dev-proxy-123}}}" curl http://localhost:4001/v1/scillm/auth -H "Authorization: Bearer $SCILLM_PROXY_KEY" -H "X-Caller-Skill: scillm-readme"`
 
 **List OpenCode Go models:** `curl http://localhost:4001/v1/scillm/opencode-go/models -H "Authorization: Bearer sk-dev-proxy-123"` refreshes via the Docker-installed `opencode models --refresh opencode-go` CLI by default, then falls back to `opencode serve` and a built-in registry. The Docker compose mounts the host OpenCode auth/config/cache so the container sees the same connected `opencode-go` provider as your host CLI.
 
@@ -356,7 +356,7 @@ Default compose is aimed at **trusted dev machines**. If you must expose the API
 
 scillm is designed for **local development and trusted networks**. The default configuration uses:
 
-- A static bearer token (`sk-dev-proxy-123`) — set `SCILLM_MASTER_KEY` in `.env` to override.
+- A static bearer token from `SCILLM_MASTER_KEY` / `LITELLM_MASTER_KEY`; the dev default (`sk-dev-proxy-123`) applies only when no override is configured.
 - `network_mode: host` — required for local Ollama access. In production, switch to port mapping (`-p 4001:4001`) behind a reverse proxy with TLS.
 - API keys in `.env` — acceptable for dev. In production, use Docker Secrets, Vault, or your cloud's secrets manager.
 
@@ -825,4 +825,3 @@ Informal name for a **single control plane** for LLM calls. Pronounce it **“sk
 | [`docs/SCILLM_OPENCODE_INTEGRATION.md`](docs/SCILLM_OPENCODE_INTEGRATION.md) | Integrators | Fail-closed control plane; do not call raw serve ports from product code |
 | [`docs/interactive-agents/README.md`](docs/interactive-agents/README.md) | Standing Codex workers | `/v1/scillm/agents/*` handoff → lease → turn; see [routing](docs/interactive-agents/routing.md) |
 | [`docs/SCILLM_EXEC.md`](docs/SCILLM_EXEC.md) | Exec graphs | `scillm exec`, cursor stream-json, exec artifacts |
-

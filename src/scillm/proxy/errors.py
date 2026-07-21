@@ -80,8 +80,9 @@ _ERROR_ADVICE: dict[str, str] = {
         "If batch processing, reduce concurrency with CHUNK_SIZE=4."
     ),
     "authentication_error": (
-        "Auth failed. Use 'Authorization: Bearer sk-dev-proxy-123' header. "
-        "Check that the scillm proxy is running on :4001."
+        "Auth failed. Use 'Authorization: Bearer <configured proxy key>' where the "
+        "key is SCILLM_PROXY_KEY, SCILLM_MASTER_KEY, or LITELLM_MASTER_KEY for this "
+        "running proxy. The dev default is valid only when no key override is configured."
     ),
     "connection_error": (
         "Connection failed. Verify scillm proxy is running: "

@@ -7,14 +7,37 @@ set -e
 SKILL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SKILL_DIR/../.." && pwd)"
 
-if [ -f "$REPO_ROOT/.env" ]; then
-    set -a
-    source "$REPO_ROOT/.env"
-    set +a
-fi
+dotenv_value() {
+    ENV_FILE="$REPO_ROOT/.env" python3 - "$@" <<'PY'
+import os
+import sys
+from pathlib import Path
 
-PROXY_URL="${SCILLM_API_BASE:-http://localhost:4001}"
-PROXY_KEY="${SCILLM_PROXY_KEY:-${LITELLM_MASTER_KEY:-sk-dev-proxy-123}}"
+names = sys.argv[1].split(",")
+default = sys.argv[2]
+env_file = Path(os.environ["ENV_FILE"])
+values = {}
+if env_file.is_file():
+    for raw_line in env_file.read_text(encoding="utf-8", errors="ignore").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        values[key.strip()] = value.strip().strip('"').strip("'")
+
+for name in names:
+    value = os.environ.get(name) or values.get(name)
+    if value:
+        print(value)
+        raise SystemExit(0)
+
+print(default)
+PY
+}
+
+PROXY_URL="$(dotenv_value SCILLM_API_BASE "http://localhost:4001")"
+PROXY_KEY="$(dotenv_value SCILLM_MASTER_KEY,LITELLM_MASTER_KEY,SCILLM_PROXY_KEY "sk-dev-proxy-123")"
+CALLER_SKILL="${SCILLM_CALLER_SKILL:-scillm-sanity}"
 
 echo "=== scillm Skill Sanity Check ==="
 echo ""
@@ -39,11 +62,24 @@ else
     exit 1
 fi
 
-# 3. Text completion
-echo -n "3. Text completion... "
+# 3. Auth endpoint
+echo -n "3. Auth endpoint... "
+AUTH=$(curl -sf "$PROXY_URL/v1/scillm/auth" \
+    -H "Authorization: Bearer $PROXY_KEY" \
+    -H "X-Caller-Skill: $CALLER_SKILL" 2>/dev/null) || true
+if echo "$AUTH" | grep -q '"status"'; then
+    echo "OK"
+else
+    echo "FAIL"
+    exit 1
+fi
+
+# 4. Text completion
+echo -n "4. Text completion... "
 START=$(date +%s%N)
 RESP=$(curl -sf "$PROXY_URL/v1/chat/completions" \
     -H "Authorization: Bearer $PROXY_KEY" \
+    -H "X-Caller-Skill: $CALLER_SKILL" \
     -H "Content-Type: application/json" \
     -d '{"model":"text","messages":[{"role":"user","content":"Say hello in 3 words"}],"max_tokens":16}' \
     --max-time 30 2>&1) || true
@@ -63,10 +99,11 @@ else
     fi
 fi
 
-# 4. Model list
-echo -n "4. Model list... "
+# 5. Model list
+echo -n "5. Model list... "
 MODELS=$(curl -sf "$PROXY_URL/v1/models" \
-    -H "Authorization: Bearer $PROXY_KEY" 2>/dev/null) || true
+    -H "Authorization: Bearer $PROXY_KEY" \
+    -H "X-Caller-Skill: $CALLER_SKILL" 2>/dev/null) || true
 if echo "$MODELS" | grep -q '"object": "list"'; then
     COUNT=$(echo "$MODELS" | python3 -c "import json,sys; print(len(json.load(sys.stdin).get('data',[])))" 2>/dev/null || echo "?")
     echo "OK ($COUNT models)"
@@ -75,10 +112,11 @@ else
     exit 1
 fi
 
-# 5. Budget endpoint
-echo -n "5. Budget endpoint... "
+# 6. Budget endpoint
+echo -n "6. Budget endpoint... "
 BUDGET=$(curl -sf "$PROXY_URL/v1/budget" \
-    -H "Authorization: Bearer $PROXY_KEY" 2>/dev/null) || true
+    -H "Authorization: Bearer $PROXY_KEY" \
+    -H "X-Caller-Skill: $CALLER_SKILL" 2>/dev/null) || true
 if [ -n "$BUDGET" ]; then
     echo "OK"
 else

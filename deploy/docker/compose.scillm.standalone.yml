@@ -132,7 +132,8 @@ services:
     environment:
       PYTHONPATH: /app/src
       CONFIG_FILE_PATH: /app/config.yaml
-      SCILLM_MASTER_KEY: ${SCILLM_MASTER_KEY:-sk-dev-proxy-123}
+      SCILLM_MASTER_KEY: ${SCILLM_MASTER_KEY:-${LITELLM_MASTER_KEY:-sk-dev-proxy-123}}
+      LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY:-${SCILLM_MASTER_KEY:-sk-dev-proxy-123}}
       METRICS_ENV: ${METRICS_ENV:-dev}
       # Point to containerized services
       MEMORY_URL: http://memory:8601

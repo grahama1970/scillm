@@ -5,12 +5,33 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 PROJECT_ROOT="$(dirname "$(dirname "$(dirname "$SCRIPT_DIR")")")"
 
-# Load .env if present
-if [ -f "$PROJECT_ROOT/.env" ]; then
-    set -a
-    source "$PROJECT_ROOT/.env"
-    set +a
-fi
+dotenv_value() {
+    ENV_FILE="$PROJECT_ROOT/.env" python3 - "$@" <<'PY'
+import os
+import sys
+from pathlib import Path
+
+names = sys.argv[1].split(",")
+default = sys.argv[2]
+env_file = Path(os.environ["ENV_FILE"])
+values = {}
+if env_file.is_file():
+    for raw_line in env_file.read_text(encoding="utf-8", errors="ignore").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        values[key.strip()] = value.strip().strip('"').strip("'")
+
+for name in names:
+    value = os.environ.get(name) or values.get(name)
+    if value:
+        print(value)
+        raise SystemExit(0)
+
+print(default)
+PY
+}
 
 # Ensure uv is available
 if ! command -v uv &> /dev/null; then
@@ -21,8 +42,8 @@ fi
 # Clear parent VIRTUAL_ENV to avoid mismatch warning when uv resolves its own .venv
 unset VIRTUAL_ENV
 
-PROXY_URL="${SCILLM_API_BASE:-http://localhost:4001}"
-PROXY_KEY="${SCILLM_PROXY_KEY:-${SCILLM_MASTER_KEY:-${LITELLM_MASTER_KEY:-sk-dev-proxy-123}}}"
+PROXY_URL="$(dotenv_value SCILLM_API_BASE "http://localhost:4001")"
+PROXY_KEY="$(dotenv_value SCILLM_MASTER_KEY,LITELLM_MASTER_KEY,SCILLM_PROXY_KEY "sk-dev-proxy-123")"
 DEFAULT_MODEL="${SCILLM_MODEL:-text}"
 CALLER_SKILL="${SCILLM_CALLER_SKILL:-scillm}"
 
