@@ -6,7 +6,7 @@ from scillm.proxy import app as proxy_app
 from scillm.proxy.app import _is_codex_oauth_model, _validate_model_request
 from scillm.proxy.config import load_config
 from scillm.proxy.errors import ProxyError
-from scillm.proxy.providers.codex import _openai_messages_to_codex_input
+from scillm.proxy.providers.codex import _openai_messages_to_codex_input, _parse_codex_response
 
 
 class _Request:
@@ -76,3 +76,51 @@ def test_codex_input_preserves_image_url_parts():
             ],
         }
     ]
+
+
+def test_codex_parser_rejects_empty_zero_usage_completed_response():
+    events = [
+        {
+            "type": "response.completed",
+            "response": {
+                "model": "gpt-5.5",
+                "output": [],
+                "usage": {
+                    "input_tokens": 0,
+                    "output_tokens": 0,
+                },
+            },
+        }
+    ]
+
+    with pytest.raises(ProxyError) as exc:
+        _parse_codex_response(events, "gpt-5.5")
+
+    assert exc.value.status_code == 502
+    assert exc.value.error_type == "provider_empty_zero_usage_response"
+    assert exc.value.details["prompt_tokens"] == 0
+    assert exc.value.details["completion_tokens"] == 0
+
+
+def test_codex_parser_allows_visible_completed_response():
+    events = [
+        {"type": "response.output_text.delta", "delta": "answer"},
+        {
+            "type": "response.completed",
+            "response": {
+                "model": "gpt-5.5",
+                "output": [],
+                "usage": {
+                    "input_tokens": 12,
+                    "output_tokens": 3,
+                },
+            },
+        },
+    ]
+
+    response = _parse_codex_response(events, "gpt-5.5")
+
+    assert response.choices[0].message.content == "answer"
+    assert response.usage is not None
+    assert response.usage.prompt_tokens == 12
+    assert response.usage.completion_tokens == 3

@@ -86,6 +86,28 @@ def _is_empty_length_response(response_dict: dict[str, Any]) -> bool:
     return False
 
 
+def _is_empty_zero_usage_response(response_dict: dict[str, Any]) -> bool:
+    """Return true for empty responses that claim no prompt reached the model."""
+    usage = response_dict.get("usage") or {}
+    if any((usage.get(key) or 0) != 0 for key in ("prompt_tokens", "completion_tokens", "total_tokens")):
+        return False
+
+    choices = response_dict.get("choices", [])
+    if not choices:
+        return True
+    choice = choices[0] if isinstance(choices[0], dict) else {}
+    message = choice.get("message") or {}
+    if message.get("tool_calls"):
+        return False
+
+    content = message.get("content")
+    if content is None:
+        return True
+    if isinstance(content, str) and not content.strip():
+        return True
+    return False
+
+
 # ---------------------------------------------------------------------------
 # Request Validation (fail loudly on common mistakes)
 # ---------------------------------------------------------------------------
@@ -1279,6 +1301,20 @@ async def chat_completions(request: Request):
                         f"total_tokens={total}). Use a shorter prompt, a stricter "
                         f"final-only JSON prompt, or a non-thinking model.",
                         "thinking_budget_exhausted",
+                    )
+
+                if _is_empty_zero_usage_response(response_dict):
+                    raise ProxyError(
+                        502,
+                        "Provider returned no visible response and zero prompt/completion tokens; "
+                        "rejecting empty 200 false green.",
+                        "provider_empty_zero_usage_response",
+                        details={
+                            "model": response_dict.get("model", model),
+                            "prompt_tokens": usage.get("prompt_tokens", 0),
+                            "completion_tokens": usage.get("completion_tokens", 0),
+                            "total_tokens": usage.get("total_tokens", 0),
+                        },
                     )
 
                 response_dict = await _middleware_chain.run_post_call(body, response_dict)

@@ -3,7 +3,12 @@ from __future__ import annotations
 from scillm.proxy.config import ProxyConfig
 import pytest
 
-from scillm.proxy.app import _is_direct_chutes_model, _is_empty_length_response, _validate_model_request
+from scillm.proxy.app import (
+    _is_direct_chutes_model,
+    _is_empty_length_response,
+    _is_empty_zero_usage_response,
+    _validate_model_request,
+)
 from scillm.proxy.errors import ProxyError
 from scillm.proxy.providers.opencode_go import (
     ENDPOINT_CHAT_COMPLETIONS,
@@ -142,6 +147,42 @@ def test_empty_length_response_allows_non_empty_length_response():
     }
 
     assert _is_empty_length_response(response) is False
+
+
+def test_empty_zero_usage_response_detects_router_false_green():
+    response = {
+        "choices": [{"finish_reason": "stop", "message": {"role": "assistant", "content": ""}}],
+        "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+    }
+
+    assert _is_empty_zero_usage_response(response) is True
+
+
+def test_empty_zero_usage_response_allows_tool_calls():
+    response = {
+        "choices": [
+            {
+                "finish_reason": "tool_calls",
+                "message": {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [{"id": "call_1", "type": "function", "function": {"name": "lookup"}}],
+                },
+            }
+        ],
+        "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+    }
+
+    assert _is_empty_zero_usage_response(response) is False
+
+
+def test_empty_zero_usage_response_allows_visible_content():
+    response = {
+        "choices": [{"finish_reason": "stop", "message": {"role": "assistant", "content": "answer"}}],
+        "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+    }
+
+    assert _is_empty_zero_usage_response(response) is False
 
 
 def test_opencode_messages_body_omits_default_max_tokens():

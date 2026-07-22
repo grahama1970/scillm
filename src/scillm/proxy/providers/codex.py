@@ -15,11 +15,13 @@ import httpx
 import openai
 from loguru import logger
 
+from scillm.proxy.errors import ProxyError
 from scillm.proxy.providers import make_chunk_id, sse_chunk, sse_done, sse_format, streaming_timeout
 from scillm.proxy.providers.auth import get_codex_credentials
 from scillm.proxy.providers.codex_models import discover_codex_models, resolve_codex_model
 
 CODEX_API_URL = "https://chatgpt.com/backend-api/codex/responses"
+EMPTY_ZERO_USAGE_ERROR_TYPE = "provider_empty_zero_usage_response"
 
 
 def _apply_codex_reasoning(body: dict[str, Any], model: str, effort: Any) -> None:
@@ -146,6 +148,7 @@ def _parse_codex_response(events: list[dict[str, Any]], model: str) -> openai.ty
     usage_input = 0
     usage_output = 0
     actual_model = model
+    completed_seen = False
 
     for event in events:
         event_type = event.get("type", "")
@@ -185,6 +188,7 @@ def _parse_codex_response(events: list[dict[str, Any]], model: str) -> openai.ty
                 tool_calls_map[call_id] = {"name": name, "arguments": arguments}
 
         elif event_type == "response.completed":
+            completed_seen = True
             resp = event.get("response", {})
             actual_model = resp.get("model", model)
             resp_usage = resp.get("usage", {})
@@ -205,6 +209,24 @@ def _parse_codex_response(events: list[dict[str, Any]], model: str) -> openai.ty
                     }
 
     text = "".join(text_parts) or None
+    if completed_seen and text is None and not tool_calls_map and usage_input == 0 and usage_output == 0:
+        raise ProxyError(
+            502,
+            "Codex provider returned response.completed with no visible output, no tool calls, "
+            "and zero prompt/completion tokens; rejecting empty 200 false green.",
+            EMPTY_ZERO_USAGE_ERROR_TYPE,
+            advice=(
+                "Retry with a shorter prompt or a different provider. If this persists, inspect "
+                "the Codex upstream response stream because the request may not have reached the model."
+            ),
+            details={
+                "provider": "codex-oauth",
+                "model": actual_model,
+                "prompt_tokens": usage_input,
+                "completion_tokens": usage_output,
+                "event_count": len(events),
+            },
+        )
 
     # Build OpenAI tool_calls list
     tool_calls_list = []
