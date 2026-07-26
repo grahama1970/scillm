@@ -202,3 +202,122 @@ Result:
 New learning:
 
 The MVP answer can be dynamically generated, rendered by Chatterbox, and played to the Jabra speaker. The Jabra mic records a real but quiet signal during that playback. Feeding that captured WAV into the RealtimeSTT bridge reaches the live Whisper executor, but the executor returns an empty transcript. The current smallest blocker is therefore below SPARTA and Chatterbox: the acoustic/Jabra capture level or capture route is not producing ASR-usable speech for this playback loop.
+
+## Fresh Acoustic Debugger Proof: 2026-07-26T22:56Z
+
+Debugger script committed in Chatterbox:
+
+```text
+/home/graham/workspace/experiments/chatterbox/scripts/debug_embry_jabra_acoustic_mvp.sh
+```
+
+Chatterbox branch/commit:
+
+```text
+persona-dream-emotion-render-endpoint ac3291c7ad622b4eb95db576b206b28cf82e3e9d
+```
+
+Remote ref verification:
+
+```text
+ac3291c7ad622b4eb95db576b206b28cf82e3e9d refs/heads/persona-dream-emotion-render-endpoint
+```
+
+Live command after restarting the local Whisper container:
+
+```bash
+OUT_DIR=/tmp/embry-jabra-acoustic-debug-whisper-up-20260726T225605Z \
+  /home/graham/workspace/experiments/chatterbox/scripts/debug_embry_jabra_acoustic_mvp.sh
+```
+
+Summary receipt:
+
+```text
+/tmp/embry-jabra-acoustic-debug-whisper-up-20260726T225605Z/summary.json
+```
+
+Result:
+
+- `pass: false`
+- `mocked: false`
+- `live: true`
+- Jabra playback target: `alsa_output.usb-0b0e_Jabra_SPEAK_510_USB_501AA5274B1D022000-00.analog-stereo`
+- Jabra record target: `alsa_input.usb-0b0e_Jabra_SPEAK_510_USB_501AA5274B1D022000-00.mono-fallback`
+- capture WAV: `/tmp/embry-jabra-acoustic-debug-whisper-up-20260726T225605Z/jabra-mic-capture.wav`
+- `capture_bytes: 477168`
+- `duration_seconds: 9.940083`
+- `mean_volume_db: -42.6`
+- `max_volume_db: -17.2`
+- `playback_returncode: 0`
+- `record_returncode: 124`, from the bounded recording timeout
+- RealtimeSTT fed `498` audio chunks and `70` trailing-silence chunks
+- live OpenAI-compatible Whisper executor was reached once
+- failed gate: `realtimestt_transcript_present`
+- transcript: empty string
+
+Direct ASR separation:
+
+```text
+/tmp/embry-jabra-acoustic-debug-whisper-up-20260726T225605Z/direct-whisper-source.json
+/tmp/embry-jabra-acoustic-debug-whisper-up-20260726T225605Z/direct-whisper-captured.json
+```
+
+Result:
+
+- original Chatterbox source WAV -> Whisper HTTP 200 and non-empty transcript:
+  `Wikipedia's list of capitals of France's results says the capital of France has been Paris since its liberation in 1944.`
+- Jabra-mic-captured WAV -> Whisper HTTP 200 and empty transcript: `{"text":""}`
+- gain/filter attempts at `volume=12dB`, `volume=20dB`, `highpass/lowpass + 20dB`, and `afftdn + 18dB` still returned empty transcripts
+
+Device-state checks:
+
+- `wpctl get-volume 33`: `Volume: 1.00`
+- `wpctl get-volume 58`: `Volume: 0.90`
+- `pw-cli enum-params 33 Props`: `mute false`, `softMute false`, source volume `1.000000`
+- `amixer -c 1 scontents`: Jabra `Mic` capture `7 [100%] [9.00dB] [on]`
+
+Direct ALSA duplex check:
+
+```text
+/tmp/embry-jabra-alsa-duplex-20260726T225734Z/summary.json
+```
+
+Result:
+
+- ALSA playback return code: `0`
+- ALSA mic capture WAV: `/tmp/embry-jabra-alsa-duplex-20260726T225734Z/alsa-jabra-mic-capture.wav`
+- duration: `10.000000`
+- mean volume: `-42.9 dB`
+- max volume: `-29.6 dB`
+- direct Whisper response: `{"text":""}`
+
+Current conclusion:
+
+Memory is not the current acoustic blocker. The Whisper ASR service is not generally broken because it transcribes the original Chatterbox WAV. PipeWire is not showing the Jabra source as muted, and ALSA also reports the mic capture switch as on. The failing layer is the Jabra acoustic loopback/capture quality or Jabra hardware DSP path: the Jabra speaker can play the answer, but the Jabra mic capture of that playback is not ASR-usable.
+
+## Ask/Surf Competition Failure Ticket
+
+The MVP `$ask competition` for this acoustic blocker produced zero candidate implementations because browser-oracle transport failed before reviewer output.
+
+Competition DAG receipt:
+
+```text
+/mnt/storage12tb/skills/ask/outputs/embry-jabra-acoustic-mvp-competition-20260726T2259Z/ask-tau-embry-jabra-acoustic-mvp-competi-fa2dece807a5/tau-receipts/dag-receipt.json
+```
+
+Result:
+
+- `status: BLOCKED`
+- `ok: false`
+- `verdict: COMMAND_FAILED`
+- `provider_live: false`
+- `handler-webclaude`: invalid tab id
+- `handler-webkimi`: invalid tab id
+- `handler-webgrok`: missing live tab
+- `handler-webgpt`: local-path preflight rejection; requested concatenated text or small zip
+
+Filed ticket:
+
+```text
+https://github.com/grahama1970/agent-skills/issues/1024
+```
