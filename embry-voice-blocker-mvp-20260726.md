@@ -269,6 +269,24 @@ Result:
 - Jabra-mic-captured WAV -> Whisper HTTP 200 and empty transcript: `{"text":""}`
 - gain/filter attempts at `volume=12dB`, `volume=20dB`, `highpass/lowpass + 20dB`, and `afftdn + 18dB` still returned empty transcripts
 
+Direct RealtimeSTT bridge separation:
+
+```text
+/tmp/embry-realtimestt-source-bridge-20260726T230101Z/realtimestt-source-asr.json
+```
+
+Result:
+
+- `ok: true`
+- `mocked: false`
+- `live: true`
+- failed gates: `[]`
+- live OpenAI-compatible Whisper executor call count: `1`
+- transcript:
+  `Wikipedia's list of capitals of France's result says the capital of France has been Paris since its liberation in 1944.`
+
+This proves the RealtimeSTT bridge and Whisper executor can produce text when the input WAV is intelligible.
+
 Device-state checks:
 
 - `wpctl get-volume 33`: `Volume: 1.00`
@@ -291,9 +309,26 @@ Result:
 - max volume: `-29.6 dB`
 - direct Whisper response: `{"text":""}`
 
+Non-Jabra speaker output check:
+
+```text
+/tmp/embry-jabra-acoustic-debug-usb-speakers-20260726T230028Z/summary.json
+```
+
+Result:
+
+- playback target: `alsa_output.usb-Generic_USB_Audio-00.HiFi__hw_ALC1220VBDT__sink`
+- record target: `alsa_input.usb-0b0e_Jabra_SPEAK_510_USB_501AA5274B1D022000-00.mono-fallback`
+- capture WAV existed, `478192` bytes, `9.961417` seconds
+- mean volume: `-42.5 dB`
+- max volume: `-28.6 dB`
+- live Whisper executor reached once through RealtimeSTT
+- failed gate: `realtimestt_transcript_present`
+- transcript: empty string
+
 Current conclusion:
 
-Memory is not the current acoustic blocker. The Whisper ASR service is not generally broken because it transcribes the original Chatterbox WAV. PipeWire is not showing the Jabra source as muted, and ALSA also reports the mic capture switch as on. The failing layer is the Jabra acoustic loopback/capture quality or Jabra hardware DSP path: the Jabra speaker can play the answer, but the Jabra mic capture of that playback is not ASR-usable.
+Memory is not the current acoustic blocker. The Whisper ASR service is not generally broken because it transcribes the original Chatterbox WAV. The RealtimeSTT bridge is not generally broken because it also transcribes the original Chatterbox WAV through the same live executor. PipeWire is not showing the Jabra source as muted, and ALSA also reports the mic capture switch as on. The failing layer is the physical/acoustic capture path: Jabra mic recordings of speaker playback are not ASR-usable in the current workstation setup.
 
 ## Ask/Surf Competition Failure Ticket
 
