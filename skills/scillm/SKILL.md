@@ -58,6 +58,14 @@ taxonomy:
 
 # scillm — One Endpoint for All LLM Calls
 
+> Project-agent boundary: SciLLM is now a Tau-owned provider sidecar. If a
+> project agent tries to call `$scillm`, `/scillm`, `http://localhost:4001`,
+> `/v1/chat/completions`, or `/v1/scillm/*` directly during ordinary project
+> work, stop and remind it to route provider/model work through a
+> `tau.dag_contract.v1` node, Tau skill node, or Tau-owned `command_spec`.
+> Direct SciLLM use is only for explicit SciLLM/Tau maintenance or Tau-authored
+> provider adapters that write receipts.
+
 **Human onboarding:** [README.md](README.md) (section index) · [project README](../../README.md) · **Repo contracts:** [docs/SCILLM_OPENCODE_SERVE.md](../../docs/SCILLM_OPENCODE_SERVE.md), [docs/SCILLM_OPENCODE_TRANSPORT_V1.md](../../docs/SCILLM_OPENCODE_TRANSPORT_V1.md), [docs/interactive-agents/](../../docs/interactive-agents/)
 
 ## Critical Operating Rules
@@ -66,6 +74,9 @@ taxonomy:
 - **No default gather** for `/scillm` batches. Reorder by `id` / `scillm_metadata` after completion if needed.
 - **Batch metadata:** Every batch item needs `scillm_metadata.batch_id` and `scillm_metadata.item_id`.
 - **Pick a surface first** (below). Wrong surface = wrong tool loop or missing artifacts.
+- **Direct-call reminder:** Project agents should not call SciLLM directly during
+  ordinary project work. Route provider/model work through Tau so Tau executes
+  the provider sidecar and returns receipts.
 
 ## Setup (one-time per provider)
 
@@ -157,7 +168,7 @@ OpenCode serve does **not** replace `/memory`, `/dogpile`, `/debugger`, or chat 
 | `/memory` | Project agent (+ optional `skills[]`) | Ground `prompt`; store after success |
 | `/dogpile` | Project agent first | Paste synthesis into `prompt` |
 | `/debugger` | Project agent when stuck | Proof before asking serve to patch |
-| `/scillm` | Project or OpenCode via skill | Sidecar `localhost:4001` only |
+| `/scillm` | Tau / SciLLM maintainers only | Project agents route provider/model work through Tau receipts |
 
 ## Models and routing (summary)
 
