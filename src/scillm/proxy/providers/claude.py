@@ -15,6 +15,7 @@ import httpx
 import openai
 from loguru import logger
 
+from scillm.proxy.errors import ProviderOAuthError, provider_error_code_for_status
 from scillm.proxy.providers import make_chunk_id, sse_chunk, sse_done, sse_format, streaming_timeout
 from scillm.proxy.providers.auth import get_anthropic_token
 
@@ -41,6 +42,71 @@ CLAUDE_MODEL_MAP = {
     "claude-haiku-4-5": "claude-haiku-4-5-20251001",
     "claude-sonnet-4-5": "claude-sonnet-4-5-20250929",
 }
+
+_CLAUDE_THINKING_BUDGET_TOKENS = {
+    "low": 1024,
+    "medium": 4096,
+    "high": 8192,
+    "xhigh": 16384,
+    "max": 32000,
+}
+
+
+def _oauth_error_message(status_code: int | None, provider: str) -> str:
+    if status_code in (401, 403):
+        return (
+            f"{provider} OAuth authentication failed. Check /v1/scillm/auth, "
+            "refresh the provider login on the host, then retry."
+        )
+    if status_code == 404:
+        return (
+            f"{provider} reported that the requested model is unavailable. "
+            "Use /v1/scillm/models and request an exact supported model."
+        )
+    if status_code == 429:
+        return f"{provider} rate limited the OAuth call. Reduce concurrency; do not batch OAuth models."
+    return f"{provider} OAuth provider call failed. Inspect provider_error_code and details."
+
+
+def _extract_provider_error(error_text: str) -> tuple[str | None, str]:
+    try:
+        payload = json.loads(error_text)
+    except json.JSONDecodeError:
+        return None, error_text[:500]
+    if isinstance(payload, dict):
+        err = payload.get("error")
+        if isinstance(err, dict):
+            return str(err.get("type") or err.get("code") or "") or None, str(err.get("message") or payload)[:500]
+        if err:
+            return None, str(err)[:500]
+    return None, str(payload)[:500]
+
+
+def _apply_reasoning_effort(body: dict[str, Any], effort: str | None) -> tuple[bool, str | None, str | None]:
+    """Apply Claude thinking config for public reasoning effort values."""
+    if not effort or effort == "none":
+        return False, None, "none_requested" if effort == "none" else None
+    budget = _CLAUDE_THINKING_BUDGET_TOKENS.get(effort)
+    if budget is None:
+        return False, None, "unsupported_effort_for_provider"
+    body["thinking"] = {"type": "enabled", "budget_tokens": budget}
+    return True, "thinking.budget_tokens", None
+
+
+def _is_temperature_deprecated_error(status_code: int, error_text: str) -> bool:
+    lowered = error_text.lower()
+    return status_code == 400 and "temperature" in lowered and "deprecated" in lowered
+
+
+def _anthropic_headers(token: str) -> dict[str, str]:
+    return {
+        "Authorization": f"Bearer {token}",
+        "anthropic-version": ANTHROPIC_VERSION,
+        "anthropic-beta": ANTHROPIC_BETA,
+        "user-agent": "claude-cli/2.1.75",
+        "x-app": "cli",
+        "content-type": "application/json",
+    }
 
 
 def _openai_tools_to_anthropic(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -275,10 +341,20 @@ async def claude_completion(
     """
     token = get_anthropic_token()
     if not token:
-        raise Exception("No Anthropic OAuth token available. Run Pi CLI /login first.")
+        raise ProviderOAuthError(
+            provider="anthropic-oauth",
+            status_code=401,
+            message="No Anthropic OAuth token available.",
+            provider_error_code="PROVIDER_AUTH_FAILED",
+            model_requested=model,
+            provider_auth_status="not_configured_or_expired",
+            project_agent_message="Run `claude auth login --claudeai`, then check /v1/scillm/auth before retrying.",
+        )
 
     # Map friendly names to API model IDs
     api_model = CLAUDE_MODEL_MAP.get(model, model)
+    reasoning_effort = kwargs.get("reasoning_effort")
+    require_exact_model = bool(kwargs.get("require_exact_model")) or kwargs.get("allow_model_remap") is False
 
     system_prompt, anthropic_msgs = _openai_to_anthropic_messages(messages)
 
@@ -303,6 +379,18 @@ async def claude_completion(
     if "stop" in kwargs:
         stop = kwargs["stop"]
         body["stop_sequences"] = stop if isinstance(stop, list) else [stop]
+    reasoning_forwarded, _, reasoning_ignored_reason = _apply_reasoning_effort(body, reasoning_effort)
+    if reasoning_effort and not reasoning_forwarded and reasoning_ignored_reason == "unsupported_effort_for_provider":
+        raise ProviderOAuthError(
+            provider="anthropic-oauth",
+            status_code=400,
+            message=f"Claude OAuth does not support reasoning_effort={reasoning_effort!r}.",
+            provider_error_code="PROVIDER_BAD_REQUEST",
+            model_requested=model,
+            provider_auth_status="configured",
+            provider_error_type="unsupported_reasoning_effort",
+            project_agent_message="Use one of: low, medium, high, xhigh, max; or omit reasoning_effort.",
+        )
 
     # Tool use: translate OpenAI tools format to Anthropic
     if "tools" in kwargs and kwargs["tools"]:
@@ -313,24 +401,32 @@ async def claude_completion(
             if tc is not None:
                 body["tool_choice"] = tc
 
-    # OAuth tokens use Authorization: Bearer, NOT x-api-key
-    headers = {
-        "Authorization": f"Bearer {token}",
-        "anthropic-version": ANTHROPIC_VERSION,
-        "anthropic-beta": ANTHROPIC_BETA,
-        "user-agent": "claude-cli/2.1.75",
-        "x-app": "cli",
-        "content-type": "application/json",
-    }
+    headers = _anthropic_headers(token)
 
     logger.info("Claude OAuth call: model={}, {} messages, {} tools", model, len(anthropic_msgs), len(body.get("tools", [])))
 
     timeout = kwargs.get("timeout", 90)
     async with httpx.AsyncClient(timeout=float(timeout)) as client:
         resp = await client.post(ANTHROPIC_API_URL, json=body, headers=headers)
+        if resp.status_code in (401, 403):
+            refreshed_token = get_anthropic_token(force_refresh=True)
+            if refreshed_token:
+                logger.info("Retrying Claude OAuth call after forced token refresh")
+                headers = _anthropic_headers(refreshed_token)
+                resp = await client.post(
+                    ANTHROPIC_API_URL,
+                    json=body,
+                    headers=headers,
+                )
+        if "temperature" in body and _is_temperature_deprecated_error(resp.status_code, resp.text):
+            retry_body = dict(body)
+            retry_body.pop("temperature", None)
+            logger.info("Retrying Claude OAuth call without deprecated temperature parameter")
+            resp = await client.post(ANTHROPIC_API_URL, json=retry_body, headers=headers)
 
     if resp.status_code != 200:
         error_body = resp.text
+        provider_error_type, provider_message = _extract_provider_error(error_body)
         # Detect Anthropic OAuth gate changes — fail fast to cascade
         if "third-party" in error_body.lower() or "extra usage" in error_body.lower():
             logger.error(
@@ -339,10 +435,33 @@ async def claude_completion(
                 error_body[:300],
             )
         logger.warning("Claude API error {}: {}", resp.status_code, error_body[:500])
-        raise Exception(f"Claude API {resp.status_code}: {error_body[:500]}")
+        provider_error_code = provider_error_code_for_status(resp.status_code)
+        raise ProviderOAuthError(
+            provider="anthropic-oauth",
+            status_code=resp.status_code if resp.status_code in (400, 401, 403, 404, 429) else 502,
+            message=f"Claude API {resp.status_code}: {provider_message}",
+            provider_error_code=provider_error_code,
+            provider_status_code=resp.status_code,
+            model_requested=model,
+            provider_auth_status="provider_rejected" if resp.status_code in (401, 403) else "configured",
+            provider_error_type=provider_error_type,
+            project_agent_message=_oauth_error_message(resp.status_code, "Claude"),
+        )
 
     data = resp.json()
-    return _anthropic_to_openai_response(data, model)
+    completion = _anthropic_to_openai_response(data, model)
+    if require_exact_model and completion.model != api_model:
+        raise ProviderOAuthError(
+            provider="anthropic-oauth",
+            status_code=502,
+            message=f"Claude served model '{completion.model}' for requested model '{api_model}'.",
+            provider_error_code="PROVIDER_MODEL_MISMATCH",
+            model_requested=api_model,
+            model_served=completion.model,
+            provider_auth_status="configured",
+            project_agent_message="Requested and served Claude model differ; fail closed or choose an exact supported model.",
+        )
+    return completion
 
 
 async def claude_completion_stream(
@@ -357,9 +476,22 @@ async def claude_completion_stream(
     """
     token = get_anthropic_token()
     if not token:
-        raise Exception("No Anthropic OAuth token available.")
+        err = sse_format({"error": {
+            "message": "No Anthropic OAuth token available.",
+            "type": "provider_auth_error",
+            "provider_error_code": "PROVIDER_AUTH_FAILED",
+            "provider": "anthropic-oauth",
+            "model_requested": model,
+            "provider_auth_status": "not_configured_or_expired",
+            "project_agent_message": "Run `claude auth login --claudeai`, then check /v1/scillm/auth before retrying.",
+        }})
+        yield err.encode()
+        yield sse_done().encode()
+        return
 
     api_model = CLAUDE_MODEL_MAP.get(model, model)
+    reasoning_effort = kwargs.get("reasoning_effort")
+    require_exact_model = bool(kwargs.get("require_exact_model")) or kwargs.get("allow_model_remap") is False
     system_prompt, anthropic_msgs = _openai_to_anthropic_messages(messages)
 
     system_blocks: list[dict[str, str]] = [
@@ -382,6 +514,21 @@ async def claude_completion_stream(
     if "stop" in kwargs:
         stop = kwargs["stop"]
         body["stop_sequences"] = stop if isinstance(stop, list) else [stop]
+    reasoning_forwarded, _, reasoning_ignored_reason = _apply_reasoning_effort(body, reasoning_effort)
+    if reasoning_effort and not reasoning_forwarded and reasoning_ignored_reason == "unsupported_effort_for_provider":
+        err = sse_format({"error": {
+            "message": f"Claude OAuth does not support reasoning_effort={reasoning_effort!r}.",
+            "type": "provider_error",
+            "provider_error_code": "PROVIDER_BAD_REQUEST",
+            "provider": "anthropic-oauth",
+            "model_requested": model,
+            "provider_auth_status": "configured",
+            "provider_error_type": "unsupported_reasoning_effort",
+            "project_agent_message": "Use one of: low, medium, high, xhigh, max; or omit reasoning_effort.",
+        }})
+        yield err.encode()
+        yield sse_done().encode()
+        return
 
     # Tool use: translate OpenAI tools format to Anthropic
     if "tools" in kwargs and kwargs["tools"]:
@@ -392,14 +539,7 @@ async def claude_completion_stream(
             if tc is not None:
                 body["tool_choice"] = tc
 
-    headers = {
-        "Authorization": f"Bearer {token}",
-        "anthropic-version": ANTHROPIC_VERSION,
-        "anthropic-beta": ANTHROPIC_BETA,
-        "user-agent": "claude-cli/2.1.75",
-        "x-app": "cli",
-        "content-type": "application/json",
-    }
+    headers = _anthropic_headers(token)
 
     logger.info("Claude OAuth stream: model={}, {} messages, {} tools", model, len(anthropic_msgs), len(body.get("tools", [])))
     chunk_id = make_chunk_id()
@@ -412,8 +552,19 @@ async def claude_completion_stream(
                 if resp.status_code != 200:
                     error_body = await resp.aread()
                     error_text = error_body.decode("utf-8", errors="replace")
+                    provider_error_type, provider_message = _extract_provider_error(error_text)
                     logger.warning("Claude stream error {}: {}", resp.status_code, error_text[:500])
-                    err = sse_format({"error": {"message": f"Claude API {resp.status_code}: {error_text[:300]}", "type": "provider_error"}})
+                    provider_error_code = provider_error_code_for_status(resp.status_code)
+                    err = sse_format({"error": {
+                        "message": f"Claude API {resp.status_code}: {provider_message[:300]}",
+                        "type": "provider_auth_error" if provider_error_code == "PROVIDER_AUTH_FAILED" else "provider_error",
+                        "provider_error_code": provider_error_code,
+                        "provider_status_code": resp.status_code,
+                        "provider": "anthropic-oauth",
+                        "provider_error_type": provider_error_type,
+                        "model_requested": model,
+                        "project_agent_message": _oauth_error_message(resp.status_code, "Claude"),
+                    }})
                     yield err.encode()
                     yield sse_done().encode()
                     return
@@ -474,6 +625,20 @@ async def claude_completion_stream(
 
                         elif event_type == "message_delta":
                             delta = data.get("delta", {})
+                            actual_model = data.get("message", {}).get("model") or api_model
+                            if require_exact_model and actual_model != api_model:
+                                err = sse_format({"error": {
+                                    "message": f"Claude served model '{actual_model}' for requested model '{api_model}'.",
+                                    "type": "provider_error",
+                                    "provider_error_code": "PROVIDER_MODEL_MISMATCH",
+                                    "provider": "anthropic-oauth",
+                                    "model_requested": api_model,
+                                    "model_served": actual_model,
+                                    "project_agent_message": "Requested and served Claude model differ; fail closed.",
+                                }})
+                                yield err.encode()
+                                yield sse_done().encode()
+                                return
                             stop_reason = delta.get("stop_reason", "end_turn")
                             if stop_reason == "max_tokens":
                                 finish = "length"
