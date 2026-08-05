@@ -2058,34 +2058,57 @@ async def _execute_run(
 
       status_map = await _poll_until_idle(client, run.session_id, deadline=deadline, directory=run.directory)
 
-      if not assistant_text:
-        while time.monotonic() < deadline:
-          assistant_text, message, pending_tools = await _latest_assistant_message(
-            client, run.session_id, directory=run.directory
-          )
-          if pending_tools:
-            if _emit_scope_violation_once(pending_tools):
-              return await _timeout_run_result(run, spec, receipt=receipt, timeout_s=timeout_s)
-            run.emit("assistant_tool_pending", pending_tool_count=len(pending_tools))
-            await asyncio.sleep(1.0)
-            status_map = await client.session_status_map()
-            continue
-          if _awaiting_terminal_text_after_tools(message):
-            run.emit("assistant_waiting_for_terminal_text")
-            await asyncio.sleep(1.0)
-            status_map = await client.session_status_map()
-            continue
-          if assistant_text:
-            _emit_first_delta_once(message, assistant_text)
-            break
-          if not session_is_busy(status_map, run.session_id):
-            status_map = await client.session_status_map()
-            if not session_is_busy(status_map, run.session_id):
+      from scillm.proxy.opencode_serve_dialog import drain_pending_dialog
+
+      while True:
+        if not assistant_text:
+          while time.monotonic() < deadline:
+            assistant_text, message, pending_tools = await _latest_assistant_message(
+              client, run.session_id, directory=run.directory
+            )
+            if pending_tools:
+              if _emit_scope_violation_once(pending_tools):
+                return await _timeout_run_result(run, spec, receipt=receipt, timeout_s=timeout_s)
+              run.emit("assistant_tool_pending", pending_tool_count=len(pending_tools))
+              await asyncio.sleep(1.0)
+              status_map = await client.session_status_map()
+              continue
+            if _awaiting_terminal_text_after_tools(message):
+              run.emit("assistant_waiting_for_terminal_text")
+              await asyncio.sleep(1.0)
+              status_map = await client.session_status_map()
+              continue
+            if assistant_text:
+              _emit_first_delta_once(message, assistant_text)
               break
-          await asyncio.sleep(1.0)
+            if not session_is_busy(status_map, run.session_id):
+              status_map = await client.session_status_map()
+              if not session_is_busy(status_map, run.session_id):
+                break
+            await asyncio.sleep(1.0)
+            status_map = await client.session_status_map()
+        if not assistant_text:
+          return await _timeout_run_result(run, spec, receipt=receipt, timeout_s=timeout_s)
+        # A nudge queued while the turn was active gates terminal acceptance:
+        # replay it as a real prompt and collect the child's reaction (issue #13).
+        queued_turns = drain_pending_dialog(run)
+        combined = "\n\n".join(
+          str(t.get("text") or "") for t in queued_turns if str(t.get("text") or "").strip()
+        )
+        if combined.strip() and time.monotonic() < deadline:
+          await client.send_message(
+            run.session_id,
+            parts=text_parts(combined),
+            no_reply=False,
+            directory=run.directory,
+            agent=run.agent or None,
+          )
+          run.emit("dialog.queued_turn_delivered", turn_count=len(queued_turns))
+          assistant_text = ""
+          await asyncio.sleep(0.2)
           status_map = await client.session_status_map()
-      if not assistant_text:
-        return await _timeout_run_result(run, spec, receipt=receipt, timeout_s=timeout_s)
+          continue
+        break
       if not _patch_delegate_terminal_sentinel(assistant_text):
         assistant_text, follow_message = await _maybe_patch_delegate_followup(
           client,
@@ -2333,6 +2356,29 @@ def create_opencode_serve_router(check_auth: AuthCheck) -> APIRouter:
 
     if debugger_overlay:
       spec = spec.model_copy(update={"system": merge_system_prompt(debugger_overlay, spec.system)})
+
+    # Provisional status.json BEFORE session acquisition: the run must appear
+    # in the run indexes from the moment it exists, even if opencode session
+    # creation hangs (issue #10 — live run invisible to the Transport UI).
+    provisional_dir = _artifact_root() / run_id
+    provisional_dir.mkdir(parents=True, exist_ok=True)
+    (provisional_dir / "status.json").write_text(
+      json.dumps(
+        {
+          "schema": "scillm.opencode_run.status.v1",
+          "run_id": run_id,
+          "agent": agent,
+          "session_id": "",
+          "caller_skill": caller,
+          "updated_at": _now(),
+          "state": "running",
+          "phase": "acquiring_session",
+        },
+        indent=2,
+      ),
+      encoding="utf-8",
+    )
+
     session_lineage: dict[str, Any] | None = None
     async with OpenCodeServeClient() as client:
       session, session_lineage = await _acquire_session(client, spec, agent=agent, run_id=run_id)

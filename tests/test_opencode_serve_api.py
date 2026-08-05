@@ -1891,14 +1891,115 @@ def test_serve_dialog_post_labels_active_child_as_side_channel(
 
     assert resp.status_code == 200, resp.text
     body = resp.json()
-    assert body["delivery_mode"] == "side_channel_no_interrupt"
+    assert body["delivery_mode"] == "queued_for_next_turn"
     assert body["steering_supported"] is False
     assert body["active_turn_interrupt_supported"] is False
     assert "does not interrupt" in body["project_agent_message"]
+    assert "replayed as a real prompt" in body["project_agent_message"]
     assert mock_client.send_message.await_args.kwargs["no_reply"] is True
+    # The turn is queued for replay when the session goes idle (issue #13)
+    queued_lines = (run_dir / "pending_dialog.jsonl").read_text(encoding="utf-8").splitlines()
+    assert len(queued_lines) == 1
+    assert "Use the preset path." in queued_lines[0]
     events = [
         json.loads(line)
         for line in (run_dir / "events.jsonl").read_text(encoding="utf-8").splitlines()
         if line.strip()
     ]
-    assert any(e.get("event") == "dialog.delivery" and e.get("delivery_mode") == "side_channel_no_interrupt" for e in events)
+    assert any(e.get("event") == "dialog.delivery" and e.get("delivery_mode") == "queued_for_next_turn" for e in events)
+    assert any(e.get("event") == "dialog.queued_for_next_turn" for e in events)
+
+
+def test_serve_dialog_queue_drain_roundtrip(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from scillm.proxy.opencode_serve_api import OpenCodeServeRun
+    from scillm.proxy.opencode_serve_dialog import drain_pending_dialog, queue_pending_dialog_turn
+
+    monkeypatch.setenv("SCILLM_OPENCODE_SERVE_OUTPUT_DIR", str(tmp_path))
+    run = OpenCodeServeRun(
+        run_id="oc-queue-roundtrip",
+        artifact_root=tmp_path,
+        caller_skill="pdf-lab",
+        agent="build",
+        session_id="sess-q",
+        request_payload={},
+    )
+    assert drain_pending_dialog(run) == []
+    queue_pending_dialog_turn(run, {"speaker": "Project agent", "text": "nudge one"})
+    queue_pending_dialog_turn(run, {"speaker": "Project agent", "text": "nudge two"})
+    drained = drain_pending_dialog(run)
+    assert [t["text"] for t in drained] == ["nudge one", "nudge two"]
+    # drain consumes atomically — second drain is empty
+    assert drain_pending_dialog(run) == []
+
+
+def test_serve_run_index_includes_custom_run_ids(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Issue #10: caller-supplied run_ids without the oc- prefix must be indexed."""
+    from scillm.proxy.opencode_serve_dialog import list_serve_run_index
+
+    monkeypatch.setenv("SCILLM_OPENCODE_SERVE_OUTPUT_DIR", str(tmp_path))
+    for name, phase in (("pdf-lab-p45-custom", "prompting"), ("oc-standard", "created")):
+        d = tmp_path / name
+        d.mkdir()
+        (d / "status.json").write_text(
+            json.dumps({"run_id": name, "state": "running", "phase": phase}), encoding="utf-8"
+        )
+    rows = {r["run_id"] for r in list_serve_run_index()}
+    assert {"pdf-lab-p45-custom", "oc-standard"} <= rows
+
+
+@pytest.mark.asyncio
+async def test_execute_run_delivers_queued_dialog_before_terminalizing(tmp_path: Path) -> None:
+    """Issue #13: a nudge queued while the child turn was active must be
+    replayed as a real prompt before the run accepts terminal text."""
+    from scillm.proxy import opencode_serve_api as api_mod
+    from scillm.proxy.opencode_serve_dialog import queue_pending_dialog_turn
+
+    run = OpenCodeServeRun(
+        run_id="oc-queued-nudge",
+        artifact_root=tmp_path,
+        caller_skill="pdf-lab",
+        agent="build",
+        session_id="sess-queued-nudge",
+        request_payload={"prompt": "patch"},
+        directory=str(tmp_path),
+    )
+    spec = OpenCodeRunRequest(prompt="patch", agent="build", wait=False, timeout_s=10)
+    receipt = SkillViewReceipt((), (), (), None)
+    queue_pending_dialog_turn(run, {"speaker": "Project agent", "text": "Stop re-litigating; use the preset path."})
+
+    pre_nudge_message = {
+        "info": {"role": "assistant", "id": "msg-1"},
+        "parts": [{"type": "text", "text": "I think we should debate Rust vs preset further."}],
+    }
+    post_nudge_message = {
+        "info": {"role": "assistant", "id": "msg-2"},
+        "parts": [{"type": "text", "text": "Understood — implementing the preset/applier path now."}],
+    }
+
+    mock_client = AsyncMock()
+    mock_client.__aenter__.return_value = mock_client
+    mock_client.__aexit__.return_value = None
+    mock_client.send_prompt_async = AsyncMock(return_value=None)
+    mock_client.send_message = AsyncMock(return_value={"info": {"id": "msg-nudge"}})
+    mock_client.list_messages = AsyncMock(side_effect=[[pre_nudge_message], [post_nudge_message], [post_nudge_message]])
+    mock_client.session_status_map = AsyncMock(return_value={"sess-queued-nudge": {"status": "idle"}})
+    mock_client.diff = AsyncMock(return_value=[])
+
+    with patch("scillm.proxy.opencode_serve_api.OpenCodeServeClient", return_value=mock_client):
+        result = await api_mod._execute_run(run, spec, skill_receipt=receipt)
+
+    assert result["status"] == "completed"
+    assert "preset/applier path" in result["assistant_text"]
+    # the queued nudge was sent as a REAL prompt (no_reply=False)
+    nudge_call = mock_client.send_message.await_args
+    assert nudge_call.kwargs["no_reply"] is False
+    assert "Stop re-litigating" in str(nudge_call.kwargs.get("parts") or nudge_call.args)
+    events = [
+        json.loads(line)["event"]
+        for line in run.events_path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    assert "dialog.queued_turn_delivered" in events
+    assert events.index("dialog.queued_turn_delivered") < events.index("run_completed")
+    # queue is consumed
+    assert not (run.run_dir / "pending_dialog.jsonl").exists()

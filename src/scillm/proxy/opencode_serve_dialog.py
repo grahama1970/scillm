@@ -52,6 +52,54 @@ def append_serve_dialog_turn(run: OpenCodeServeRun, turn: dict[str, Any]) -> Non
     run.emit("dialog.posted", speaker=turn.get("speaker"), message_id=turn.get("message_id"))
 
 
+def _pending_dialog_path(run: OpenCodeServeRun) -> Path:
+    return run.run_dir / "pending_dialog.jsonl"
+
+
+def queue_pending_dialog_turn(run: OpenCodeServeRun, turn: dict[str, Any]) -> None:
+    """Queue a dialog turn posted while the child turn was active (issue #13).
+
+    The serve poll loop replays queued turns as a real prompt the moment the
+    session goes idle, so a nudge actually reaches the child instead of
+    silently landing as a side-channel note.
+    """
+    path = _pending_dialog_path(run)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(turn, ensure_ascii=False) + "\n")
+    run.emit("dialog.queued_for_next_turn", speaker=turn.get("speaker"), message_id=turn.get("message_id"))
+
+
+def drain_pending_dialog(run: OpenCodeServeRun) -> list[dict[str, Any]]:
+    """Atomically consume queued dialog turns; empty list when none."""
+    path = _pending_dialog_path(run)
+    if not path.is_file():
+        return []
+    consumed = path.with_suffix(".consuming")
+    try:
+        path.rename(consumed)
+    except OSError:
+        return []
+    turns: list[dict[str, Any]] = []
+    try:
+        for line in consumed.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(row, dict):
+                turns.append(row)
+    finally:
+        try:
+            consumed.unlink()
+        except OSError:
+            pass
+    return turns
+
+
 
 def _serve_index_bases() -> list[Path]:
     base = serve_api._artifact_root()
@@ -61,11 +109,16 @@ def _serve_index_bases() -> list[Path]:
 
 
 def list_serve_run_index() -> list[dict[str, object]]:
-    """Scan serve artifact dirs for ux-lab run picker (oc-* runs)."""
+    """Scan serve artifact dirs for the run picker.
+
+    Membership is "has a status.json", not a run-id naming convention:
+    caller-supplied run_ids (issue #10) must be just as visible as the
+    default ``oc-*`` ids.
+    """
     rows: list[dict[str, object]] = []
     for root in _serve_index_bases():
         for ent in root.iterdir():
-            if not ent.is_dir() or not ent.name.startswith("oc-"):
+            if not ent.is_dir():
                 continue
             status_path = ent / "status.json"
             if not status_path.is_file():
@@ -504,7 +557,14 @@ async def post_serve_dialog_message(
                 directory=run.directory,
                 agent=run.agent or None,
             )
-            delivery_mode = "side_channel_no_interrupt" if no_reply else "steering_turn_sent"
+            if no_reply:
+                # The active turn cannot be interrupted; queue the turn so the
+                # serve poll loop replays it as a real prompt when the session
+                # goes idle (issue #13 — nudges must actually reach the child).
+                queue_pending_dialog_turn(run, turn)
+                delivery_mode = "queued_for_next_turn"
+            else:
+                delivery_mode = "steering_turn_sent"
     run.emit(
         "dialog.delivery",
         message_id=message_id,
@@ -522,9 +582,10 @@ async def post_serve_dialog_message(
         "session_status": session_status,
         "opencode_message": steering_payload,
         "project_agent_message": (
-            "Dialog post was appended as a side-channel note because the child turn is active; "
-            "it does not interrupt or steer the in-flight model turn."
-            if delivery_mode == "side_channel_no_interrupt"
+            "Dialog post was appended as a side-channel note and QUEUED: it does not "
+            "interrupt the in-flight model turn, but it will be replayed as a real "
+            "prompt to the child the moment the current turn ends."
+            if delivery_mode == "queued_for_next_turn"
             else "Dialog post was sent as a new OpenCode message because the child session was idle."
         ),
     }

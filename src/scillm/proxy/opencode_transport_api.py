@@ -233,10 +233,15 @@ def register_opencode_transport_routes(router: APIRouter, auth: AuthCheck) -> No
         store = TransportStore(transport_output_base())
         state = store.load(transport_run_id)
         settings = load_opencode_serve_settings()
+        from scillm.proxy.opencode_transport import project_transport_state
+
         return JSONResponse(
             {
                 "schema": "scillm.opencode_transport.state.v1",
                 "state": state.to_dict(),
+                # Wrapper state projected over the active child's live serve
+                # status — never shows terminal while the child is running.
+                "projection": project_transport_state(state.to_dict()),
                 "observation": build_transport_observation(
                     transport_run_id=transport_run_id,
                     state=state,

@@ -2395,3 +2395,77 @@ async def test_create_child_unknown_agent_id_fails_closed(tmp_path: Path, monkey
     assert exc_info.value.status_code == 400
     assert exc_info.value.error_type == "unknown_worker_agent"
     client.create_session.assert_not_awaited()
+
+
+def test_projection_authoritative_child_serve_status_overrides_completed_row(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Issue #12: wrapper+child rows read completed, but the child serve run's
+    authoritative status.json says running — projection must say running."""
+    from scillm.proxy.opencode_transport import ChildAttempt, TransportState, project_transport_state
+
+    serve_root = tmp_path / "serve"
+    monkeypatch.setenv("SCILLM_OPENCODE_SERVE_OUTPUT_DIR", str(serve_root))
+    child_run = serve_root / "oc-live-child"
+    child_run.mkdir(parents=True)
+    (child_run / "status.json").write_text(
+        json.dumps({"run_id": "oc-live-child", "state": "running", "phase": "prompting"}),
+        encoding="utf-8",
+    )
+    child = ChildAttempt(
+        subagent_run_id="oc-live-child",
+        role="patch",
+        child_session_id="ses-child",
+        agent="build",
+        attempt_id=1,
+        delivery_state="completed",  # transport-local row is stale
+        active=True,
+    )
+    state = TransportState(
+        transport_run_id="otr-stale-completed",
+        active_subagent_run_id=child.subagent_run_id,
+        children=[child.to_dict()],
+    ).to_dict()
+    state["state"] = "completed"
+    state["phase"] = "done"
+
+    projection = project_transport_state(state)
+    assert projection["state"] == "running"
+    assert projection["phase"] == "active_child:prompting"
+    assert projection["wrapper_state"] == "completed"
+    assert projection["active_child_serve_state"] == "running"
+
+
+def test_projection_respects_genuinely_terminal_child(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from scillm.proxy.opencode_transport import ChildAttempt, TransportState, project_transport_state
+
+    serve_root = tmp_path / "serve"
+    monkeypatch.setenv("SCILLM_OPENCODE_SERVE_OUTPUT_DIR", str(serve_root))
+    child_run = serve_root / "oc-done-child"
+    child_run.mkdir(parents=True)
+    (child_run / "status.json").write_text(
+        json.dumps({"run_id": "oc-done-child", "state": "completed", "phase": "done"}),
+        encoding="utf-8",
+    )
+    child = ChildAttempt(
+        subagent_run_id="oc-done-child",
+        role="patch",
+        child_session_id="ses-child",
+        agent="build",
+        attempt_id=1,
+        delivery_state="completed",
+        active=True,
+    )
+    state = TransportState(
+        transport_run_id="otr-genuine-complete",
+        active_subagent_run_id=child.subagent_run_id,
+        children=[child.to_dict()],
+    ).to_dict()
+    state["state"] = "completed"
+    state["phase"] = "done"
+
+    projection = project_transport_state(state)
+    assert projection["state"] == "completed"
+    assert projection["phase"] == "done"

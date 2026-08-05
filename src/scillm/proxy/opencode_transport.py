@@ -418,6 +418,77 @@ def transport_index_bases() -> list[Path]:
     return out
 
 
+def _authoritative_child_serve_status(subagent_run_id: str) -> dict[str, Any] | None:
+    """Read the child serve run's authoritative status.json, if it exists."""
+    if not subagent_run_id:
+        return None
+    try:
+        from scillm.proxy import opencode_serve_api as serve_api
+
+        status_path = serve_api._artifact_root() / subagent_run_id / "status.json"
+        if status_path.is_file():
+            loaded = json.loads(status_path.read_text(encoding="utf-8"))
+            return loaded if isinstance(loaded, dict) else None
+    except Exception:
+        return None
+    return None
+
+
+def project_transport_state(state: dict[str, Any]) -> dict[str, Any]:
+    """Project wrapper state over the live state of the active child.
+
+    The wrapper must never present a terminal state while the active child
+    serve run is authoritatively still running (issue #12). Two signals are
+    consulted, in order of authority:
+
+    1. the child serve run's own ``status.json`` (authoritative);
+    2. the transport-local ``delivery_state`` of the active child row.
+    """
+    wrapper_state = state.get("state")
+    wrapper_phase = state.get("phase")
+    active_child: dict[str, Any] | None = None
+    try:
+        active_child_obj = TransportState.from_dict(state).active_child()
+        active_child = active_child_obj.to_dict() if active_child_obj else None
+    except Exception:
+        active_child = None
+    projected_state = wrapper_state
+    projected_phase = wrapper_phase
+    child_serve_status: dict[str, Any] | None = None
+    if active_child is not None:
+        child_delivery = str(active_child.get("delivery_state") or "").strip()
+        child_run_id = str(active_child.get("subagent_run_id") or "")
+        child_serve_status = _authoritative_child_serve_status(child_run_id)
+        serve_state = str((child_serve_status or {}).get("state") or "").strip().lower()
+        serve_phase = str((child_serve_status or {}).get("phase") or "").strip().lower()
+        if serve_state == "running":
+            # Authoritative child says running — wrapper cannot be terminal,
+            # even when the transport-local row already reads completed/acted.
+            projected_state = "running"
+            projected_phase = f"active_child:{serve_phase or child_delivery or 'running'}"
+        elif child_delivery and child_delivery not in VISIBLE_TERMINAL_DELIVERY_STATES:
+            projected_state = "running"
+            projected_phase = f"active_child:{child_delivery}"
+    return {
+        "state": projected_state,
+        "phase": projected_phase,
+        "wrapper_state": wrapper_state,
+        "wrapper_phase": wrapper_phase,
+        "active_child": active_child,
+        "active_child_delivery_state": (
+            str(active_child.get("delivery_state") or "") if active_child else ""
+        ),
+        "active_child_session_id": (
+            str(active_child.get("child_session_id") or "") if active_child else ""
+        ),
+        "active_child_run_id": (
+            str(active_child.get("subagent_run_id") or "") if active_child else ""
+        ),
+        "active_child_serve_state": str((child_serve_status or {}).get("state") or ""),
+        "active_child_serve_phase": str((child_serve_status or {}).get("phase") or ""),
+    }
+
+
 def list_transport_run_index() -> list[dict[str, object]]:
     """Scan artifact dirs for run-index UI."""
     by_id: dict[str, dict[str, object]] = {}
@@ -432,21 +503,7 @@ def list_transport_run_index() -> list[dict[str, object]]:
                 state = json.loads(state_path.read_text(encoding="utf-8"))
                 st = state_path.stat()
                 transport_run_id = str(state.get("transport_run_id") or ent.name)
-                active_child: dict[str, Any] | None = None
-                try:
-                    active_child_obj = TransportState.from_dict(state).active_child()
-                    active_child = active_child_obj.to_dict() if active_child_obj else None
-                except Exception:
-                    active_child = None
-                wrapper_state = state.get("state")
-                wrapper_phase = state.get("phase")
-                projected_state = wrapper_state
-                projected_phase = wrapper_phase
-                if active_child is not None:
-                    child_delivery = str(active_child.get("delivery_state") or "").strip()
-                    if child_delivery and child_delivery not in VISIBLE_TERMINAL_DELIVERY_STATES:
-                        projected_state = "running"
-                        projected_phase = f"active_child:{child_delivery}"
+                projection = project_transport_state(state)
                 row = {
                     "transport_run_id": transport_run_id,
                     "run_id": transport_run_id,
@@ -455,20 +512,7 @@ def list_transport_run_index() -> list[dict[str, object]]:
                     "dag_node_id": state.get("dag_node_id"),
                     "mtime_ms": int(st.st_mtime * 1000),
                     "updated_at": state.get("updated_at"),
-                    "state": projected_state,
-                    "phase": projected_phase,
-                    "wrapper_state": wrapper_state,
-                    "wrapper_phase": wrapper_phase,
-                    "active_child": active_child,
-                    "active_child_delivery_state": (
-                        str(active_child.get("delivery_state") or "") if active_child else ""
-                    ),
-                    "active_child_session_id": (
-                        str(active_child.get("child_session_id") or "") if active_child else ""
-                    ),
-                    "active_child_run_id": (
-                        str(active_child.get("subagent_run_id") or "") if active_child else ""
-                    ),
+                    **projection,
                     "session_id": state.get("session_id"),
                 }
             except (OSError, json.JSONDecodeError, TypeError):
@@ -955,6 +999,7 @@ def build_dialog_collaboration_contract(*, transport_run_id: str, state: Transpo
         "dialog_last_human_message_id": state.dialog_last_human_message_id,
         "children": children_rows,
         "active_subagent": active_subagent_dict(state),
+        "projection": project_transport_state(state.to_dict()),
         "note": (
             "Three-way collaboration: the human types in the OpenCode parent session UI; "
             "the project agent posts labeled noReply handoffs; the worker runs on a child "
