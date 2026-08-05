@@ -331,8 +331,8 @@ class TestAuthTyped:
         assert r.status_code == 401
         assert r.json()["error"]["type"] == "authentication_error"
 
-    def test_default_carrier_maps_401_to_transport_auth_invalid(self):
-        import asyncio as _asyncio
+    @pytest.mark.asyncio
+    async def test_default_carrier_maps_401_to_transport_auth_invalid(self):
         from unittest.mock import patch as _patch
 
         import httpx as _httpx
@@ -355,6 +355,6 @@ class TestAuthTyped:
 
         with _patch.object(_httpx, "AsyncClient", FakeClient):
             with pytest.raises(ProxyError) as ei:
-                _asyncio.get_event_loop().run_until_complete(ta_mod._default_carrier(record))
+                await ta_mod._default_carrier(record)
         assert ei.value.error_type == "transport_auth_invalid"
         assert ei.value.status_code == 401
