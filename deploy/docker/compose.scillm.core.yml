@@ -20,6 +20,12 @@ services:
     build:
       context: ../..
       dockerfile: deploy/docker/Dockerfile.scillm
+    # Repo .env is authoritative for keys on EVERY deploy. Do NOT re-add
+    # SCILLM_MASTER_KEY/LITELLM_MASTER_KEY to the environment block below:
+    # `environment:` overrides env_file, and its ${VAR:-default} substitution
+    # reads the COMPOSE SHELL env (not this env_file), so any `docker compose
+    # up` without --env-file silently reverted the key to the dev default
+    # (issue #31).
     env_file: ["../../.env"]
     environment:
       PYTHONPATH: /app/src
@@ -28,8 +34,6 @@ services:
       # keep the docker Ollama rewrite pointed at loopback instead of the
       # bridged-compose "ollama" DNS name.
       SCILLM_DOCKER_OLLAMA_BASE: ${SCILLM_DOCKER_OLLAMA_BASE:-http://127.0.0.1:11434}
-      SCILLM_MASTER_KEY: ${SCILLM_MASTER_KEY:-${LITELLM_MASTER_KEY:-sk-dev-proxy-123}}
-      LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY:-${SCILLM_MASTER_KEY:-sk-dev-proxy-123}}
       METRICS_ENV: ${METRICS_ENV:-dev}
       # Bifrost removed — direct provider routing, ArangoDB for logging/monitoring
     restart: unless-stopped
@@ -57,7 +61,7 @@ services:
       # JSONL backup — independent of DB, survives wipes, append-only
       - "/mnt/storage12tb/scillm-logs:/mnt/storage12tb/scillm-logs"
     healthcheck:
-      test: ["CMD", "curl", "-sf", "-H", "Authorization: Bearer $${SCILLM_MASTER_KEY:-sk-dev-proxy-123}", "http://127.0.0.1:4001/health/liveliness"]
+      test: ["CMD", "curl", "-sf", "-H", "Authorization: Bearer $${SCILLM_MASTER_KEY}", "http://127.0.0.1:4001/health/liveliness"]
       interval: 15s
       timeout: 10s
       retries: 5
