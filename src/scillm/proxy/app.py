@@ -3284,6 +3284,16 @@ async def scillm_health(request: Request):
         raise ProxyError(503, "Proxy not ready — startup incomplete", "service_unavailable")
     uptime = time.monotonic() - _start_time
 
+    # Effective master-key provenance (issue #32): callers must be able to
+    # tell WHICH key the live process accepts without guessing from 401s.
+    import hashlib
+    _mk = _config.general.master_key or ""
+    master_key_status = {
+        "fingerprint_sha256_12": hashlib.sha256(_mk.encode()).hexdigest()[:12] if _mk else None,
+        "is_dev_default": _mk == "sk-dev-proxy-123",
+        "source": "container env SCILLM_MASTER_KEY (compose env_file ../../.env is authoritative)",
+    }
+
     # Concurrency status (optional)
     concurrency = {}
     try:
@@ -3306,6 +3316,7 @@ async def scillm_health(request: Request):
     }
 
     return {
+        "master_key": master_key_status,
         "status": "ok",
         "uptime_seconds": round(uptime, 1),
         "model_groups": list(_config.model_groups.keys()),
