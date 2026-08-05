@@ -15,6 +15,7 @@ request comes in for a Chutes model, it swaps to the best available variant.
 """
 from __future__ import annotations
 
+import asyncio
 import os
 import re
 import time
@@ -130,10 +131,10 @@ def _is_daytime() -> bool:
     return False
 
 
-from scillm.proxy.middleware import BaseMiddleware
+from scillm.proxy.middleware import BaseMiddleware, MiddlewareReject
 
 # Chutes API
-_CHUTES_API_BASE = "https://api.chutes.ai"
+_CHUTES_API_BASE = os.environ.get("CHUTES_API_BASE", "https://api.chutes.ai").rstrip("/")
 _CHUTES_API_KEY = os.environ.get("CHUTES_API_KEY") or os.environ.get("CHUTES_API_TOKEN", "")
 
 # Cache settings
@@ -144,9 +145,20 @@ _cache_timestamp: float = 0
 # Rate limit threshold - avoid models with high rate limiting
 _RATE_LIMIT_THRESHOLD = 0.25
 _UTILIZATION_MAX = 0.95  # Avoid models over 95% utilization
+_HOT_SCORE_THRESHOLD = 90.0
+_DEFAULT_HOT_WAIT_TIMEOUT_S = float(os.environ.get("SCILLM_CHUTES_HOT_WAIT_TIMEOUT_S", "0") or 0)
+_DEFAULT_HOT_WAIT_POLL_S = float(os.environ.get("SCILLM_CHUTES_HOT_WAIT_POLL_S", "10") or 10)
 
 # Lazy-init httpx client
 _client: httpx.AsyncClient | None = None
+
+
+def _truthy(value: object, *, default: bool = False) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() not in {"", "0", "false", "no", "off"}
 
 
 def _get_client() -> httpx.AsyncClient:
@@ -162,15 +174,16 @@ def _get_client() -> httpx.AsyncClient:
 # Model family matching with dynamic size extraction
 # ---------------------------------------------------------------------------
 
-# Alias to family mapping - enables dynamic routing for family-specific aliases
-# When user requests "text-qwen3", they get dynamic routing within the qwen3 family
+# Alias to family mapping - enables dynamic routing for family-specific aliases.
+# Family routes must not append cross-family fallbacks; otherwise review prompts
+# can silently change model behavior after provider failures.
 ALIAS_TO_FAMILY: dict[str, str] = {
-    "text": "deepseek-large",           # Default: best available large model
-    "text-research": "deepseek-large",  # Harvard research endpoint
-    "text-qwen3": "qwen3-large",        # Qwen3 family (235B+)
-    "text-qwen3-large": "qwen3-large",  # Explicit large Qwen3
-    "text-kimi": "kimi",                # Kimi/Moonshot family
-    "text-deepseek": "deepseek-large",  # Explicit DeepSeek family
+    "text": "deepseek-large",              # Deprecated compatibility alias.
+    "chutes-deepseek": "deepseek-large",   # Default: best available large DeepSeek.
+    "chutes-research": "deepseek-large",   # Harvard research endpoint.
+    "chutes-qwen": "qwen3-large",          # Qwen3 family (235B+).
+    "chutes-qwen-large": "qwen3-large",    # Explicit large Qwen3.
+    "chutes-kimi": "kimi",                 # Kimi/Moonshot family.
 }
 
 CHUTES_PROVIDER_PREFIXES = (
@@ -286,7 +299,7 @@ async def _fetch_utilization() -> list[dict]:
         return []
 
 
-async def _get_utilization() -> dict[str, dict]:
+async def _get_utilization(*, force_refresh: bool = False) -> dict[str, dict]:
     """Get cached utilization data, refreshing if stale.
 
     Returns dict mapping model name -> utilization stats.
@@ -295,7 +308,7 @@ async def _get_utilization() -> dict[str, dict]:
     global _utilization_cache, _cache_timestamp, _dynamic_families, _families_timestamp
 
     now = time.monotonic()
-    if _utilization_cache is not None and now - _cache_timestamp < _CACHE_TTL_SEC:
+    if not force_refresh and _utilization_cache is not None and now - _cache_timestamp < _CACHE_TTL_SEC:
         return _utilization_cache
 
     # Fetch fresh data
@@ -359,11 +372,8 @@ def _score_model(stats: dict) -> float:
     return util * 80
 
 
-async def _build_dynamic_chain(family: str, util_cache: dict[str, dict]) -> list[str]:
-    """Build a full fallback chain sorted by utilization score.
-
-    Returns all models in the family sorted best-first, plus static fallbacks.
-    """
+async def _score_dynamic_family(family: str, util_cache: dict[str, dict]) -> list[tuple[float, str, float | None, float | None]]:
+    """Score family candidates by Chutes utilization, lowest score first."""
     # Use dynamic families (populated by _get_utilization)
     candidates = _dynamic_families.get(family, [])
     if not candidates:
@@ -392,18 +402,22 @@ async def _build_dynamic_chain(family: str, util_cache: dict[str, dict]) -> list
             scored.append((50.0, model, None, None))
             logger.debug("chutes_router: {} score=50.0 (no data)", model)
 
+    # Sort by score (lowest first)
+    scored.sort(key=lambda x: x[0])
+    return scored
+
+
+async def _build_dynamic_chain(family: str, util_cache: dict[str, dict]) -> list[str]:
+    """Build a full fallback chain sorted by utilization score.
+
+    Returns all models in the family sorted best-first.
+    """
+    scored = await _score_dynamic_family(family, util_cache)
     if not scored:
         return []
 
-    # Sort by score (lowest first)
-    scored.sort(key=lambda x: x[0])
-
-    # Build chain: sorted Chutes models + static fallbacks (Kimi, Qwen3)
+    # Build chain: sorted Chutes models in the requested family only.
     chain = [m for _, m, _, _ in scored]
-
-    # Add non-DeepSeek fallbacks at the end (these don't have utilization data)
-    static_fallbacks = ["text-kimi", "text-qwen3", "text-qwen3-large"]
-    chain.extend(static_fallbacks)
 
     best_score, best_model, util, rate_limit = scored[0]
 
@@ -419,12 +433,94 @@ async def _build_dynamic_chain(family: str, util_cache: dict[str, dict]) -> list
     return chain
 
 
-def _get_family_for_model(model: str) -> str | None:
+async def _get_family_for_model(model: str) -> str | None:
     """Get the family for a model string using dynamic size extraction."""
     for family in _FAMILIES:
-        if _matches_family(model, family):
+        if await _matches_family(model, family):
             return family
     return None
+
+
+def _hot_required(request: dict) -> bool:
+    if _truthy(request.get("_scillm_allow_cold_chutes")):
+        return False
+    if _truthy(os.environ.get("SCILLM_CHUTES_ALLOW_COLD")):
+        return False
+    return _truthy(
+        request.get("_scillm_require_hot_chutes"),
+        default=_truthy(os.environ.get("SCILLM_CHUTES_REQUIRE_HOT"), default=True),
+    )
+
+
+def _wait_timeout_s(request: dict) -> float:
+    value = request.get("_scillm_wait_for_hot_chutes")
+    if isinstance(value, (int, float)):
+        return max(0.0, float(value))
+    if _truthy(value):
+        return max(0.0, _DEFAULT_HOT_WAIT_TIMEOUT_S)
+    return 0.0
+
+
+def _reject_no_hot(model: str, family: str, detail: str) -> None:
+    raise MiddlewareReject(
+        (
+            "No hot comparable Chutes model is available for "
+            f"{model!r} in family {family!r}: {detail}. "
+            "Set _scillm_allow_cold_chutes=true to override, or "
+            "_scillm_wait_for_hot_chutes to poll explicitly."
+        ),
+        status_code=503,
+    )
+
+
+async def _select_hot_chain(
+    *,
+    model: str,
+    family: str,
+    request: dict,
+) -> tuple[list[str], dict[str, dict]]:
+    """Return a hot family chain or reject fail-closed by default."""
+    require_hot = _hot_required(request)
+    wait_deadline = time.monotonic() + _wait_timeout_s(request)
+    force_refresh = False
+
+    while True:
+        util_cache = await _get_utilization(force_refresh=force_refresh)
+        if not util_cache:
+            if require_hot and time.monotonic() >= wait_deadline:
+                _reject_no_hot(model, family, "utilization data unavailable")
+            if not require_hot:
+                return [], util_cache
+        else:
+            scored = await _score_dynamic_family(family, util_cache)
+            if not scored:
+                if require_hot and time.monotonic() >= wait_deadline:
+                    _reject_no_hot(model, family, "no comparable family candidates")
+                if not require_hot:
+                    return [], util_cache
+            else:
+                hot_scored = [
+                    (score, item, util, rate_limit)
+                    for score, item, util, rate_limit in scored
+                    if score < _HOT_SCORE_THRESHOLD
+                ]
+                if hot_scored:
+                    return [item for _, item, _, _ in hot_scored], util_cache
+                if not require_hot:
+                    return [item for _, item, _, _ in scored], util_cache
+                if time.monotonic() >= wait_deadline:
+                    best_score, best_model, util, rate_limit = scored[0]
+                    _reject_no_hot(
+                        model,
+                        family,
+                        (
+                            f"best candidate {best_model!r} scored {best_score:.1f} "
+                            f"(utilization={util}, rate_limit_5m={rate_limit})"
+                        ),
+                    )
+
+        force_refresh = True
+        await asyncio.sleep(max(1.0, _DEFAULT_HOT_WAIT_POLL_S))
 
 
 def _is_chutes_model(model: str) -> bool:
@@ -442,6 +538,15 @@ def _is_chutes_model(model: str) -> bool:
         return True
 
     return False
+
+
+def _is_exact_chutes_provider_model(model: str) -> bool:
+    """Return true for exact Chutes Org/Model ids.
+
+    Exact provider ids are selected by ops-chutes at runtime. The legacy hot
+    selector owns only compatibility aliases such as ``chutes-deepseek``.
+    """
+    return model.lower().startswith(CHUTES_PROVIDER_PREFIXES)
 
 
 # ---------------------------------------------------------------------------
@@ -465,6 +570,9 @@ class ChutesRouter(BaseMiddleware):
         # Only process Chutes models and known aliases
         model_lower = model.lower()
         is_known_alias = model_lower in ALIAS_TO_FAMILY
+        if not is_known_alias and _is_exact_chutes_provider_model(model):
+            logger.debug("chutes_router: exact Chutes model '{}', passing through", model)
+            return request
         if not is_known_alias and not _is_chutes_model(model):
             return request
 
@@ -485,19 +593,14 @@ class ChutesRouter(BaseMiddleware):
         if model_lower in ALIAS_TO_FAMILY:
             family = ALIAS_TO_FAMILY[model_lower]
         else:
-            family = _get_family_for_model(model)
+            family = await _get_family_for_model(model)
             if not family:
                 logger.debug("chutes_router: no family for '{}', passing through", model)
                 return request
 
-        # Get utilization data
-        util_cache = await _get_utilization()
-        if not util_cache:
-            logger.debug("chutes_router: no utilization data, passing through")
-            return request
-
-        # Build dynamic fallback chain sorted by utilization
-        chain = await _build_dynamic_chain(family, util_cache)
+        # Build a hot dynamic fallback chain sorted by utilization. By default,
+        # Chutes aliases fail closed rather than silently picking a cold model.
+        chain, util_cache = await _select_hot_chain(model=model, family=family, request=request)
         if not chain:
             logger.debug("chutes_router: no chain built for family '{}', passing through", family)
             return request

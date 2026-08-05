@@ -211,7 +211,7 @@ class TestCodexOAuth:
     def test_gpt_basic(self):
         """Basic text completion through GPT via Codex OAuth."""
         with httpx.Client() as client:
-            r = _chat(client, "gpt-5.3-codex", "What is 2+2? Answer with just the number.", max_tokens=32, timeout=60.0)
+            r = _chat(client, "gpt-5.5", "What is 2+2? Answer with just the number.", max_tokens=32, timeout=60.0)
             assert r.status_code == 200, f"Expected 200, got {r.status_code}: {r.text[:200]}"
             data = r.json()
             assert "choices" in data
@@ -228,7 +228,7 @@ class TestCodexOAuth:
                 f"{PROXY_BASE}/v1/chat/completions",
                 headers={**AUTH_HEADERS, "Content-Type": "application/json"},
                 json={
-                    "model": "gpt-5.3-codex",
+                    "model": "gpt-5.5",
                     "messages": [{"role": "user", "content": "Say hello"}],
                     "stream": True,
                     "max_tokens": 32,
@@ -264,7 +264,7 @@ class TestCodexOAuth:
     def test_codex_response_format(self):
         """Response should have OpenAI-compatible format."""
         with httpx.Client() as client:
-            r = _chat(client, "gpt-5.3-codex", "Say hi", max_tokens=32, timeout=60.0)
+            r = _chat(client, "gpt-5.5", "Say hi", max_tokens=32, timeout=60.0)
             assert r.status_code == 200
             data = r.json()
             assert "id" in data

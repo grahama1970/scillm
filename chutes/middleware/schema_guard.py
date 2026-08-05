@@ -14,7 +14,7 @@ The course correction message is specific:
 Usage:
     POST /v1/chat/completions
     {
-        "model": "text",
+        "model": "chutes-deepseek",
         "messages": [{"role": "user", "content": "Return user info"}],
         "response_format": {"type": "json_object"},
         "json_schema": {

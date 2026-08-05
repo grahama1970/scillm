@@ -9,6 +9,7 @@
 **Type:** Core Infrastructure
 **Status:** Active — Docker proxy running on port 4001
 **Note:** Project registered as "scillm" in agent-inbox
+**WebGPT tab id:** `837343814` — when blocked or drifting, create a review bundle and run `/ask webgpt` against this project tab.
 **Docker:** `docker compose -p scillm -f deploy/docker/compose.scillm.core.yml up -d --build` (network_mode: host, port 4001)
 **Port 4000 unavailable:** NoMachine NX server (system daemon, UID 135) — all services use port 4001
 

@@ -6,7 +6,7 @@ HTTP status codes, retry classification, and FastAPI exception handling.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import openai
 from loguru import logger
@@ -66,6 +66,72 @@ class ProxyError(Exception):
         return result
 
 
+_OAUTH_STATUS_TO_CODE = {
+    400: "PROVIDER_BAD_REQUEST",
+    401: "PROVIDER_AUTH_FAILED",
+    403: "PROVIDER_AUTH_FAILED",
+    404: "PROVIDER_MODEL_NOT_FOUND",
+    408: "PROVIDER_TIMEOUT",
+    429: "PROVIDER_RATE_LIMITED",
+}
+
+
+def provider_error_code_for_status(status_code: int | None) -> str:
+    """Return a stable provider error code for OAuth provider HTTP failures."""
+    if status_code is None:
+        return "PROVIDER_ERROR"
+    if status_code in _OAUTH_STATUS_TO_CODE:
+        return _OAUTH_STATUS_TO_CODE[status_code]
+    if status_code >= 500:
+        return "PROVIDER_UPSTREAM_ERROR"
+    return "PROVIDER_ERROR"
+
+
+class ProviderOAuthError(ProxyError):
+    """Structured OAuth provider failure with project-agent-safe details."""
+
+    def __init__(
+        self,
+        *,
+        provider: str,
+        message: str,
+        provider_error_code: str,
+        status_code: int = 502,
+        provider_status_code: int | None = None,
+        model_requested: str | None = None,
+        model_served: str | None = None,
+        provider_auth_status: str | None = None,
+        provider_error_type: str | None = None,
+        project_agent_message: str | None = None,
+        details: dict[str, Any] | None = None,
+    ) -> None:
+        merged_details: dict[str, Any] = {
+            "provider": provider,
+            "provider_error_code": provider_error_code,
+            "provider_status_code": provider_status_code,
+            "model_requested": model_requested,
+            "model_served": model_served,
+            "provider_auth_status": provider_auth_status,
+            "provider_error_type": provider_error_type,
+            "project_agent_message": project_agent_message,
+        }
+        if details:
+            merged_details.update(details)
+        merged_details = {k: v for k, v in merged_details.items() if v is not None}
+        error_type = (
+            "provider_auth_error"
+            if provider_error_code == "PROVIDER_AUTH_FAILED"
+            else "provider_error"
+        )
+        super().__init__(
+            status_code,
+            message,
+            error_type,
+            advice=project_agent_message,
+            details=merged_details,
+        )
+
+
 # ---------------------------------------------------------------------------
 # Advice mapping — actionable guidance for common errors
 # ---------------------------------------------------------------------------
@@ -106,7 +172,7 @@ _MESSAGE_ADVICE: list[tuple[str, str]] = [
     ("queue timeout", "All slots busy (likely another batch running). Retry with backoff: await asyncio.sleep(30) then retry."),
     ("busy:", "Slots busy (batch in progress). Wait and retry with exponential backoff."),
     ("no instances available", "Model cold on Chutes. Proxy will cascade to fallback. Wait 60s for warmup."),
-    ("context length", "Prompt too long. Reduce input size or use text-gemini (1M context)."),
+    ("context length", "Prompt too long. Reduce input size or use gemini-flash/gemini-flash-oauth for large context."),
     ("content policy", "Content filtered. Rephrase the prompt to avoid policy triggers."),
     ("json", "JSON parsing failed. Add response_format: {type: 'json_object'} for structured output."),
 ]
@@ -544,7 +610,7 @@ async def _analyze_error_with_llm(
                     "X-Caller-Skill": _ANALYSIS_CALLER,
                 },
                 json={
-                    "model": "text-gemini",
+                    "model": "gemini-flash",
                     "messages": [
                         {"role": "system", "content": _LLM_SYSTEM_PROMPT},
                         {"role": "user", "content": user_prompt},

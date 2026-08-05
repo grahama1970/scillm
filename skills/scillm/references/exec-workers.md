@@ -20,6 +20,7 @@ workers.
 |--------------|-------------|-----------------|-------|
 | `pi-chutes-kimi` | `pi_exec` | Pi CLI over Chutes `moonshotai/Kimi-K2.6-TEE` | Preferred low-overhead Chutes Kimi exec lane. Override with `SCILLM_PI_BINARY`, `SCILLM_PI_CHUTES_KIMI_MODEL`. |
 | `pi-opencode-kimi` | `pi_exec` | Pi CLI over OpenCode Go `kimi-k2.5` | Pi fallback when Chutes Kimi produces empty/no-write exec output. Override with `SCILLM_PI_OPENCODE_KIMI_MODEL`. |
+| `kimi-k2.6` / `kimi-k2.5` / `kimi` | `kimi_exec` | Moonshot `kimi -p` (default) or optional `--print` gate mode | Full-agent headless lane (not Codex-style JSON-schema hobbling). Auth: `KIMI_API_KEY`. Override `SCILLM_KIMI_BINARY`, `SCILLM_KIMI_EXEC_MODEL`, `SCILLM_KIMI_EXEC_OUTPUT_MODE`. |
 | `oc-chutes-deepseek` | `opencode_exec` | OpenCode CLI over Chutes | One-shot `opencode run` lane. Skills/shell denied in generated config. |
 | `opencode_serve` | `opencode_serve` | `POST /v1/scillm/opencode/runs` via internal URL | OpenCode **serve** session + agent profile. Use for multi-step tool/skill loops. |
 | `codex-gpt-5.5` | `codex_exec` | `codex exec --json --sandbox … --model gpt-5.5` | Profile-only. **Not** chat `model: "gpt-5.5"`. API still accepts deprecated alias `model: "gpt-5.5"` on `codex_exec`. |
@@ -44,6 +45,11 @@ scillm exec pi-chutes-kimi \
   --cwd /home/graham/workspace/project \
   --sandbox read-only \
   --prompt 'Inspect the bounded failure and return JSON only.'
+
+scillm exec kimi-k2.6 \
+  --cwd /home/graham/workspace/project \
+  --sandbox read-only \
+  --prompt 'What is 2+2? Reply with the number only.'
 ```
 
 **Codex exec reasoning:** Codex has no top-level `codex exec --reasoning` flag. Per
@@ -63,5 +69,7 @@ Docker mounts `/home/graham/.pi/agent`. Read-only tools: `read,grep,find,ls`;
 workspace-write adds `edit,write` (no `bash`).
 
 OpenCode exec: generated `opencode.config.json` per attempt; skills/web/shell denied.
+
+**Kimi exec:** default mode is full-agent `kimi -p` (auto permission policy, tools available — not hobbled like Codex `exec` or coarse Claude `-p`). scillm still enforces `metadata.allow_write_paths` via post-run audit. Optional gate mode: `metadata.kimi_output_mode: "print"` for `--print --final-message-only --output-format stream-json`. Do not use `oc-kimi` or `opencode-go/kimi-*` as exec profiles — those are HTTP chat routes.
 
 

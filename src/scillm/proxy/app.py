@@ -7,13 +7,15 @@ FastAPI application for the scillm proxy (~350 lines).
 from __future__ import annotations
 
 import asyncio
+import base64
 import difflib
+import json
 import os
 import time
 import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any, AsyncIterator
 
 import httpx
 import yaml
@@ -24,18 +26,21 @@ from loguru import logger
 from scillm.proxy.config import ProxyConfig, load_config
 from scillm.proxy.errors import ProxyError, proxy_error_handler
 from scillm.proxy.middleware import BaseMiddleware, MiddlewareChain, MiddlewareReject
+from scillm.proxy import openai_images
+from scillm.proxy.openai_images import OPENAI_IMAGE_MODEL_CONFIGS
 from scillm.proxy.providers.opencode_go import (
     OPENCODE_GO_PROVIDER,
     describe_opencode_go_model,
     is_opencode_go_model,
     list_opencode_go_models_from_cli,
     list_opencode_go_models_from_server,
+    opencode_go_input_capabilities,
     static_opencode_go_models,
 )
 from scillm.proxy.providers.codex_models import codex_catalog_payload, discover_codex_models
 from scillm.proxy.router import Router
 from scillm.proxy.router import ProxyError as RouterProxyError
-from scillm.proxy.streaming import DEFAULT_STREAM_HEARTBEAT_S, SSE_HEADERS, sse_liveness_wrapper, stream_response
+from scillm.proxy.streaming import DEFAULT_STREAM_HEARTBEAT_S, SSE_HEADERS, _sse_generator, sse_liveness_wrapper
 from starlette.responses import StreamingResponse
 
 # ---------------------------------------------------------------------------
@@ -48,6 +53,10 @@ _start_time: float = 0.0
 _embedding_client: httpx.AsyncClient | None = None
 
 EMBEDDING_SERVICE_URL = os.environ.get("EMBEDDING_SERVICE_URL", "http://127.0.0.1:8602")
+MODELS_DEV_API_URL = os.environ.get("MODELS_DEV_API_URL", "https://models.dev/api.json")
+MODELS_DEV_CACHE_TTL_S = float(os.environ.get("MODELS_DEV_CACHE_TTL_S", "900"))
+_models_dev_cache: dict[str, Any] | None = None
+_models_dev_cache_ts: float = 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -68,6 +77,14 @@ def _check_auth(request: Request) -> str | None:
     return None
 
 
+def _require_caller_skill(request: Request) -> str:
+    """Return the required X-Caller-Skill value or fail before provider work."""
+    caller_skill = request.headers.get("x-caller-skill", "").strip()
+    if not caller_skill:
+        raise ProxyError(400, "X-Caller-Skill header is required", "caller_skill_required")
+    return caller_skill
+
+
 def _is_empty_length_response(response_dict: dict[str, Any]) -> bool:
     """Return true when a provider spent its budget without visible output."""
     choices = response_dict.get("choices", [])
@@ -79,6 +96,9 @@ def _is_empty_length_response(response_dict: dict[str, Any]) -> bool:
 
     message = choice.get("message") or {}
     content = message.get("content")
+    reasoning_content = message.get("reasoning_content")
+    if isinstance(reasoning_content, str) and reasoning_content.strip():
+        return False
     if content is None:
         return True
     if isinstance(content, str) and not content.strip():
@@ -112,13 +132,13 @@ def _is_empty_zero_usage_response(response_dict: dict[str, Any]) -> bool:
 # Request Validation (fail loudly on common mistakes)
 # ---------------------------------------------------------------------------
 
-# Deprecated models — also added to alias map for auto-remap
-# This dict provides error messages for startup env var warnings
+# Deprecated Chutes models. Do not remap these to aliases; Chutes calls must use
+# exact live model IDs selected from current inventory.
 _DEPRECATED_MODELS: dict[str, str] = {
-    "deepseek-ai/DeepSeek-V3": "Model removed from Chutes. Use 'text' alias instead.",
-    "deepseek-ai/DeepSeek-V3.1-TEE": "Model deprecated. Use 'text' alias instead.",
-    "deepseek-ai/DeepSeek-V3-0324": "Model deprecated. Use 'text' alias instead.",
-    "deepseek-ai/DeepSeek-V3-0324-TEE": "Model deprecated. Use 'text' alias instead.",
+    "deepseek-ai/DeepSeek-V3": "Model removed from Chutes. Use ops-chutes to choose an exact live model ID.",
+    "deepseek-ai/DeepSeek-V3.1-TEE": "Model deprecated. Use ops-chutes to choose an exact live model ID.",
+    "deepseek-ai/DeepSeek-V3-0324": "Model deprecated. Use ops-chutes to choose an exact live model ID.",
+    "deepseek-ai/DeepSeek-V3-0324-TEE": "Model deprecated. Use ops-chutes to choose an exact live model ID.",
 }
 
 # Env vars that agents might set with model names — validate at startup
@@ -137,21 +157,15 @@ def _check_env_for_deprecated_models() -> None:
         if val in _DEPRECATED_MODELS:
             logger.error(
                 "ENV VAR DEPRECATED: {}='{}' — {}. "
-                "Update .env to use 'text' or 'vlm' proxy aliases.",
+                "Update .env to an exact live Chutes model ID from ops-chutes.",
                 var, val, _DEPRECATED_MODELS[val],
-            )
-        elif val and val not in _VALID_MODEL_ALIASES and "/" in val:
-            # Direct provider model name — warn but don't block
-            logger.warning(
-                "ENV VAR DIRECT MODEL: {}='{}' — consider using proxy alias 'text' or 'vlm' instead",
-                var, val,
             )
 
 # Direct provider model names that should use aliases instead
 _DIRECT_MODEL_PATTERNS = {
-    "claude-": "Use 'text' or 'vlm-claude' alias for Claude models (has fallbacks).",
-    "gpt-4": "Use 'text' or 'vlm-codex' alias for GPT models (has fallbacks).",
-    "gemini-": "Use 'text-gemini' alias for Gemini models (has fallbacks).",
+    "claude-": "Use an explicit Claude profile such as 'claude-sonnet'; OAuth profiles do not cross-fallback.",
+    "gpt-4": "Use an explicit Codex/OpenAI profile such as 'gpt-5.5' or 'codex-vision'.",
+    "gemini-": "Use 'gemini-flash' or 'gemini-flash-high' for Gemini API-key routes.",
 }
 
 _CHUTES_PROVIDER_PREFIXES = (
@@ -163,9 +177,24 @@ _CHUTES_PROVIDER_PREFIXES = (
 )
 
 _CODEX_OAUTH_PREFIXES = ("codex", "gpt", "o1", "o3", "o4")
+_UNSUPPORTED_CHATGPT_CODEX_OAUTH_MODELS = {
+    "gpt-5.3-codex",
+    "gpt-5.2-codex",
+}
+_CODEX_OAUTH_REASONING_EFFORTS = {"none", "low", "medium", "high"}
 
 # Known good model aliases (checked at startup from config)
 _VALID_MODEL_ALIASES: set[str] = set()
+
+_RETIRED_MODEL_PREFIXES = ("text-",)
+
+_REVIEW_FANOUT_MODEL_PREFERENCE = (
+    "gpt-5.5",
+    "oc-kimi",
+    "oc-glm",
+    "oc-deepseek",
+    "oc-qwen",
+)
 
 _BATCH_FORWARD_KEYS = (
     "temperature",
@@ -182,26 +211,79 @@ _BATCH_FORWARD_KEYS = (
     "top_logprobs",
 )
 
+_IMAGE_GENERATION_MODELS: dict[str, dict[str, Any]] = {
+    "z-image-turbo": {
+        "provider": "chutes",
+        "slug": "chutes-z-image-turbo",
+        "endpoint_env": "CHUTES_Z_IMAGE_TURBO_URL",
+        "default_endpoint": "https://chutes-z-image-turbo.chutes.ai/generate",
+        "output_content_type": "image/png",
+        "supports_batch": True,
+        "limits": {
+            "prompt_min_length": 3,
+            "prompt_max_length": 1200,
+            "width_min": 576,
+            "width_max": 2048,
+            "height_min": 576,
+            "height_max": 2048,
+            "num_inference_steps_min": 1,
+            "num_inference_steps_max": 100,
+            "guidance_scale_min": 0.0,
+            "guidance_scale_max": 5.0,
+            "shift_min": 1.0,
+            "shift_max": 10.0,
+            "max_sequence_length_min": 256,
+            "max_sequence_length_max": 2048,
+            "seed_min": 0,
+            "seed_max": 2**32 - 1,
+        },
+    },
+    "chutes-z-image-turbo": {
+        "alias_for": "z-image-turbo",
+    },
+    "chutes/z-image-turbo": {
+        "alias_for": "z-image-turbo",
+    },
+    **OPENAI_IMAGE_MODEL_CONFIGS,
+}
+
 _DEFAULT_MODEL_POOLS: dict[str, dict[str, Any]] = {
+    "qra-chutes-only": {
+        "description": "QRA extraction through Chutes only; use when fallback lanes fail schema or return empty content.",
+        "strategy": "single_provider",
+        "lanes": [
+            {
+                "name": "qra-chutes-deepseek",
+                "provider": "chutes",
+                "model": os.environ.get("SCILLM_QRA_CHUTES_MODEL", ""),
+                "weight": 1,
+                "max_concurrency": 5,
+                "timeout": 420.0,
+                "require_hot_chutes": True,
+            },
+        ],
+    },
     "qra-deepseek-pool": {
-        "description": "Concurrent QRA extraction across independent Chutes and OpenCode Go DeepSeek lanes.",
+        "description": "QRA extraction pool using independent Chutes and OpenCode Go lanes.",
         "strategy": "weighted_round_robin",
         "lanes": [
             {
-                "name": "chutes-deepseek",
+                "name": "qra-chutes-deepseek",
                 "provider": "chutes",
-                "model": "deepseek-ai/DeepSeek-V3-0324-TEE",
-                "weight": 3,
+                "model": os.environ.get("SCILLM_QRA_CHUTES_MODEL", ""),
+                "weight": int(os.environ.get("SCILLM_QRA_CHUTES_WEIGHT", "3")),
                 "max_concurrency": 5,
                 "timeout": 420.0,
+                "require_hot_chutes": True,
             },
             {
-                "name": "opencode-go-deepseek-v4-flash",
-                "provider": OPENCODE_GO_PROVIDER,
-                "model": "opencode-go/deepseek-v4-flash",
-                "weight": 2,
-                "max_concurrency": 4,
-                "timeout": 620.0,
+                "name": "qra-opencode-go-deepseek-v4-flash",
+                "provider": "opencode-go",
+                "model": os.environ.get("SCILLM_QRA_OPENCODE_GO_MODEL", "opencode-go/deepseek-v4-flash"),
+                "weight": int(os.environ.get("SCILLM_QRA_OPENCODE_GO_WEIGHT", "2")),
+                "max_concurrency": int(os.environ.get("SCILLM_QRA_OPENCODE_GO_MAX_CONCURRENCY", "4")),
+                "timeout": float(os.environ.get("SCILLM_QRA_OPENCODE_GO_TIMEOUT_S", "620")),
+                "require_hot_chutes": False,
             },
         ],
     }
@@ -213,9 +295,109 @@ def _is_direct_chutes_model(model: str) -> bool:
     return model.lower().startswith(_CHUTES_PROVIDER_PREFIXES)
 
 
+def _is_chutes_deployment(group_name: str, model: str, api_base: str | None = None) -> bool:
+    """Return true when a configured deployment is intended for Chutes."""
+    lower_group = group_name.lower()
+    lower_model = str(model or "").lower()
+    lower_base = str(api_base or "").lower()
+    return (
+        "chutes" in lower_base
+        or lower_group.startswith("chutes-")
+        or lower_model.startswith(_CHUTES_PROVIDER_PREFIXES)
+    )
+
+
+def _chutes_config_inventory(available_models: list[str]) -> dict[str, Any]:
+    """Compare configured Chutes routing state with live provider inventory."""
+    available = set(available_models)
+    configured_groups: dict[str, list[str]] = {}
+    configured_models: set[str] = set()
+    fallback_references: dict[str, list[str]] = {}
+    alias_resolutions: dict[str, str] = {}
+
+    if _config is None:
+        return {
+            "status": "proxy_not_ready",
+            "configured_groups": {},
+            "configured_models": [],
+            "configured_available_models": [],
+            "configured_unavailable_models": [],
+            "fallback_references": {},
+            "unavailable_fallback_targets": [],
+            "alias_resolutions": {},
+        }
+
+    for group_name, group in _config.model_groups.items():
+        group_models = [
+            dep.model
+            for dep in group.deployments
+            if _is_chutes_deployment(group_name, dep.model, dep.api_base)
+        ]
+        if group_models:
+            configured_groups[group_name] = group_models
+            configured_models.update(group_models)
+
+    for source, targets in _config.fallbacks.items():
+        if source in configured_groups or source in configured_models or _is_direct_chutes_model(source):
+            fallback_references[source] = list(targets)
+            continue
+        for target in targets:
+            if target in configured_groups or target in configured_models or _is_direct_chutes_model(target):
+                fallback_references[source] = list(targets)
+                break
+
+    def fallback_target_available(target: str) -> bool:
+        if target in configured_groups:
+            return any(model in available for model in configured_groups[target]) if available else True
+        if target in configured_models:
+            return target in available if available else True
+        return target in available if available else True
+
+    unavailable_fallback_targets = sorted(
+        {
+            target
+            for targets in fallback_references.values()
+            for target in targets
+            if not fallback_target_available(target)
+        }
+    )
+
+    for alias, target in _config.aliases.items():
+        if (
+            alias in configured_groups
+            or target in configured_groups
+            or target in configured_models
+            or _is_direct_chutes_model(alias)
+            or _is_direct_chutes_model(target)
+        ):
+            resolved = target
+            if target in configured_groups and configured_groups[target]:
+                resolved = configured_groups[target][0]
+            alias_resolutions[alias] = resolved
+
+    configured_model_list = sorted(configured_models)
+    unavailable_models = sorted(model for model in configured_model_list if available and model not in available)
+    status = "ok" if not unavailable_models and not unavailable_fallback_targets else "config_drift"
+    return {
+        "status": status,
+        "configured_groups": configured_groups,
+        "configured_models": configured_model_list,
+        "configured_available_models": sorted(model for model in configured_model_list if not available or model in available),
+        "configured_unavailable_models": unavailable_models,
+        "fallback_references": fallback_references,
+        "unavailable_fallback_targets": unavailable_fallback_targets,
+        "alias_resolutions": alias_resolutions,
+    }
+
+
 def _is_codex_oauth_model(model: str) -> bool:
     """Return true for model ids handled by the Codex OAuth router."""
-    return model.lower().startswith(_CODEX_OAUTH_PREFIXES) and "/" not in model
+    normalized = model.lower()
+    return (
+        normalized.startswith(_CODEX_OAUTH_PREFIXES)
+        and "/" not in model
+        and normalized not in _UNSUPPORTED_CHATGPT_CODEX_OAUTH_MODELS
+    )
 
 
 def _codex_oauth_available() -> bool:
@@ -243,6 +425,116 @@ def _message_has_multimodal_content(message: dict[str, Any]) -> bool:
         or "inlineData" in content
         or content.get("type") in {"image_url", "image", "document"}
     )
+
+
+def _count_multimodal_parts(messages: list[dict[str, Any]]) -> dict[str, int]:
+    counts = {"image_count": 0, "document_count": 0, "inline_data_count": 0}
+    for message in messages:
+        if not isinstance(message, dict):
+            continue
+        content = message.get("content")
+        parts = content if isinstance(content, list) else [content] if isinstance(content, dict) else []
+        for part in parts:
+            if not isinstance(part, dict):
+                continue
+            part_type = part.get("type")
+            if part_type in {"image_url", "image"} or "image_url" in part:
+                counts["image_count"] += 1
+            if part_type == "document":
+                counts["document_count"] += 1
+            if "inlineData" in part:
+                counts["inline_data_count"] += 1
+    return counts
+
+
+def _normalize_reasoning_effort(body: dict[str, Any]) -> str | None:
+    effort = body.get("reasoning_effort")
+    if effort is None:
+        reasoning = body.get("reasoning")
+        if isinstance(reasoning, str):
+            effort = reasoning
+        elif isinstance(reasoning, dict):
+            effort = reasoning.get("effort")
+    if effort is None:
+        extra_body = body.get("extra_body")
+        if isinstance(extra_body, dict):
+            extra_reasoning = extra_body.get("reasoning")
+            if isinstance(extra_reasoning, str):
+                effort = extra_reasoning
+            elif isinstance(extra_reasoning, dict):
+                effort = extra_reasoning.get("effort")
+            effort = effort or extra_body.get("reasoning_effort")
+    return str(effort) if effort is not None else None
+
+
+def _validate_codex_oauth_reasoning_effort(model: str, body: dict[str, Any]) -> None:
+    effort = _normalize_reasoning_effort(body)
+    if effort is None:
+        return
+    if _oauth_provider_for_model(model) != "codex-oauth":
+        return
+    normalized = effort.strip().lower()
+    if normalized not in _CODEX_OAUTH_REASONING_EFFORTS:
+        allowed = ", ".join(sorted(_CODEX_OAUTH_REASONING_EFFORTS))
+        raise ProxyError(
+            400,
+            (
+                f"Unsupported Codex OAuth reasoning effort '{effort}'. "
+                f"Use one of: {allowed}; or omit reasoning/reasoning_effort."
+            ),
+            "invalid_request_error",
+        )
+    if normalized != effort:
+        body["reasoning_effort"] = normalized
+
+
+def _oauth_provider_for_model(model: str) -> str | None:
+    lower = model.lower()
+    if lower.startswith("claude"):
+        return "anthropic-oauth"
+    if lower.startswith(("gpt", "codex", "o1", "o3", "o4")):
+        return "codex-oauth"
+    return None
+
+
+def _provider_field_for_reasoning(provider: str | None) -> str | None:
+    if provider == "codex-oauth":
+        return "reasoning.effort"
+    if provider == "anthropic-oauth":
+        return "thinking.budget_tokens"
+    if provider == "gemini":
+        return "generationConfig.thinkingConfig.thinkingLevel"
+    return None
+
+
+def _attach_proof_fields(body: dict[str, Any], response_dict: dict[str, Any], messages: list[dict[str, Any]]) -> None:
+    """Attach scillm proof fields promised by the public skill contract."""
+    requested_model = str(body.get("model") or "")
+    served_model = str(response_dict.get("model") or requested_model)
+    provider = _oauth_provider_for_model(served_model) or _oauth_provider_for_model(requested_model)
+    reasoning_effort = _normalize_reasoning_effort(body)
+
+    if reasoning_effort is not None:
+        provider_field = _provider_field_for_reasoning(provider)
+        response_dict["scillm_reasoning"] = {
+            "requested_effort": reasoning_effort,
+            "applied_effort": reasoning_effort if provider_field and reasoning_effort != "none" else None,
+            "forwarded": bool(provider_field and reasoning_effort != "none"),
+            "provider_field": provider_field,
+            "ignored_reason": None if provider_field and reasoning_effort != "none" else "none_requested" if reasoning_effort == "none" else "unsupported_effort_for_provider",
+        }
+
+    if any(isinstance(msg, dict) and _message_has_multimodal_content(msg) for msg in messages):
+        counts = _count_multimodal_parts(messages)
+        image_seen_by = provider if provider in {"codex-oauth", "anthropic-oauth"} else None
+        response_dict["scillm_multimodal"] = {
+            "input_multimodal": True,
+            **counts,
+            "image_seen_by": image_seen_by,
+            "routed_to_provider": provider,
+            "model_requested": requested_model,
+            "model_served": served_model,
+        }
 
 
 def _model_pool(pool_name: str) -> dict[str, Any] | None:
@@ -293,6 +585,7 @@ def _model_pool_status(
             "provider": provider,
             "model": lane.get("model"),
             "weight": lane.get("weight", 1),
+            "require_hot_chutes": bool(lane.get("require_hot_chutes")),
             "lane_limit": int(lane.get("max_concurrency") or effective_limit),
             "configured_limit": configured_limit,
             "effective_limit": effective_limit,
@@ -346,6 +639,57 @@ def _lane_for_index(lanes: list[dict[str, Any]], index: int) -> dict[str, Any]:
     return sequence[index % len(sequence)]
 
 
+def _lane_provider_available(lane: dict[str, Any], concurrency: dict[str, Any]) -> int:
+    provider = str(lane.get("provider") or "")
+    provider_state = concurrency.get(provider, {}) if isinstance(concurrency, dict) else {}
+    if bool(provider_state.get("paused", False)):
+        return 0
+    try:
+        return max(0, int(provider_state.get("available")))
+    except (TypeError, ValueError):
+        pass
+    try:
+        effective_limit = int(provider_state.get("effective_limit") or lane.get("max_concurrency") or 1)
+        in_flight = int(
+            provider_state.get("semaphore_in_flight")
+            or provider_state.get("actual_in_flight")
+            or provider_state.get("in_flight")
+            or 0
+        )
+        return max(0, effective_limit - in_flight)
+    except (TypeError, ValueError):
+        return int(lane.get("max_concurrency") or 1)
+
+
+def _lane_for_index_with_capacity(
+    lanes: list[dict[str, Any]],
+    index: int,
+    concurrency: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Pick the weighted lane, but spill to an available provider if it is full.
+
+    QRA callers often submit one-item batch requests. Without a global capacity
+    check those requests can all select the weighted Chutes lane, then queue
+    behind Chutes while another provider lane has slots free.
+    """
+    preferred = _lane_for_index(lanes, index)
+    if not concurrency:
+        return preferred
+    if _lane_provider_available(preferred, concurrency) > 0:
+        return preferred
+    available_lanes = [lane for lane in lanes if _lane_provider_available(lane, concurrency) > 0]
+    if not available_lanes:
+        return preferred
+    return max(
+        available_lanes,
+        key=lambda lane: (
+            _lane_provider_available(lane, concurrency),
+            int(lane.get("weight") or 1),
+            -lanes.index(lane),
+        ),
+    )
+
+
 def _messages_for_batch_item(item: dict[str, Any]) -> list[dict[str, Any]]:
     messages = item.get("messages")
     if isinstance(messages, list) and messages:
@@ -361,11 +705,382 @@ def _item_id(item: dict[str, Any], index: int) -> str:
     return str(item.get("item_id") or item.get("id") or f"item-{index + 1}")
 
 
+def _batch_sse_event(event: str, data: dict[str, Any]) -> str:
+    return f"event: {event}\ndata: {json.dumps(data)}\n\n"
+
+
+def _message_text_content(message: dict[str, Any]) -> str:
+    """Return assistant text, falling back to reasoning_content when content is empty."""
+    content = message.get("content") or ""
+    if not content and isinstance(message.get("reasoning_content"), str):
+        content = message["reasoning_content"]
+    return str(content or "")
+
+
+def _chat_completion_text_content(data: dict[str, Any]) -> str:
+    message = (data.get("choices") or [{}])[0].get("message") or {}
+    if not isinstance(message, dict):
+        return ""
+    return _message_text_content(message)
+
+
+async def _collect_chat_sse_lines(lines: AsyncIterator[str], *, requested_model: str) -> dict[str, Any]:
+    """Collect an OpenAI-compatible chat SSE stream into a response dict."""
+    chunks: list[str] = []
+    reasoning_chunks: list[str] = []
+    served_model = requested_model
+    usage: dict[str, Any] | None = None
+    done_seen = False
+    last_event_name = "message"
+
+    async for line in lines:
+        if not line:
+            continue
+        if line.startswith(":"):
+            continue
+        if line.startswith("event:"):
+            last_event_name = line[len("event:"):].strip() or "message"
+            continue
+        if not line.startswith("data:"):
+            continue
+
+        data_text = line[len("data:"):].strip()
+        if data_text == "[DONE]":
+            done_seen = True
+            break
+        try:
+            event = json.loads(data_text)
+        except json.JSONDecodeError:
+            continue
+
+        if "error" in event:
+            error_payload = event["error"] if isinstance(event["error"], dict) else {"message": str(event["error"])}
+            raise ProxyError(
+                502,
+                error_payload.get("message") or json.dumps(error_payload, sort_keys=True),
+                error_payload.get("type") or last_event_name or "stream_error",
+                details=error_payload,
+            )
+
+        if event.get("model"):
+            served_model = str(event["model"])
+        if isinstance(event.get("usage"), dict):
+            usage = event["usage"]
+
+        choices = event.get("choices") or []
+        if not choices:
+            continue
+        choice = choices[0] or {}
+        delta = choice.get("delta") or {}
+        message = choice.get("message") or {}
+        content = delta.get("content")
+        if content is None:
+            content = message.get("content")
+        if content:
+            chunks.append(str(content))
+        reasoning = delta.get("reasoning_content")
+        if reasoning is None:
+            reasoning = message.get("reasoning_content")
+        if reasoning:
+            reasoning_chunks.append(str(reasoning))
+
+    if not done_seen:
+        raise ProxyError(502, "stream ended without [DONE]", "stream_error")
+
+    final_content = "".join(chunks) or "".join(reasoning_chunks)
+    response: dict[str, Any] = {
+        "model": served_model,
+        "choices": [{"message": {"role": "assistant", "content": final_content}}],
+    }
+    if usage is not None:
+        response["usage"] = usage
+    return response
+
+
 def _float_or_none(value: Any) -> float | None:
     try:
         return float(value) if value is not None else None
     except (TypeError, ValueError):
         return None
+
+
+def _int_or_none(value: Any) -> int | None:
+    try:
+        if value is None:
+            return None
+        if isinstance(value, bool):
+            return None
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _image_model_config(model: str) -> dict[str, Any]:
+    """Return image-generation model config, resolving public aliases."""
+    requested = str(model or "z-image-turbo").strip() or "z-image-turbo"
+    name = requested
+    config = _IMAGE_GENERATION_MODELS.get(name)
+    if isinstance(config, dict) and config.get("alias_for"):
+        name = str(config["alias_for"])
+        config = _IMAGE_GENERATION_MODELS.get(name)
+    if not isinstance(config, dict) or config.get("alias_for"):
+        available = ", ".join(sorted(k for k, v in _IMAGE_GENERATION_MODELS.items() if not v.get("alias_for")))
+        raise ProxyError(400, f"Unknown image generation model '{requested}'. Available: {available}.", "invalid_request_error")
+    alias_note = None
+    if requested != name:
+        alias_cfg = _IMAGE_GENERATION_MODELS.get(requested) or {}
+        alias_note = alias_cfg.get("alias_note")
+    result = {"requested_model": requested, "name": name, **config}
+    if alias_note:
+        result["alias_note"] = alias_note
+    return result
+
+
+def _chutes_image_api_key() -> str:
+    if _config is not None and _config.chutes_api_key:
+        return _config.chutes_api_key
+    key = os.environ.get("CHUTES_API_KEY") or os.environ.get("CHUTES_API_TOKEN")
+    if key:
+        return key
+    raise ProxyError(503, "CHUTES_API_KEY is required for image generation", "service_unavailable")
+
+
+def _chutes_image_endpoint(model_config: dict[str, Any]) -> str:
+    env_name = str(model_config.get("endpoint_env") or "")
+    if env_name:
+        value = os.environ.get(env_name, "").strip()
+        if value:
+            return value
+    value = os.environ.get("CHUTES_IMAGE_API_BASE", "").strip()
+    if value:
+        return value.rstrip("/") + "/generate" if not value.rstrip("/").endswith("/generate") else value.rstrip("/")
+    return str(model_config["default_endpoint"])
+
+
+def _parse_image_size(body: dict[str, Any]) -> tuple[int, int]:
+    width = _int_or_none(body.get("width"))
+    height = _int_or_none(body.get("height"))
+    size = body.get("size")
+    if (width is None or height is None) and isinstance(size, str) and "x" in size.lower():
+        left, right = size.lower().split("x", 1)
+        width = width if width is not None else _int_or_none(left.strip())
+        height = height if height is not None else _int_or_none(right.strip())
+    return width or 1024, height or 1024
+
+
+def _clamp_image_value(
+    value: int | float,
+    *,
+    minimum: int | float,
+    maximum: int | float,
+    field: str,
+) -> int | float:
+    if value < minimum or value > maximum:
+        raise ProxyError(400, f"{field} must be between {minimum} and {maximum}", "invalid_request_error")
+    return value
+
+
+def _image_generation_args(body: dict[str, Any], *, item_index: int = 0) -> dict[str, Any]:
+    """Normalize OpenAI-style image request fields to the z-image-turbo schema."""
+    model_config = _image_model_config(str(body.get("model") or "z-image-turbo"))
+    limits = model_config["limits"]
+    prompt = body.get("prompt")
+    if not isinstance(prompt, str) or not prompt.strip():
+        raise ProxyError(400, "prompt is required for image generation", "invalid_request_error")
+    prompt = prompt.strip()
+    prompt_len = len(prompt)
+    if prompt_len < limits["prompt_min_length"] or prompt_len > limits["prompt_max_length"]:
+        raise ProxyError(
+            400,
+            f"prompt length must be between {limits['prompt_min_length']} and {limits['prompt_max_length']} characters",
+            "invalid_request_error",
+        )
+
+    width, height = _parse_image_size(body)
+    width = int(_clamp_image_value(width, minimum=limits["width_min"], maximum=limits["width_max"], field="width"))
+    height = int(_clamp_image_value(height, minimum=limits["height_min"], maximum=limits["height_max"], field="height"))
+
+    steps = _int_or_none(body.get("num_inference_steps") or body.get("steps")) or 9
+    steps = int(_clamp_image_value(
+        steps,
+        minimum=limits["num_inference_steps_min"],
+        maximum=limits["num_inference_steps_max"],
+        field="num_inference_steps",
+    ))
+    guidance_scale = _float_or_none(body.get("guidance_scale"))
+    if guidance_scale is None:
+        guidance_scale = 0.0
+    guidance_scale = float(_clamp_image_value(
+        guidance_scale,
+        minimum=limits["guidance_scale_min"],
+        maximum=limits["guidance_scale_max"],
+        field="guidance_scale",
+    ))
+    shift = _float_or_none(body.get("shift"))
+    if shift is None:
+        shift = 3.0
+    shift = float(_clamp_image_value(shift, minimum=limits["shift_min"], maximum=limits["shift_max"], field="shift"))
+    max_sequence_length = _int_or_none(body.get("max_sequence_length")) or 512
+    max_sequence_length = int(_clamp_image_value(
+        max_sequence_length,
+        minimum=limits["max_sequence_length_min"],
+        maximum=limits["max_sequence_length_max"],
+        field="max_sequence_length",
+    ))
+    seed = _int_or_none(body.get("seed"))
+    if seed is not None:
+        seed = int(_clamp_image_value(seed + item_index, minimum=limits["seed_min"], maximum=limits["seed_max"], field="seed"))
+
+    args: dict[str, Any] = {
+        "prompt": prompt,
+        "width": width,
+        "height": height,
+        "num_inference_steps": steps,
+        "guidance_scale": guidance_scale,
+        "shift": shift,
+        "max_sequence_length": max_sequence_length,
+    }
+    if seed is not None:
+        args["seed"] = seed
+    return args
+
+
+def _normalize_image_response_payload(
+    *,
+    raw_content: bytes,
+    content_type: str,
+    response_format: str,
+) -> dict[str, Any]:
+    """Normalize Chutes PNG bytes or JSON wrappers into one OpenAI-style data item."""
+    if content_type.startswith("image/"):
+        b64 = base64.b64encode(raw_content).decode("ascii")
+        if response_format == "url":
+            return {"url": f"data:{content_type};base64,{b64}"}
+        return {"b64_json": b64}
+
+    try:
+        payload = json.loads(raw_content.decode("utf-8"))
+    except Exception as exc:
+        raise ProxyError(502, f"image provider returned non-image, non-JSON response: {content_type}", "provider_error") from exc
+    if not isinstance(payload, dict):
+        raise ProxyError(502, "image provider returned malformed JSON response", "provider_error")
+
+    for key in ("b64_json", "image_base64", "base64", "data"):
+        value = payload.get(key)
+        if isinstance(value, str) and value:
+            return {"b64_json": value.split(",", 1)[-1] if value.startswith("data:") else value}
+    for key in ("url", "image_url"):
+        value = payload.get(key)
+        if isinstance(value, str) and value:
+            if response_format == "b64_json" and value.startswith("data:") and "," in value:
+                return {"b64_json": value.split(",", 1)[1]}
+            return {"url": value}
+    raise ProxyError(502, "image provider response did not include image bytes, b64_json, or url", "provider_error")
+
+
+async def _call_chutes_image_generation(
+    *,
+    client: httpx.AsyncClient,
+    model_config: dict[str, Any],
+    args: dict[str, Any],
+    response_format: str,
+    caller_skill: str,
+    timeout: float,
+) -> dict[str, Any]:
+    """Call one Chutes image-generation chute and return one normalized data item."""
+    endpoint = _chutes_image_endpoint(model_config)
+    api_key = _chutes_image_api_key()
+    try:
+        response = await client.post(
+            endpoint,
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "X-Caller-Skill": caller_skill,
+            },
+            json={"input_args": args},
+            timeout=timeout,
+        )
+    except httpx.HTTPError as exc:
+        raise ProxyError(502, f"image provider request failed: {exc}", "provider_error") from exc
+    if response.status_code >= 400:
+        message = response.text[:500] or f"HTTP {response.status_code}"
+        raise ProxyError(502, f"image provider returned {response.status_code}: {message}", "provider_error")
+    item = _normalize_image_response_payload(
+        raw_content=response.content,
+        content_type=(response.headers.get("content-type") or "application/octet-stream").split(";", 1)[0].strip().lower(),
+        response_format=response_format,
+    )
+    item["revised_prompt"] = args["prompt"]
+    return item
+
+
+async def _generate_images_for_body(body: dict[str, Any], *, caller_skill: str) -> dict[str, Any]:
+    """Generate one OpenAI-style image response; supports n via bounded asyncio."""
+    started = time.monotonic()
+    model_name = str(body.get("model") or "z-image-turbo")
+    model_config = _image_model_config(model_name)
+    provider = str(model_config.get("provider") or "chutes")
+    response_format = str(body.get("response_format") or "b64_json")
+    if response_format not in {"b64_json", "url"}:
+        raise ProxyError(400, "response_format must be b64_json or url", "invalid_request_error")
+    limits = model_config.get("limits") or {}
+    n_max = int(limits.get("n_max") or 4)
+    n = _int_or_none(body.get("n")) or 1
+    if n < int(limits.get("n_min") or 1) or n > n_max:
+        raise ProxyError(400, f"n must be between {limits.get('n_min', 1)} and {n_max} for image generation", "invalid_request_error")
+    timeout = float(body.get("timeout") or 180.0)
+    semaphore = asyncio.Semaphore(min(n, int(body.get("max_concurrency") or 4)))
+    created = int(time.time())
+
+    async def run_one(client: httpx.AsyncClient, index: int) -> dict[str, Any]:
+        async with semaphore:
+            if provider == "openai":
+                payload = openai_images.openai_image_generation_payload(body, model_config=model_config)
+                return await openai_images.call_openai_image_generation(
+                    client=client,
+                    payload=payload,
+                    response_format=response_format,
+                    timeout=timeout,
+                )
+            args = _image_generation_args(body, item_index=index)
+            return await _call_chutes_image_generation(
+                client=client,
+                model_config=model_config,
+                args=args,
+                response_format=response_format,
+                caller_skill=caller_skill,
+                timeout=timeout,
+            )
+
+    async with httpx.AsyncClient() as client:
+        tasks = [asyncio.create_task(run_one(client, index)) for index in range(n)]
+        data = [await task for task in asyncio.as_completed(tasks)]
+
+    response: dict[str, Any] = {
+        "created": created,
+        "object": "list",
+        "model": model_config.get("name", model_name),
+        "provider": provider,
+        "data": data,
+        "ordered": False,
+        "completion_order": "as_completed",
+    }
+    if model_config.get("requested_model") and model_config.get("requested_model") != model_config.get("name"):
+        response["model_requested"] = model_config["requested_model"]
+        if model_config.get("alias_note"):
+            response["alias_note"] = model_config["alias_note"]
+    elapsed_ms = int((time.monotonic() - started) * 1000)
+    first = data[0] if data else {}
+    response["scillm"] = {
+        "status": "completed",
+        "terminal": True,
+        "surface": "/v1/images/generations",
+        "caller_skill": caller_skill,
+        "elapsed_ms": elapsed_ms,
+        "image_count": len(data),
+        "has_b64": bool(isinstance(first, dict) and first.get("b64_json")),
+    }
+    return response
 
 
 def _request_deadline_timeout_s(body: dict[str, Any]) -> float | None:
@@ -409,6 +1124,252 @@ def _timeout_error_details(
         "cascade_attempts": body.get("_cascade_attempts", 0),
         "final_provider_error": str(final_provider_error) if final_provider_error else None,
     }
+
+
+async def _await_with_phase_progress(
+    task_coro: Any,
+    *,
+    phase: str,
+    model: str | None,
+    heartbeat_s: float | None,
+    wall_time_s: float,
+) -> AsyncIterator[dict[str, Any]]:
+    """Yield heartbeat events while awaiting a long preflight/probe coroutine."""
+    task = asyncio.create_task(task_coro)
+    started = time.monotonic()
+    heartbeat = max(0.01, float(heartbeat_s or 15.0))
+    deadline = started + max(1.0, float(wall_time_s or heartbeat))
+    try:
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+                yield {
+                    "type": "prompt_phase_result",
+                    "ok": False,
+                    "phase": phase,
+                    "model": model,
+                    "error": "wall_time_exceeded",
+                    "elapsed_s": round(time.monotonic() - started, 3),
+                }
+                return
+            done, _ = await asyncio.wait({task}, timeout=min(heartbeat, remaining), return_when=asyncio.FIRST_COMPLETED)
+            if done:
+                yield {
+                    "type": "prompt_phase_result",
+                    "ok": True,
+                    "phase": phase,
+                    "model": model,
+                    "elapsed_s": round(time.monotonic() - started, 3),
+                    "result": task.result(),
+                }
+                return
+            yield {
+                "type": "prompt_phase_progress",
+                "ok": True,
+                "phase": phase,
+                "model": model,
+                "elapsed_s": round(time.monotonic() - started, 3),
+                "deadline_s": round(max(0.0, deadline - time.monotonic()), 3),
+            }
+    except Exception as exc:
+        if not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+        yield {
+            "type": "prompt_phase_result",
+            "ok": False,
+            "phase": phase,
+            "model": model,
+            "error": str(exc),
+            "elapsed_s": round(time.monotonic() - started, 3),
+        }
+
+
+def _stream_error_from_chunk(chunk: str | bytes) -> RuntimeError | None:
+    """Return a terminal stream error represented inside an SSE chunk."""
+    if isinstance(chunk, bytes):
+        text = chunk.decode("utf-8", errors="replace")
+    else:
+        text = chunk
+    for event in text.split("\n\n"):
+        data_lines = [line[6:] for line in event.splitlines() if line.startswith("data: ")]
+        if not data_lines:
+            continue
+        data_text = "\n".join(data_lines).strip()
+        if not data_text or data_text == "[DONE]":
+            continue
+        try:
+            payload = yaml.safe_load(data_text)
+        except Exception:
+            continue
+        if not isinstance(payload, dict) or "error" not in payload:
+            continue
+        error = payload.get("error")
+        if isinstance(error, dict):
+            message = str(error.get("message") or "stream_error")
+            error_type = str(error.get("type") or "stream_error")
+            return RuntimeError(f"{error_type}: {message}")
+        return RuntimeError(str(error))
+    return None
+
+
+def _stream_chunk_has_visible_output(chunk: str | bytes) -> bool:
+    """Return True when an SSE chunk carries visible content or tool output."""
+    if isinstance(chunk, bytes):
+        text = chunk.decode("utf-8", errors="replace")
+    else:
+        text = chunk
+    for event in text.split("\n\n"):
+        data_lines = [line[6:] for line in event.splitlines() if line.startswith("data: ")]
+        if not data_lines:
+            continue
+        data_text = "\n".join(data_lines).strip()
+        if not data_text or data_text == "[DONE]":
+            continue
+        try:
+            payload = yaml.safe_load(data_text)
+        except Exception:
+            continue
+        if not isinstance(payload, dict):
+            continue
+        choices = payload.get("choices")
+        if not isinstance(choices, list):
+            continue
+        for choice in choices:
+            if not isinstance(choice, dict):
+                continue
+            delta = choice.get("delta")
+            if isinstance(delta, dict):
+                if isinstance(delta.get("content"), str) and delta["content"]:
+                    return True
+                if isinstance(delta.get("reasoning_content"), str) and delta["reasoning_content"]:
+                    return True
+                if delta.get("tool_calls"):
+                    return True
+            message = choice.get("message")
+            if isinstance(message, dict):
+                if isinstance(message.get("content"), str) and message["content"]:
+                    return True
+                if isinstance(message.get("reasoning_content"), str) and message["reasoning_content"]:
+                    return True
+                if message.get("tool_calls"):
+                    return True
+    return False
+
+
+def _stream_chunk_reasoning_chars(chunk: str | bytes) -> int:
+    """Count reasoning_content characters in an OpenAI-compatible SSE chunk."""
+    if isinstance(chunk, bytes):
+        text = chunk.decode("utf-8", errors="replace")
+    else:
+        text = chunk
+    total = 0
+    for event in text.split("\n\n"):
+        data_lines = [line[6:] for line in event.splitlines() if line.startswith("data: ")]
+        if not data_lines:
+            continue
+        data_text = "\n".join(data_lines).strip()
+        if not data_text or data_text == "[DONE]":
+            continue
+        try:
+            payload = yaml.safe_load(data_text)
+        except Exception:
+            continue
+        if not isinstance(payload, dict):
+            continue
+        choices = payload.get("choices")
+        if not isinstance(choices, list):
+            continue
+        for choice in choices:
+            if not isinstance(choice, dict):
+                continue
+            for source_key in ("delta", "message"):
+                source = choice.get(source_key)
+                if isinstance(source, dict) and isinstance(source.get("reasoning_content"), str):
+                    total += len(source["reasoning_content"])
+    return total
+
+
+def _stream_terminal_diagnostics_from_chunk(chunk: str | bytes) -> dict[str, Any]:
+    """Extract terminal OpenAI-compatible SSE diagnostics from a chunk."""
+    if isinstance(chunk, bytes):
+        text = chunk.decode("utf-8", errors="replace")
+    else:
+        text = chunk
+    diagnostics: dict[str, Any] = {}
+    for event in text.split("\n\n"):
+        data_lines = [line[6:] for line in event.splitlines() if line.startswith("data: ")]
+        if not data_lines:
+            continue
+        data_text = "\n".join(data_lines).strip()
+        if data_text == "[DONE]":
+            diagnostics["saw_done"] = True
+            continue
+        if not data_text:
+            continue
+        try:
+            payload = yaml.safe_load(data_text)
+        except Exception:
+            continue
+        if not isinstance(payload, dict):
+            continue
+        if isinstance(payload.get("usage"), dict):
+            diagnostics["usage"] = payload["usage"]
+        choices = payload.get("choices")
+        if not isinstance(choices, list):
+            continue
+        for choice in choices:
+            if not isinstance(choice, dict):
+                continue
+            finish_reason = choice.get("finish_reason")
+            if finish_reason is not None:
+                diagnostics["finish_reason"] = finish_reason
+    return diagnostics
+
+
+async def _stream_with_middleware_lifecycle(
+    stream: AsyncIterator[str | bytes],
+    body: dict[str, Any],
+    middleware_chain: MiddlewareChain,
+) -> AsyncIterator[str | bytes]:
+    """Finalize middleware only after the client-visible stream terminates."""
+    terminal_error: Exception | None = None
+    saw_visible_output = False
+    reasoning_chars = 0
+    try:
+        async for chunk in stream:
+            terminal_error = terminal_error or _stream_error_from_chunk(chunk)
+            saw_visible_output = saw_visible_output or _stream_chunk_has_visible_output(chunk)
+            reasoning_chars += _stream_chunk_reasoning_chars(chunk)
+            diagnostics = _stream_terminal_diagnostics_from_chunk(chunk)
+            if "finish_reason" in diagnostics:
+                body["_stream_terminal_finish_reason"] = diagnostics["finish_reason"]
+            if "usage" in diagnostics:
+                body["_stream_terminal_usage"] = diagnostics["usage"]
+            if diagnostics.get("saw_done"):
+                body["_stream_saw_done"] = True
+            yield chunk
+    except asyncio.CancelledError as exc:
+        await middleware_chain.run_on_error(body, exc)
+        raise
+    except Exception as exc:
+        await middleware_chain.run_on_error(body, exc)
+        raise
+    else:
+        body["_stream_visible_output"] = saw_visible_output
+        body["_stream_reasoning_output"] = reasoning_chars > 0
+        body["_stream_reasoning_chars"] = reasoning_chars
+        if terminal_error is not None:
+            await middleware_chain.run_on_error(body, terminal_error)
+        elif not saw_visible_output:
+            await middleware_chain.run_on_error(
+                body,
+                RuntimeError("stream_empty_output: no visible content or tool calls before [DONE]"),
+            )
+        else:
+            await middleware_chain.run_post_call(body, {"stream": True, "stream_completed": True})
 
 
 def _repo_root() -> Path:
@@ -471,10 +1432,19 @@ def _deployment_supports(dep: Any, group_name: str, adapters: dict[str, dict[str
     if group.startswith("vlm") or "glm-4.6v" in model or "vl" in model:
         supports["image"] = True
     if adapter_id == "opencode_go":
-        supports["image"] = False
-        supports["pdf"] = False
+        opencode_name = group_name if group_name.startswith("opencode-go/") else f"opencode-go/{dep.model}"
+        opencode_caps = opencode_go_input_capabilities(opencode_name)
+        supports["image"] = opencode_caps["image"]
+        supports["pdf"] = opencode_caps["pdf"]
         supports["zip"] = False
     return supports
+
+
+def _resolved_model_for_validation(model: str) -> str:
+    """Resolve public aliases before capability validation."""
+    if _config is None:
+        return model
+    return str(_config.aliases.get(model, model))
 
 
 def _merge_supports(items: list[dict[str, bool]]) -> dict[str, bool]:
@@ -493,6 +1463,226 @@ def _suggest_model(unknown: str, candidates: set[str], n: int = 3) -> list[str]:
     # Map back to original case
     lower_to_orig = {m.lower(): m for m in user_facing}
     return [lower_to_orig[m] for m in matches]
+
+
+def _is_public_selectable_model(name: str) -> bool:
+    """Return false for compatibility-only or retired model names."""
+    value = (name or "").strip()
+    if not value:
+        return False
+    if value.startswith(_RETIRED_MODEL_PREFIXES):
+        return False
+    if _is_direct_chutes_model(value):
+        return False
+    if value in {"local-text", "moonshot-text"}:
+        return False
+    return True
+
+
+def _model_catalog_entry(
+    *,
+    name: str,
+    kind: str,
+    target: str | None = None,
+    deployments: int | None = None,
+    capabilities: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Build a normalized model registry row for UI selection."""
+    selectable = _is_public_selectable_model(name)
+    if target is not None and not _is_public_selectable_model(target):
+        selectable = False
+    entry: dict[str, Any] = {
+        "kind": kind,
+        "selectable": selectable,
+        "review_fanout_default": name in _REVIEW_FANOUT_MODEL_PREFERENCE and selectable,
+    }
+    if target is not None:
+        entry["target"] = target
+    if deployments is not None:
+        entry["deployments"] = deployments
+    if capabilities is not None:
+        entry["capabilities"] = capabilities
+    return entry
+
+
+def _public_model_capabilities(model: str) -> dict[str, bool]:
+    resolved = _resolved_model_for_validation(model)
+    if resolved in _IMAGE_GENERATION_MODELS:
+        return {
+            "text_input": True,
+            "image_input": False,
+            "pdf_input": False,
+            "image_output": True,
+            "image_generation": True,
+            "streaming": False,
+            "tools": False,
+        }
+    if is_opencode_go_model(resolved):
+        caps = opencode_go_input_capabilities(resolved)
+        return {
+            "text_input": caps["text"],
+            "image_input": caps["image"],
+            "pdf_input": caps["pdf"],
+            "image_output": False,
+            "image_generation": False,
+            "streaming": True,
+            "tools": True,
+        }
+    lower = resolved.lower()
+    image_input = lower.startswith(("vlm", "gpt", "codex", "claude")) or lower in {
+        "gemini-flash",
+        "gemini-flash-high",
+        "moonshot-text",
+    }
+    pdf_input = lower.startswith(("vlm", "claude")) or lower in {"gemini-flash", "gemini-flash-high"}
+    return {
+        "text_input": True,
+        "image_input": image_input,
+        "pdf_input": pdf_input,
+        "image_output": False,
+        "image_generation": False,
+        "streaming": True,
+        "tools": True,
+    }
+
+
+def _build_model_catalog() -> dict[str, dict[str, Any]]:
+    """Return model aliases and groups with a fail-closed selection contract."""
+    if _config is None:
+        return {}
+
+    models: dict[str, dict[str, Any]] = {}
+    for name, target in _config.aliases.items():
+        models[name] = _model_catalog_entry(
+            name=name,
+            kind="alias",
+            target=str(target),
+            capabilities=_public_model_capabilities(name),
+        )
+    for name, group in _config.model_groups.items():
+        models[name] = _model_catalog_entry(
+            name=name,
+            kind="group",
+            deployments=len(group.deployments),
+            capabilities=_public_model_capabilities(name),
+        )
+    for image_name, image_config in _IMAGE_GENERATION_MODELS.items():
+        if image_config.get("alias_for"):
+            continue
+        models[image_name] = _model_catalog_entry(
+            name=image_name,
+            kind="image_generation",
+            target=str(image_config.get("slug") or image_name),
+            deployments=1,
+            capabilities=_public_model_capabilities(image_name),
+        )
+    return dict(sorted(models.items()))
+
+
+def _models_dev_provider_key(provider: str | None) -> str | None:
+    if not provider:
+        return None
+    normalized = provider.strip().lower()
+    if normalized in {"opencode-go", "opencode_go", "opencode"}:
+        return "opencode"
+    return normalized
+
+
+async def _fetch_models_dev_catalog(*, refresh: bool = False) -> dict[str, Any]:
+    """Fetch models.dev catalog as advisory metadata.
+
+    This catalog is intentionally not the routing source of truth. scillm's
+    local model catalog and provider adapters decide what is callable.
+    """
+    global _models_dev_cache, _models_dev_cache_ts
+
+    now = time.monotonic()
+    if (
+        not refresh
+        and _models_dev_cache is not None
+        and now - _models_dev_cache_ts < MODELS_DEV_CACHE_TTL_S
+    ):
+        return _models_dev_cache
+
+    async with httpx.AsyncClient(timeout=20.0, follow_redirects=True) as client:
+        response = await client.get(MODELS_DEV_API_URL)
+        response.raise_for_status()
+        catalog = response.json()
+        if not isinstance(catalog, dict):
+            raise ValueError("models.dev catalog root is not an object")
+        _models_dev_cache = catalog
+        _models_dev_cache_ts = now
+        return catalog
+
+
+def _models_dev_extract(
+    catalog: dict[str, Any],
+    *,
+    provider: str | None = None,
+    model: str | None = None,
+) -> dict[str, Any]:
+    provider_key = _models_dev_provider_key(provider)
+    provider_record = catalog.get(provider_key) if provider_key else None
+    if provider_key and not isinstance(provider_record, dict):
+        return {
+            "provider": provider,
+            "provider_key": provider_key,
+            "found": False,
+            "model": model,
+            "advisory_only": True,
+        }
+
+    if not provider_key:
+        return {
+            "providers": sorted(catalog.keys()),
+            "provider_count": len(catalog),
+            "advisory_only": True,
+        }
+
+    models = provider_record.get("models", {}) if isinstance(provider_record, dict) else {}
+    if not isinstance(models, dict):
+        models = {}
+
+    if model:
+        model_key = model.removeprefix("opencode-go/") if provider_key == "opencode" else model
+        model_record = models.get(model_key)
+        return {
+            "provider": provider,
+            "provider_key": provider_key,
+            "model": model,
+            "model_key": model_key,
+            "found": isinstance(model_record, dict),
+            "advisory_only": True,
+            "record": model_record if isinstance(model_record, dict) else None,
+        }
+
+    return {
+        "provider": provider,
+        "provider_key": provider_key,
+        "found": True,
+        "advisory_only": True,
+        "model_count": len(models),
+        "models": models,
+    }
+
+
+def _models_dev_advisory_for_name(catalog: dict[str, Any], name: str, entry: dict[str, Any]) -> dict[str, Any] | None:
+    target = str(entry.get("target") or name)
+    if target.startswith("opencode-go/"):
+        result = _models_dev_extract(catalog, provider="opencode-go", model=target)
+        record = result.get("record")
+        if isinstance(record, dict):
+            return {
+                "provider": "opencode-go",
+                "model": target,
+                "modalities": record.get("modalities"),
+                "attachment": record.get("attachment"),
+                "reasoning": record.get("reasoning"),
+                "tool_call": record.get("tool_call"),
+                "status": record.get("status"),
+                "advisory_only": True,
+            }
+    return None
 
 
 def _validate_model_request(model: str, body: dict, request: Request) -> None:
@@ -538,6 +1728,20 @@ def _validate_model_request(model: str, body: dict, request: Request) -> None:
             model, caller, _DEPRECATED_MODELS[model],
         )
 
+    if model.lower() in _UNSUPPORTED_CHATGPT_CODEX_OAUTH_MODELS:
+        raise ProxyError(
+            400,
+            (
+                f"Model '{model}' is not supported for one-shot Codex OAuth "
+                "with a ChatGPT account. Use 'gpt-5.5' for "
+                "POST /v1/chat/completions, or use a codex_exec profile for "
+                "bounded CLI worker calls."
+            ),
+            "invalid_request_error",
+        )
+
+    _validate_codex_oauth_reasoning_effort(model, body)
+
     # 2. Reject unknown models with helpful error + suggestions
     # Only check if we have loaded valid aliases (after startup)
     if (
@@ -573,18 +1777,20 @@ def _validate_model_request(model: str, body: dict, request: Request) -> None:
         body["_expect_json"] = True
         logger.debug("Auto-enabled JSON repair for response_format: json_object")
 
-    # 5. Strip max_tokens — causes 90% empty responses on reasoning models
+    # 5. Strip output token caps — causes 90% empty responses on reasoning models
     # Reasoning models (DeepSeek-R1, o1, etc) spend tokens on internal reasoning.
-    # If max_tokens is set too low, all tokens go to reasoning and output is empty.
+    # If a completion token cap is set too low, all tokens go to reasoning and
+    # output is empty.
     # Better to let the model decide than risk empty responses.
-    if body.get("max_tokens") is None:
-        body.pop("max_tokens", None)
-    elif "max_tokens" in body:
-        logger.warning(
-            f"Stripping max_tokens={body['max_tokens']} — causes empty output on reasoning models. "
-            f"See MEMORY.md: 'Never use max_tokens'."
-        )
-        del body["max_tokens"]
+    for token_cap_field in ("max_tokens", "max_completion_tokens"):
+        if body.get(token_cap_field) is None:
+            body.pop(token_cap_field, None)
+        elif token_cap_field in body:
+            logger.warning(
+                f"Stripping {token_cap_field}={body[token_cap_field]} — causes empty output on reasoning models. "
+                f"See MEMORY.md: 'Never use max_tokens'."
+            )
+            del body[token_cap_field]
 
     # Also honor explicit x-expect-json header
     if request.headers.get("x-expect-json", "").lower() in ("true", "1", "yes"):
@@ -631,19 +1837,35 @@ def _validate_model_request(model: str, body: dict, request: Request) -> None:
         isinstance(msg, dict) and _message_has_multimodal_content(msg)
         for msg in messages
     )
-    if is_opencode_go_model(model) and has_multimodal_content:
+    resolved_model = _resolved_model_for_validation(model)
+    if is_opencode_go_model(resolved_model) and has_multimodal_content:
+        counts = _count_multimodal_parts(messages)
+        opencode_caps = opencode_go_input_capabilities(resolved_model)
+        image_only = (
+            counts["image_count"] > 0
+            and counts["document_count"] == 0
+            and counts["inline_data_count"] == 0
+        )
+        if image_only and opencode_caps["image"]:
+            return
+        unsupported_parts: list[str] = []
+        if counts["image_count"] and not opencode_caps["image"]:
+            unsupported_parts.append("image")
+        if counts["document_count"] or counts["inline_data_count"]:
+            unsupported_parts.append("pdf/document/inlineData")
         raise ProxyError(
             400,
-            f"OpenCode Go model '{model}' is text-only through /scillm today. "
-            "Live `opencode models opencode-go --verbose` reports "
-            "attachment=false and input.image=false/input.pdf=false for DeepSeek V4. "
-            "Use model='vlm' for image/PDF work, or target a confirmed vision-capable provider.",
+            f"OpenCode Go model '{model}' resolves to '{resolved_model}' and does not support "
+            f"{', '.join(unsupported_parts) or 'this multimodal payload'} through /scillm; "
+            "it is text-only for this payload. "
+            "Use model='oc-kimi' or 'opencode-go/kimi-k2.6' for OpenAI-style image_url PNG/JPEG review, "
+            "or use Gemini/Claude for PDFs and inlineData.",
             "invalid_request_error",
         )
-    if has_inline_data and not model_lower.startswith(("gemini", "text-gemini")):
+    if has_inline_data and not model_lower.startswith("gemini"):
         raise ProxyError(
             400,
-            f"inlineData parts only work with Gemini models (text-gemini, text-gemini-3). "
+            f"inlineData parts only work with Gemini models (gemini-flash, gemini-flash-high, or direct gemini-* IDs). "
             f"You used model='{model}'. For images with other models, use image_url format. "
             f"For PDFs with Claude, use document blocks. See SKILL.md 'Sending Multiple Files'.",
             "invalid_request_error",
@@ -993,11 +2215,15 @@ async def lifespan(app: FastAPI):
         len(_config.fallbacks),
     )
 
-    # Auto-detect warm Chutes models and switch to them (runs at startup, blocks briefly)
-    await _auto_select_warm_models(_config, _router)
+    if os.environ.get("SCILLM_CHUTES_STARTUP_AUTO_SELECT", "").lower() in {"1", "true", "yes"}:
+        await _auto_select_warm_models(_config, _router)
+    else:
+        logger.info("Chutes startup auto-select disabled; use ops-chutes for live model selection")
 
-    # Background warmup: fire cheap requests to cold-start-prone providers
-    asyncio.create_task(_warmup_chutes_models(_config))
+    if os.environ.get("SCILLM_CHUTES_STARTUP_WARMUP", "").lower() in {"1", "true", "yes"}:
+        asyncio.create_task(_warmup_chutes_models(_config))
+    else:
+        logger.info("Chutes startup warmup disabled; use ops-chutes for warmup/health checks")
 
     yield
     # Graceful shutdown: drain in-flight requests before closing clients
@@ -1100,21 +2326,17 @@ async def chat_completions(request: Request):
     # GUARDRAILS: Make common mistakes fail loudly or auto-fix
     # -------------------------------------------------------------------------
     _validate_model_request(model, body, request)
+    normalized_reasoning_effort = _normalize_reasoning_effort(body)
+    if normalized_reasoning_effort is not None:
+        body["reasoning_effort"] = normalized_reasoning_effort
 
     if _middleware_chain is None or _router is None:
         raise ProxyError(503, "Proxy not ready — startup incomplete", "service_unavailable")
 
-    # ── Caller identification (optional but recommended) ────────────────────────
-    # X-Caller-Skill header helps trace requests and debug queue issues.
-    # Warn if missing but don't reject — maintains OpenAI SDK compatibility.
-    caller_skill = request.headers.get("x-caller-skill", "").strip()
-    if not caller_skill:
-        caller_skill = "unknown"
-        logger.warning(
-            "[{}] Missing X-Caller-Skill header — add headers={{'X-Caller-Skill': 'your-skill'}} "
-            "for better debugging and cost tracking",
-            request_id,
-        )
+    # ── Caller identification ─────────────────────────────────────────────────
+    # X-Caller-Skill is required so calls are attributable and failure reports
+    # can be routed to the owning skill/project.
+    caller_skill = _require_caller_skill(request)
 
     # Inject headers for middleware (arango_log.py uses x-caller-skill)
     body["_headers"] = dict(request.headers)
@@ -1166,10 +2388,14 @@ async def chat_completions(request: Request):
     kwargs: dict[str, Any] = {}
     for key in ("temperature", "max_tokens", "top_p", "frequency_penalty",
                 "presence_penalty", "stop", "n", "response_format",
-                "tools", "tool_choice", "seed", "logprobs", "top_logprobs"):
+                "tools", "tool_choice", "seed", "logprobs", "top_logprobs",
+                "reasoning_effort", "require_exact_model", "allow_model_remap"):
         if key in body:
             kwargs[key] = body[key]
     kwargs["stream"] = stream
+    provider_bound_diagnostics: dict[str, Any] = {}
+    kwargs["_provider_bound_diagnostics"] = provider_bound_diagnostics
+    body["_provider_bound_diagnostics"] = provider_bound_diagnostics
 
     # Pass dynamic timeout from TimeoutEstimatorMiddleware to router
     if "_dynamic_timeout_ms" in body:
@@ -1255,21 +2481,7 @@ async def chat_completions(request: Request):
                 # The openai SDK returns its own async stream type.
                 if hasattr(result, "__aiter__") and not hasattr(result, "response"):
                     # Raw byte stream from OAuth providers — pipe directly
-                    response = StreamingResponse(
-                        sse_liveness_wrapper(
-                            result,
-                            model=model,
-                            started_at=start,
-                            overall_timeout_s=deadline_timeout_s,
-                            heartbeat_interval_s=heartbeat_interval_s,
-                            progress_events=progress_events,
-                        ),
-                        media_type="text/event-stream",
-                        headers=SSE_HEADERS,
-                    )
-                else:
-                    # OpenAI SDK async stream — use existing SSE wrapper
-                    response = await stream_response(
+                    stream_iter = sse_liveness_wrapper(
                         result,
                         model=model,
                         started_at=start,
@@ -1277,8 +2489,20 @@ async def chat_completions(request: Request):
                         heartbeat_interval_s=heartbeat_interval_s,
                         progress_events=progress_events,
                     )
-                # Post-call middleware (observe only for streaming)
-                await _middleware_chain.run_post_call(body, {"stream": True})
+                else:
+                    stream_iter = sse_liveness_wrapper(
+                        _sse_generator(result, model=model),
+                        model=model,
+                        started_at=start,
+                        overall_timeout_s=deadline_timeout_s,
+                        heartbeat_interval_s=heartbeat_interval_s,
+                        progress_events=progress_events,
+                    )
+                response = StreamingResponse(
+                    _stream_with_middleware_lifecycle(stream_iter, body, _middleware_chain),
+                    media_type="text/event-stream",
+                    headers=SSE_HEADERS,
+                )
                 return response
             else:
                 # Non-streaming: result is a ChatCompletion object
@@ -1317,6 +2541,7 @@ async def chat_completions(request: Request):
                         },
                     )
 
+                _attach_proof_fields(body, response_dict, working_messages)
                 response_dict = await _middleware_chain.run_post_call(body, response_dict)
 
                 # Echo opaque metadata back — LLM never saw it, can't fabricate it
@@ -1353,12 +2578,20 @@ async def chat_completions(request: Request):
             raise
         except RouterProxyError as exc:
             # Convert router's ProxyError to enriched ProxyError for LLM analysis
-            error_type = "timeout_error" if exc.status_code == 504 else "router_error"
+            details = getattr(exc, "details", {}) or {}
+            if details.get("error_type"):
+                error_type = str(details["error_type"])
+            elif details.get("provider_error_code") == "PROVIDER_AUTH_FAILED":
+                error_type = "provider_auth_error"
+            elif details.get("provider_error_code"):
+                error_type = "provider_error"
+            else:
+                error_type = "timeout_error" if exc.status_code == 504 else "router_error"
             proxy_exc = ProxyError(
                 exc.status_code,
                 exc.message,
                 error_type,
-                details=getattr(exc, "details", {}) or {},
+                details=details,
             )
             await _middleware_chain.run_on_error(body, proxy_exc)
             raise proxy_exc
@@ -1527,6 +2760,137 @@ async def scillm_model_pool_status(request: Request, pool_name: str):
     return _model_pool_status(pool_name, pool, concurrency)
 
 
+@app.post("/v1/images/generations")
+async def image_generations(request: Request):
+    """OpenAI-style image generation endpoint (Chutes z-image-turbo or GPT image models)."""
+    auth_err = _check_auth(request)
+    if auth_err:
+        raise ProxyError(401, auth_err, "authentication_error")
+    if _config is None:
+        raise ProxyError(503, "Proxy not ready — startup incomplete", "service_unavailable")
+    caller_skill = _require_caller_skill(request)
+    body = await request.json()
+    if not isinstance(body, dict):
+        raise ProxyError(400, "image generation body must be a JSON object", "invalid_request_error")
+    return await _generate_images_for_body(body, caller_skill=caller_skill)
+
+
+@app.post("/v1/scillm/batch/images/generations")
+async def scillm_batch_image_generations(request: Request):
+    """Run image generations concurrently using asyncio.create_task/as_completed."""
+    auth_err = _check_auth(request)
+    if auth_err:
+        raise ProxyError(401, auth_err, "authentication_error")
+    if _config is None:
+        raise ProxyError(503, "Proxy not ready — startup incomplete", "service_unavailable")
+    caller_skill = _require_caller_skill(request)
+    body = await request.json()
+    if not isinstance(body, dict):
+        raise ProxyError(400, "batch image generation body must be a JSON object", "invalid_request_error")
+    items = body.get("items")
+    if not isinstance(items, list) or not items:
+        raise ProxyError(400, "items must be a non-empty list", "invalid_request_error")
+    if any(not isinstance(item, dict) for item in items):
+        raise ProxyError(400, "each item must be an object", "invalid_request_error")
+    max_items = int(body.get("max_items") or 100)
+    if len(items) > max_items:
+        raise ProxyError(400, f"batch has {len(items)} items; max_items is {max_items}", "invalid_request_error")
+    max_concurrency = int(body.get("max_concurrency") or 4)
+    if max_concurrency < 1 or max_concurrency > 16:
+        raise ProxyError(400, "max_concurrency must be between 1 and 16", "invalid_request_error")
+
+    batch_id = str(body.get("batch_id") or f"image-batch-{uuid.uuid4().hex[:12]}")
+    shared = {
+        key: body[key]
+        for key in (
+            "model",
+            "size",
+            "width",
+            "height",
+            "response_format",
+            "quality",
+            "background",
+            "output_format",
+            "output_compression",
+            "moderation",
+            "num_inference_steps",
+            "steps",
+            "guidance_scale",
+            "shift",
+            "max_sequence_length",
+            "timeout",
+        )
+        if key in body
+    }
+    semaphore = asyncio.Semaphore(max_concurrency)
+    started = time.monotonic()
+
+    async def run_one(item: dict[str, Any], index: int) -> dict[str, Any]:
+        item_id = _item_id(item, index)
+        item_started = time.monotonic()
+        payload = {**shared, **item, "n": item.get("n", 1)}
+        payload["scillm_metadata"] = {
+            **(item.get("scillm_metadata") if isinstance(item.get("scillm_metadata"), dict) else {}),
+            "batch_id": batch_id,
+            "item_id": item_id,
+            "provider": "chutes",
+            "selected_model": str(payload.get("model") or "z-image-turbo"),
+        }
+        async with semaphore:
+            try:
+                response = await _generate_images_for_body(payload, caller_skill=caller_skill)
+                return {
+                    "ok": True,
+                    "item_id": item_id,
+                    "index": index,
+                    "model": response.get("model"),
+                    "provider": response.get("provider"),
+                    "data": response.get("data", []),
+                    "scillm_metadata": payload["scillm_metadata"],
+                    "latency_s": round(time.monotonic() - item_started, 2),
+                }
+            except ProxyError as exc:
+                return {
+                    "ok": False,
+                    "item_id": item_id,
+                    "index": index,
+                    "error": exc.message,
+                    "error_type": exc.error_type,
+                    "status_code": exc.status_code,
+                    "scillm_metadata": payload["scillm_metadata"],
+                    "latency_s": round(time.monotonic() - item_started, 2),
+                }
+            except Exception as exc:
+                return {
+                    "ok": False,
+                    "item_id": item_id,
+                    "index": index,
+                    "error": str(exc) or type(exc).__name__,
+                    "error_type": type(exc).__name__,
+                    "scillm_metadata": payload["scillm_metadata"],
+                    "latency_s": round(time.monotonic() - item_started, 2),
+                }
+
+    tasks = [asyncio.create_task(run_one(item, index)) for index, item in enumerate(items)]
+    results = []
+    for task in asyncio.as_completed(tasks):
+        results.append(await task)
+    completed = sum(1 for result in results if result.get("ok"))
+    failed = len(results) - completed
+    return {
+        "batch_id": batch_id,
+        "object": "list",
+        "provider": "chutes",
+        "total": len(results),
+        "completed": completed,
+        "failed": failed,
+        "elapsed_s": round(time.monotonic() - started, 2),
+        "results": results,
+        "ordered": False,
+        "completion_order": "as_completed",
+    }
+
+
 @app.post("/v1/scillm/batch/completions")
 async def scillm_batch_completions(request: Request):
     """Run a batch across a weighted provider pool using ``asyncio.as_completed``."""
@@ -1554,7 +2918,15 @@ async def scillm_batch_completions(request: Request):
         raise ProxyError(400, f"batch has {len(items)} items; max_items is {max_items}", "invalid_request_error")
 
     batch_id = str(body.get("batch_id") or f"batch-{uuid.uuid4().hex[:12]}")
+    lane_offset = int(body.get("lane_offset") or body.get("start_index") or 0)
     lanes = pool["lanes"]
+    concurrency_snapshot = {}
+    if body.get("spill_to_available_lane", True):
+        try:
+            from chutes.middleware.concurrency_guard import get_concurrency_status
+            concurrency_snapshot = get_concurrency_status()
+        except ImportError:
+            concurrency_snapshot = {}
     lane_semaphores = {
         lane["name"]: asyncio.Semaphore(int(lane.get("max_concurrency") or 1))
         for lane in lanes
@@ -1566,7 +2938,7 @@ async def scillm_batch_completions(request: Request):
     total_started = time.monotonic()
 
     async def run_one(client: httpx.AsyncClient, item: dict[str, Any], index: int) -> dict[str, Any]:
-        lane = _lane_for_index(lanes, index)
+        lane = _lane_for_index_with_capacity(lanes, index + lane_offset, concurrency_snapshot)
         item_id = _item_id(item, index)
         started = time.monotonic()
         async with lane_semaphores[lane["name"]]:
@@ -1578,7 +2950,12 @@ async def scillm_batch_completions(request: Request):
                     "messages": _messages_for_batch_item(item),
                     "_scillm_pool": pool_name,
                     "_scillm_pool_lane": lane["name"],
+                    "_scillm_require_hot_chutes": bool(lane.get("require_hot_chutes")),
                 }
+                if body.get("wait_for_hot_chutes") is not None:
+                    payload["_scillm_wait_for_hot_chutes"] = body.get("wait_for_hot_chutes")
+                if body.get("allow_cold_chutes") is not None:
+                    payload["_scillm_allow_cold_chutes"] = body.get("allow_cold_chutes")
                 item_metadata = item.get("scillm_metadata") if isinstance(item.get("scillm_metadata"), dict) else {}
                 payload["scillm_metadata"] = {
                     **item_metadata,
@@ -1588,6 +2965,7 @@ async def scillm_batch_completions(request: Request):
                     "lane": lane["name"],
                     "selected_model": lane["model"],
                     "provider": lane.get("provider"),
+                    "require_hot_chutes": bool(lane.get("require_hot_chutes")),
                 }
                 timeout = float(item.get("timeout") or body.get("timeout") or lane.get("timeout") or 300.0)
                 payload["timeout"] = timeout
@@ -1605,15 +2983,17 @@ async def scillm_batch_completions(request: Request):
                 )
                 response.raise_for_status()
                 data = response.json()
+                content = _chat_completion_text_content(data)
                 return {
-                    "ok": True,
+                    "ok": bool(content.strip()),
                     "item_id": item_id,
                     "index": index,
                     "lane": lane["name"],
                     "provider": lane.get("provider"),
                     "model": lane["model"],
                     "served_model": data.get("model"),
-                    "content": data.get("choices", [{}])[0].get("message", {}).get("content"),
+                    "content": content,
+                    "error": None if content.strip() else "empty_response_content",
                     "response": data,
                     "latency_s": round(time.monotonic() - started, 2),
                 }
@@ -1677,6 +3057,220 @@ async def scillm_batch_completions(request: Request):
         "ordered": False,
         "completion_order": "as_completed",
     }
+
+
+@app.post("/v1/scillm/batch/completions/stream")
+async def scillm_batch_completions_stream(request: Request):
+    """Stream model-pool batch progress and item results as SSE events."""
+    auth_err = _check_auth(request)
+    if auth_err:
+        raise ProxyError(401, auth_err, "authentication_error")
+    if _config is None or _router is None or _middleware_chain is None:
+        raise ProxyError(503, "Proxy not ready — startup incomplete", "service_unavailable")
+
+    body = await request.json()
+    pool_name = str(body.get("model_pool") or body.get("model") or "qra-deepseek-pool")
+    pool = _model_pool(pool_name)
+    if pool is None:
+        raise ProxyError(
+            400,
+            f"Unknown model_pool '{pool_name}'. Available: {', '.join(sorted(_DEFAULT_MODEL_POOLS))}.",
+            "invalid_request_error",
+        )
+
+    items = body.get("items")
+    if not isinstance(items, list) or not items:
+        raise ProxyError(400, "items must be a non-empty list", "invalid_request_error")
+    max_items = int(body.get("max_items") or 500)
+    if len(items) > max_items:
+        raise ProxyError(400, f"batch has {len(items)} items; max_items is {max_items}", "invalid_request_error")
+    if any(not isinstance(item, dict) for item in items):
+        raise ProxyError(400, "each item must be an object", "invalid_request_error")
+
+    batch_id = str(body.get("batch_id") or f"batch-{uuid.uuid4().hex[:12]}")
+    lane_offset = int(body.get("lane_offset") or body.get("start_index") or 0)
+    lanes = pool["lanes"]
+    concurrency_snapshot = {}
+    if body.get("spill_to_available_lane", True):
+        try:
+            from chutes.middleware.concurrency_guard import get_concurrency_status
+            concurrency_snapshot = get_concurrency_status()
+        except ImportError:
+            concurrency_snapshot = {}
+    lane_semaphores = {
+        lane["name"]: asyncio.Semaphore(int(lane.get("max_concurrency") or 1))
+        for lane in lanes
+    }
+    auth_header = request.headers.get("authorization", "")
+    caller_skill = request.headers.get("x-caller-skill", "scillm-batch-pool")
+    heartbeat_s = float(body.get("stream_heartbeat_s") or body.get("heartbeat_interval_s") or DEFAULT_STREAM_HEARTBEAT_S)
+    shared_params = {key: body[key] for key in _BATCH_FORWARD_KEYS if key in body}
+    shared_params["stream"] = True
+    shared_params["stream_progress_events"] = bool(body.get("stream_progress_events", True))
+    shared_params["stream_heartbeat_s"] = heartbeat_s
+    shared_params["stream_options"] = {"include_usage": True}
+    total_started = time.monotonic()
+
+    async def run_one(client: httpx.AsyncClient, item: dict[str, Any], index: int) -> dict[str, Any]:
+        lane = _lane_for_index_with_capacity(lanes, index + lane_offset, concurrency_snapshot)
+        item_id = _item_id(item, index)
+        started = time.monotonic()
+        async with lane_semaphores[lane["name"]]:
+            try:
+                payload = {
+                    **shared_params,
+                    **{key: item[key] for key in _BATCH_FORWARD_KEYS if key in item},
+                    "model": lane["model"],
+                    "messages": _messages_for_batch_item(item),
+                    "_scillm_pool": pool_name,
+                    "_scillm_pool_lane": lane["name"],
+                    "_scillm_require_hot_chutes": bool(lane.get("require_hot_chutes")),
+                }
+                if body.get("wait_for_hot_chutes") is not None:
+                    payload["_scillm_wait_for_hot_chutes"] = body.get("wait_for_hot_chutes")
+                if body.get("allow_cold_chutes") is not None:
+                    payload["_scillm_allow_cold_chutes"] = body.get("allow_cold_chutes")
+                item_metadata = item.get("scillm_metadata") if isinstance(item.get("scillm_metadata"), dict) else {}
+                payload["scillm_metadata"] = {
+                    **item_metadata,
+                    "batch_id": batch_id,
+                    "item_id": item_id,
+                    "model_pool": pool_name,
+                    "lane": lane["name"],
+                    "selected_model": lane["model"],
+                    "provider": lane.get("provider"),
+                    "require_hot_chutes": bool(lane.get("require_hot_chutes")),
+                }
+                timeout = float(item.get("timeout") or body.get("timeout") or lane.get("timeout") or 300.0)
+                payload["timeout"] = timeout
+                async with client.stream(
+                    "POST",
+                    "/v1/chat/completions",
+                    headers={
+                        "Authorization": auth_header,
+                        "X-Caller-Skill": caller_skill,
+                        "X-Scillm-Batch-Id": batch_id,
+                        "X-Scillm-Batch-Total": str(len(items)),
+                        "X-Scillm-Call-Key": item_id,
+                    },
+                    json=payload,
+                    timeout=timeout + 30.0,
+                ) as response:
+                    if response.status_code != 200:
+                        text = (await response.aread()).decode("utf-8", errors="replace")
+                        return {
+                            "ok": False,
+                            "item_id": item_id,
+                            "index": index,
+                            "lane": lane["name"],
+                            "provider": lane.get("provider"),
+                            "model": lane["model"],
+                            "error": text,
+                            "status_code": response.status_code,
+                            "latency_s": round(time.monotonic() - started, 2),
+                        }
+                    data = await _collect_chat_sse_lines(response.aiter_lines(), requested_model=lane["model"])
+                content = _chat_completion_text_content(data)
+                return {
+                    "ok": bool(content.strip()),
+                    "item_id": item_id,
+                    "index": index,
+                    "lane": lane["name"],
+                    "provider": lane.get("provider"),
+                    "model": lane["model"],
+                    "served_model": data.get("model"),
+                    "content": content,
+                    "error": None if content.strip() else "empty_response_content",
+                    "response": data,
+                    "latency_s": round(time.monotonic() - started, 2),
+                }
+            except Exception as exc:
+                return {
+                    "ok": False,
+                    "item_id": item_id,
+                    "index": index,
+                    "lane": lane["name"],
+                    "provider": lane.get("provider"),
+                    "model": lane["model"],
+                    "error": str(exc) or type(exc).__name__,
+                    "error_type": type(exc).__name__,
+                    "latency_s": round(time.monotonic() - started, 2),
+                }
+
+    async def event_stream() -> AsyncIterator[str]:
+        transport = httpx.ASGITransport(app=app)
+        completed = 0
+        failed = 0
+        yield _batch_sse_event(
+            "batch_started",
+            {
+                "batch_id": batch_id,
+                "model_pool": pool_name,
+                "strategy": pool["strategy"],
+                "total": len(items),
+                "stream": True,
+                "stream_heartbeat_s": heartbeat_s,
+            },
+        )
+        async with httpx.AsyncClient(transport=transport, base_url="http://scillm.internal") as client:
+            tasks: list[asyncio.Task[dict[str, Any]]] = []
+            for index, item in enumerate(items):
+                lane = _lane_for_index(lanes, index + lane_offset)
+                item_id = _item_id(item, index)
+                yield _batch_sse_event(
+                    "item_started",
+                    {
+                        "batch_id": batch_id,
+                        "item_id": item_id,
+                        "index": index,
+                        "lane": lane["name"],
+                        "provider": lane.get("provider"),
+                        "model": lane["model"],
+                    },
+                )
+                tasks.append(asyncio.create_task(run_one(client, item, index)))
+
+            pending: set[asyncio.Task[dict[str, Any]]] = set(tasks)
+            while pending:
+                done, pending = await asyncio.wait(pending, timeout=heartbeat_s, return_when=asyncio.FIRST_COMPLETED)
+                if not done:
+                    yield _batch_sse_event(
+                        "heartbeat",
+                        {
+                            "batch_id": batch_id,
+                            "model_pool": pool_name,
+                            "elapsed_ms": int((time.monotonic() - total_started) * 1000),
+                            "completed": completed,
+                            "failed": failed,
+                            "pending": len(pending),
+                        },
+                    )
+                    continue
+                for task in done:
+                    result = await task
+                    if result.get("ok"):
+                        completed += 1
+                        yield _batch_sse_event("item_completed", result)
+                    else:
+                        failed += 1
+                        yield _batch_sse_event("item_failed", result)
+
+        yield _batch_sse_event(
+            "batch_done",
+            {
+                "batch_id": batch_id,
+                "model_pool": pool_name,
+                "strategy": pool["strategy"],
+                "total": len(items),
+                "completed": completed,
+                "failed": failed,
+                "elapsed_s": round(time.monotonic() - total_started, 2),
+                "ordered": False,
+                "completion_order": "as_completed",
+            },
+        )
+
+    return StreamingResponse(event_stream(), media_type="text/event-stream", headers=SSE_HEADERS)
 
 
 @app.get("/v1/scillm/health")
@@ -1795,18 +3389,24 @@ async def scillm_activity(request: Request):
 
 
 @app.get("/v1/scillm/concurrency")
-async def scillm_concurrency(request: Request, model: str = "text"):
+async def scillm_concurrency(request: Request, model: str = ""):
     """Get concurrency info for a model (for batch sizing).
 
     Skills call this to determine optimal chunk_size for batch processing.
     Returns effective_limit accounting for adaptive backoff from 429s.
 
-    Example: GET /v1/scillm/concurrency?model=text
-    Response: {"model": "text", "provider": "chutes", "chunk_size": 4, ...}
+    Example: GET /v1/scillm/concurrency?model=Qwen/Qwen3.6-27B-TEE
+    Response: {"model": "Qwen/Qwen3.6-27B-TEE", "provider": "chutes", "chunk_size": 4, ...}
     """
     auth_err = _check_auth(request)
     if auth_err:
         raise ProxyError(401, auth_err, "authentication_error")
+    if not model:
+        raise ProxyError(
+            400,
+            "model query parameter is required; Chutes calls must specify an exact live model ID",
+            "invalid_request_error",
+        )
 
     try:
         from chutes.middleware.concurrency_guard import get_concurrency_for_model
@@ -1869,8 +3469,12 @@ async def scillm_abuse_guard_reset(request: Request):
 
 
 @app.get("/v1/scillm/models")
-async def scillm_models(request: Request):
-    """List model groups and aliases."""
+async def scillm_models(
+    request: Request,
+    include_models_dev: bool = False,
+    refresh_models_dev: bool = False,
+):
+    """List model groups, aliases, and UI-safe model selection contracts."""
     auth_err = _check_auth(request)
     if auth_err:
         raise ProxyError(401, auth_err, "authentication_error")
@@ -1888,13 +3492,50 @@ async def scillm_models(request: Request):
         "models": ["all-MiniLM-L6-v2"],
         "endpoint": EMBEDDING_SERVICE_URL,
     }
+    models = _build_model_catalog()
+    models_dev_error: str | None = None
+    if include_models_dev:
+        try:
+            models_dev_catalog = await _fetch_models_dev_catalog(refresh=refresh_models_dev)
+            for name, entry in models.items():
+                advisory = _models_dev_advisory_for_name(models_dev_catalog, name, entry)
+                if advisory is not None:
+                    entry["models_dev"] = advisory
+        except Exception as exc:
+            models_dev_error = str(exc)
+    selectable_models = [
+        name for name, entry in models.items()
+        if bool(entry.get("selectable"))
+    ]
+    review_fanout_models = [
+        name for name in _REVIEW_FANOUT_MODEL_PREFERENCE
+        if name in models and bool(models[name].get("selectable"))
+    ]
     return {
         "groups": groups,
         "aliases": _config.aliases,
+        "models": models,
+        "selectable_models": selectable_models,
+        "review_fanout_models": review_fanout_models,
+        "retired_model_prefixes": list(_RETIRED_MODEL_PREFIXES),
+        "models_dev": {
+            "included": include_models_dev,
+            "advisory_only": True,
+            "source": MODELS_DEV_API_URL,
+            "error": models_dev_error,
+        },
+        "selection_contract": {
+            "review_fanout": (
+                "Use review_fanout_models for default scoped review nodes. Do not "
+                "offer retired text-* aliases for review, "
+                "prompt, or production DAG fanout nodes."
+            ),
+            "fallbacks": "Fallbacks must stay within the same provider family unless explicitly configured otherwise.",
+        },
         "auto_providers": {
             "codex": {
                 "model_prefixes": ["gpt-", "codex-", "o1", "o3", "o4"],
-                "examples": ["gpt-5.5", "gpt-5.3-codex", "gpt-5.2-codex"],
+                "examples": ["gpt-5.5"],
                 "key_configured": _codex_oauth_available(),
             },
             OPENCODE_GO_PROVIDER: {
@@ -1904,6 +3545,34 @@ async def scillm_models(request: Request):
             }
         },
     }
+
+
+@app.get("/v1/scillm/models-dev")
+async def scillm_models_dev(
+    request: Request,
+    provider: str | None = None,
+    model: str | None = None,
+    refresh: bool = False,
+):
+    """Return advisory models.dev metadata without changing scillm routing."""
+    auth_err = _check_auth(request)
+    if auth_err:
+        raise ProxyError(401, auth_err, "authentication_error")
+
+    try:
+        catalog = await _fetch_models_dev_catalog(refresh=refresh)
+    except Exception as exc:
+        raise ProxyError(
+            502,
+            f"models.dev catalog fetch failed: {exc}",
+            "provider_error",
+            details={"source": MODELS_DEV_API_URL, "advisory_only": True},
+        )
+
+    extracted = _models_dev_extract(catalog, provider=provider, model=model)
+    extracted["source"] = MODELS_DEV_API_URL
+    extracted["routing_source_of_truth"] = "/v1/scillm/models and provider-specific scillm capability endpoints"
+    return extracted
 
 
 @app.get("/v1/scillm/capabilities")
@@ -1954,6 +3623,29 @@ async def scillm_capabilities(request: Request):
             "lanes": [dict(lane) for lane in pool.get("lanes", [])],
         }
 
+    image_generation = {
+        name: {
+            "provider": config.get("provider", "chutes"),
+            "endpoint": "/v1/images/generations",
+            "batch_endpoint": "/v1/scillm/batch/images/generations",
+            "model_slug": config.get("slug"),
+            "supports": {
+                "text": True,
+                "image": False,
+                "pdf": False,
+                "zip": False,
+                "streaming": False,
+                "tools": False,
+                "image_output": True,
+                "image_generation": True,
+                "batch": bool(config.get("supports_batch")),
+            },
+            "limits": config.get("limits", {}),
+        }
+        for name, config in _IMAGE_GENERATION_MODELS.items()
+        if not config.get("alias_for")
+    }
+
     try:
         from chutes.middleware.caller_policy import caller_profiles_for_capabilities
         caller_profiles = caller_profiles_for_capabilities(_config)
@@ -1966,6 +3658,7 @@ async def scillm_capabilities(request: Request):
         "aliases": _config.aliases,
         "fallbacks": _config.fallbacks,
         "model_pools": pools,
+        "image_generation": image_generation,
         "adapters": adapters,
         "caller_profiles": caller_profiles,
     }
@@ -2066,6 +3759,15 @@ async def openai_models(request: Request):
         "created": int(_start_time),
         "owned_by": "scillm",
     })
+    for image_name, image_config in _IMAGE_GENERATION_MODELS.items():
+        if image_config.get("alias_for"):
+            continue
+        models.append({
+            "id": image_name,
+            "object": "model",
+            "created": int(_start_time),
+            "owned_by": f"{image_config.get('provider', 'chutes')}-image-generation",
+        })
 
     # Auto-routable providers — these don't need config entries
     from scillm.proxy.providers.auth import is_anthropic_available, is_codex_available
@@ -2144,8 +3846,17 @@ async def scillm_providers(request: Request):
             "chutes": {
                 "available": bool(_config.chutes_api_base),
                 "pattern": "Org/Model (contains /)",
-                "examples": ["Qwen/Qwen3-30B-A3B", "deepseek-ai/DeepSeek-V3"],
+                "examples": ["Qwen/Qwen3.6-27B-TEE", "deepseek-ai/DeepSeek-V3.2-TEE"],
                 "auth": "API key",
+                "note": "No Chutes aliases; select exact live IDs with ops-chutes.",
+            },
+            "chutes_image_generation": {
+                "available": bool(_config.chutes_api_key or os.environ.get("CHUTES_API_KEY") or os.environ.get("CHUTES_API_TOKEN")),
+                "endpoint": "/v1/images/generations",
+                "batch_endpoint": "/v1/scillm/batch/images/generations",
+                "models": ["z-image-turbo"],
+                "auth": "API key",
+                "note": "Text-to-image output; do not route through vlm.",
             },
             "ollama": {
                 "available": bool(_config.ollama_api_base),
@@ -2207,26 +3918,9 @@ async def scillm_auth(request: Request):
         else:
             result["claude"] = {"status": "not_configured"}
 
-    # Codex
-    codex = _read_codex_auth()
-    if codex:
-        result["codex"] = {
-            "status": "configured",
-            "source": str(CODEX_AUTH_FILE),
-            "account_id": (codex.get("account_id") or "")[:12] + "...",
-        }
-    else:
-        pi_data = _read_auth() if "pi_data" not in dir() else pi_data
-        pi_codex = pi_data.get("openai-codex", {})
-        if pi_codex.get("type") == "oauth":
-            expires = pi_codex.get("expires", 0)
-            result["codex"] = {
-                "status": "valid" if now_ms < expires else "expired",
-                "source": str(AUTH_FILE),
-                "expires_in_s": max(0, (expires - now_ms) // 1000),
-            }
-        else:
-            result["codex"] = {"status": "not_configured"}
+    from scillm.proxy.providers.auth import inspect_codex_auth
+
+    result["codex"] = inspect_codex_auth()
 
     return result
 
@@ -2496,7 +4190,7 @@ async def embeddings(request: Request):
         raise ProxyError(502, "Embedding service timed out", "upstream_error")
 
     result = resp.json()
-    vectors = result.get("vectors", [])
+    vectors = result.get("vectors") or result.get("embeddings") or []
     model_name = result.get("model", "unknown")
 
     data = [
@@ -2510,6 +4204,314 @@ async def embeddings(request: Request):
         "model": model_name,
         "usage": {"prompt_tokens": 0, "total_tokens": 0},
     })
+
+
+# ---------------------------------------------------------------------------
+# Direct Chutes passthrough (no middleware)
+# ---------------------------------------------------------------------------
+# These routes bypass the entire middleware chain — ChutesRouter,
+# ConcurrencyGuard, TimeoutEstimator, JsonGuard, etc. — and call Chutes
+# directly via httpx. Same behavior as ``curl -X POST https://llm.chutes.ai``.
+#
+# POST /v1/scillm/chutes/completions  — single, supports stream
+# POST /v1/scillm/chutes/batch          — multiple, SSE stream via as_completed
+
+
+@app.post("/v1/scillm/chutes/completions")
+async def chutes_direct_completion(request: Request):
+    """Direct Chutes completion — no middleware, one httpx call.
+
+    Same body format as ``/v1/chat/completions``. Supports streaming.
+    ``max_tokens`` is silently stripped (see chutes_direct.py).
+    """
+    from scillm.proxy.chutes_direct import direct_completion
+    from scillm.proxy.middleware import MiddlewareReject
+
+    auth_err = _check_auth(request)
+    if auth_err:
+        raise ProxyError(401, auth_err, "authentication_error")
+
+    body = await request.json()
+    model = body.get("model", "")
+    messages = body.get("messages", [])
+    stream = bool(body.get("stream", False))
+
+    if not model:
+        raise ProxyError(400, "model is required", "invalid_request_error")
+    if not messages:
+        raise ProxyError(400, "messages is required", "invalid_request_error")
+
+    try:
+        result = await direct_completion(
+            model=model,
+            messages=messages,
+            stream=stream,
+            temperature=body.get("temperature"),
+            top_p=body.get("top_p"),
+            stop=body.get("stop"),
+            response_format=body.get("response_format"),
+            seed=body.get("seed"),
+        )
+    except MiddlewareReject as exc:
+        raise ProxyError(exc.status_code, str(exc), "model_unavailable")
+    except ProxyError:
+        raise
+    except Exception as exc:
+        raise ProxyError(502, f"Chutes call failed: {exc}", "upstream_error")
+
+    if stream:
+        raw_resp = result["_stream_response"]
+        model_served = result["model_served"]
+
+        async def _stream():
+            try:
+                yield f'data: {{"object":"chat.completion.chunk","model":"{model_served}"}}\n\n'
+                done_seen = False
+                async for line in raw_resp.aiter_lines():
+                    if line.startswith("data: "):
+                        if line.strip() == "data: [DONE]":
+                            done_seen = True
+                            yield "data: [DONE]\n\n"
+                            continue
+                        yield line + "\n"
+                if not done_seen:
+                    yield "data: [DONE]\n\n"
+            finally:
+                await raw_resp.aclose()
+                slot = getattr(raw_resp, "_scillm_chutes_slot", None)
+                if slot is not None:
+                    await slot.release()
+
+        return StreamingResponse(
+            _stream(),
+            media_type="text/event-stream",
+            headers={"x-model-served": model_served},
+        )
+
+    return JSONResponse(content=result, headers={"x-model-served": result.get("model_served", model)})
+
+
+@app.post("/v1/scillm/chutes/batch")
+async def chutes_direct_batch(request: Request):
+    """Direct Chutes batch — semaphore + retry + as_completed, SSE stream.
+
+    Body::
+        {
+            "requests": [{"model": "...", "messages": [...]}, ...],
+            "concurrency": 4,
+            "wall_time_s": 600
+        }
+
+    Yields SSE events as items complete (not in input order).
+    """
+    from scillm.proxy.chutes_direct import (
+        batch_completions,
+        run_full_prompt_payload_probe,
+        run_prompt_preflight,
+    )
+
+    auth_err = _check_auth(request)
+    if auth_err:
+        raise ProxyError(401, auth_err, "authentication_error")
+
+    body = await request.json()
+    requests_list = body.get("requests", [])
+    if not requests_list:
+        raise ProxyError(400, "requests is required", "invalid_request_error")
+
+    concurrency = int(body.get("concurrency", 4))
+    wall_time_s = float(body.get("wall_time_s", 600))
+    provider_stream_default = bool(body.get("provider_stream", body.get("stream", True)))
+    normalized_requests: list[dict[str, Any]] = []
+    for item in requests_list:
+        req_item = dict(item or {})
+        req_item.setdefault("stream", provider_stream_default)
+        normalized_requests.append(req_item)
+    requests_list = normalized_requests
+    progress_heartbeat_s_raw = body.get("progress_heartbeat_s", body.get("heartbeat_s"))
+    progress_heartbeat_s = (
+        float(progress_heartbeat_s_raw)
+        if progress_heartbeat_s_raw is not None
+        else None
+    )
+    prompt_preflight = body.get("prompt_preflight")
+    require_prompt_preflight = bool(body.get("require_prompt_preflight", False))
+    if require_prompt_preflight and not prompt_preflight:
+        raise ProxyError(
+            400,
+            "prompt_preflight is required when require_prompt_preflight is true",
+            "invalid_request_error",
+        )
+
+    async def _event_stream():
+        yielded = 0
+        if prompt_preflight:
+            prompt_preflight_obj = prompt_preflight if isinstance(prompt_preflight, dict) else {}
+            first_request = requests_list[0] or {}
+            probe_model = (
+                prompt_preflight_obj.get("probe_model")
+                or prompt_preflight_obj.get("full_prompt_payload", {}).get("model")
+                or first_request.get("model")
+            )
+            probe_response_format = (
+                prompt_preflight_obj.get("full_prompt_payload", {}).get("response_format")
+                or first_request.get("response_format")
+            )
+            yielded += 1
+            yield f"data: {json.dumps({'type': 'prompt_full_payload_probe_started', 'ok': True, 'model': probe_model})}\n\n"
+            probe_wall_time_s = min(wall_time_s, float(prompt_preflight_obj.get("full_prompt_probe_wall_time_s", 300)))
+            full_payload_probe: dict[str, Any] | None = None
+            async for progress_event in _await_with_phase_progress(
+                run_full_prompt_payload_probe(
+                    prompt_preflight,
+                    model=probe_model,
+                    response_format=probe_response_format,
+                    wall_time_s=probe_wall_time_s,
+                ),
+                phase="prompt_full_payload_probe",
+                model=probe_model,
+                heartbeat_s=progress_heartbeat_s,
+                wall_time_s=probe_wall_time_s,
+            ):
+                if progress_event.get("type") == "prompt_phase_progress":
+                    yielded += 1
+                    yield f"data: {json.dumps(progress_event)}\n\n"
+                    continue
+                if progress_event.get("ok"):
+                    full_payload_probe = progress_event.get("result") or {}
+                else:
+                    full_payload_probe = {
+                        "ok": False,
+                        "error": progress_event.get("error") or "prompt_full_payload_probe_failed",
+                        "probe_transport": "scillm_chutes_batch",
+                        "probe_model": probe_model,
+                    }
+            if full_payload_probe is None:
+                full_payload_probe = {
+                    "ok": False,
+                    "error": "prompt_full_payload_probe_missing_result",
+                    "probe_transport": "scillm_chutes_batch",
+                    "probe_model": probe_model,
+                }
+            if not full_payload_probe.get("ok"):
+                yielded += 1
+                event = {
+                    "type": "prompt_full_payload_probe",
+                    "ok": False,
+                    "error": full_payload_probe.get("error"),
+                    "missing": full_payload_probe.get("missing"),
+                    "probe_transport": full_payload_probe.get("probe_transport"),
+                    "probe_model": full_payload_probe.get("probe_model") or probe_model,
+                }
+                yield f"data: {json.dumps(event)}\n\n"
+                return
+            yielded += 1
+            yield f"data: {json.dumps({'type': 'prompt_full_payload_probe', 'ok': True, 'probe_transport': full_payload_probe.get('probe_transport'), 'probe_model': full_payload_probe.get('probe_model'), 'parsed_keys': sorted((full_payload_probe.get('parsed') or {}).keys())})}\n\n"
+
+            reviewer_model = (
+                body.get("prompt_reviewer_model")
+                or prompt_preflight_obj.get("reviewer_model")
+                or first_request.get("model")
+            )
+            yielded += 1
+            yield f"data: {json.dumps({'type': 'prompt_preflight_started', 'ok': True, 'reviewer_model': reviewer_model})}\n\n"
+            reviewer_wall_time_s = min(wall_time_s, float(prompt_preflight_obj.get("wall_time_s", 300)))
+            preflight_result: dict[str, Any] | None = None
+            async for progress_event in _await_with_phase_progress(
+                run_prompt_preflight(
+                    prompt_preflight,
+                    reviewer_model=reviewer_model,
+                    wall_time_s=reviewer_wall_time_s,
+                ),
+                phase="prompt_preflight",
+                model=reviewer_model,
+                heartbeat_s=progress_heartbeat_s,
+                wall_time_s=reviewer_wall_time_s,
+            ):
+                if progress_event.get("type") == "prompt_phase_progress":
+                    yielded += 1
+                    yield f"data: {json.dumps(progress_event)}\n\n"
+                    continue
+                if progress_event.get("ok"):
+                    preflight_result = progress_event.get("result") or {}
+                else:
+                    preflight_result = {
+                        "ok": False,
+                        "error": progress_event.get("error") or "prompt_reviewer_batch_failed",
+                        "reviewer_transport": "scillm_chutes_batch",
+                        "reviewer_model": reviewer_model,
+                    }
+            if preflight_result is None:
+                preflight_result = {
+                    "ok": False,
+                    "error": "prompt_preflight_missing_result",
+                    "reviewer_transport": "scillm_chutes_batch",
+                    "reviewer_model": reviewer_model,
+                }
+            if not preflight_result.get("ok"):
+                yielded += 1
+                event = {
+                    "type": "prompt_preflight",
+                    "ok": False,
+                    "error": preflight_result.get("error"),
+                    "reviewer_transport": preflight_result.get("reviewer_transport"),
+                    "reviewer_model": preflight_result.get("reviewer_model") or reviewer_model,
+                    "prompt_review": (preflight_result.get("artifact") or {}).get("prompt_review"),
+                }
+                yield f"data: {json.dumps(event)}\n\n"
+                return
+            yielded += 1
+            event = {
+                "type": "prompt_preflight",
+                "ok": True,
+                "reviewer_transport": preflight_result.get("reviewer_transport"),
+                "reviewer_model": preflight_result.get("reviewer_model"),
+                "prompt_review": (preflight_result.get("artifact") or {}).get("prompt_review"),
+            }
+            yield f"data: {json.dumps(event)}\n\n"
+        async for item in batch_completions(
+            requests_list,
+            concurrency=concurrency,
+            wall_time_s=wall_time_s,
+            progress_heartbeat_s=progress_heartbeat_s,
+        ):
+            yielded += 1
+            yield f"data: {json.dumps(item)}\n\n"
+        if yielded == 0:
+            yield 'data: {"error":"no_items_completed"}\n\n'
+
+    return StreamingResponse(
+        _event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "x-request-id": request.headers.get("x-request-id", str(uuid.uuid4())[:8]),
+        },
+    )
+
+
+@app.get("/v1/scillm/chutes/models")
+async def chutes_direct_models(request: Request):
+    """List available Chutes models and Scillm Chutes config drift."""
+    from scillm.proxy.chutes_direct import _get_available_models
+
+    auth_err = _check_auth(request)
+    if auth_err:
+        raise ProxyError(401, auth_err, "authentication_error")
+
+    models = await _get_available_models()
+    inventory = _chutes_config_inventory(models)
+    return {
+        "object": "list",
+        "data": [{"id": m, "available": True} for m in models],
+        **inventory,
+        "advice": (
+            "Configured Chutes fallbacks or deployments reference models missing from "
+            "the live provider inventory. Update local/proxy_server_config.yaml and "
+            "rerun ops-chutes models --query <family> --json."
+            if inventory["status"] == "config_drift"
+            else "Configured Chutes models match the live provider inventory."
+        ),
+    }
 
 
 # ---------------------------------------------------------------------------

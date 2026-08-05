@@ -49,6 +49,10 @@ class TestExecEndpoints:
         assert body["status"] == "completed"
         assert body["result"]["ok"] is True
         assert body["result"]["result"]["status"] == "ok"
+        assert body["result"]["output_hash"]
+        assert body["result"]["output_artifact"].endswith("/output.evidence.json")
+        assert body["result"]["output_hash_algorithm"] == "sha256.canonical_json.scillm_exec_node_output.v1"
+        assert body["result"]["evidence_status"] == "hash_bound"
 
         status = client.get(f"/v1/scillm/exec/{run_id}/status", timeout=10.0)
         assert status.status_code == 200, status.text[:500]
@@ -94,6 +98,44 @@ class TestExecEndpoints:
         assert sorted(body["completed"]) == ["worker_a", "worker_b"]
         assert body["failed"] == []
 
+    def test_exec_local_command_receives_runtime_context_env(self, client: httpx.Client, proxy_reachable: bool):
+        _skip_if_unreachable(proxy_reachable)
+        run_id = _run_id("e2e-exec-runtime-env")
+
+        response = client.post(
+            "/v1/scillm/exec",
+            json={
+                "run_id": run_id,
+                "id": "runtime_env",
+                "type": "local_command",
+                "node_goal": "Return runtime context environment variables.",
+                "env": {"CUSTOM_EXEC_ENV": "present"},
+                "command": [
+                    "python",
+                    "-c",
+                    (
+                        "import json, os; "
+                        "keys=['SCILLM_EXEC_RUN_ID','SCILLM_EXEC_NODE_ID','SCILLM_EXEC_RUN_DIR',"
+                        "'SCILLM_EXEC_NODE_DIR','SCILLM_EXEC_ATTEMPT_DIR','SCILLM_EXEC_STATUS_PATH',"
+                        "'SCILLM_EXEC_EVENTS_PATH','CUSTOM_EXEC_ENV']; "
+                        "print(json.dumps({key: os.environ.get(key) for key in keys}))"
+                    ),
+                ],
+            },
+            timeout=60.0,
+        )
+
+        assert response.status_code == 200, response.text[:500]
+        result = response.json()["result"]["result"]
+        assert result["SCILLM_EXEC_RUN_ID"] == run_id
+        assert result["SCILLM_EXEC_NODE_ID"] == "runtime_env"
+        assert result["SCILLM_EXEC_RUN_DIR"].endswith(run_id)
+        assert result["SCILLM_EXEC_NODE_DIR"].endswith("/nodes/runtime_env")
+        assert result["SCILLM_EXEC_ATTEMPT_DIR"].endswith("/nodes/runtime_env/attempt-1")
+        assert result["SCILLM_EXEC_STATUS_PATH"].endswith(f"/{run_id}/status.json")
+        assert result["SCILLM_EXEC_EVENTS_PATH"].endswith(f"/{run_id}/events.jsonl")
+        assert result["CUSTOM_EXEC_ENV"] == "present"
+
     def test_exec_graph_respects_dependencies(self, client: httpx.Client, proxy_reachable: bool, tmp_path):
         _skip_if_unreachable(proxy_reachable)
         graph_id = _run_id("e2e-exec-graph")
@@ -134,6 +176,11 @@ class TestExecEndpoints:
         body = response.json()
         assert body["status"] == "completed"
         assert body["node_results"]["read_marker"]["result"]["marker"] == "ok"
+        for node_id in ("write_marker", "read_marker"):
+            result = body["node_results"][node_id]
+            assert result["output_hash"]
+            assert result["output_artifact"].endswith("/output.evidence.json")
+            assert result["evidence_status"] == "hash_bound"
 
     def test_exec_graph_skips_dependents_after_failure(self, client: httpx.Client, proxy_reachable: bool):
         _skip_if_unreachable(proxy_reachable)

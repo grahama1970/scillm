@@ -20,6 +20,7 @@ import base64
 import io
 import mimetypes
 import zipfile
+from urllib.parse import urlparse
 
 import os
 
@@ -28,6 +29,7 @@ import openai
 from loguru import logger
 
 from scillm.proxy.config import Deployment, ModelGroup, ProxyConfig, RetryPolicy
+from scillm.proxy.errors import ProviderOAuthError
 # Bifrost removed — direct provider routing via openai SDK
 from scillm.proxy.providers.auth import is_anthropic_available, is_codex_available
 from scillm.proxy.providers.claude import claude_completion, claude_completion_stream
@@ -217,6 +219,44 @@ def _status_code_for(exc: Exception) -> int:
     return 502
 
 
+def _details_for_exception(exc: Exception | None) -> dict[str, Any]:
+    """Preserve structured provider details across group/cascade wrapping."""
+    if exc is None:
+        return {}
+    details = getattr(exc, "details", None)
+    if isinstance(details, dict):
+        result = dict(details)
+    else:
+        result = {}
+    error_type = getattr(exc, "error_type", None)
+    if error_type and "error_type" not in result:
+        result["error_type"] = error_type
+    if isinstance(exc, ProviderOAuthError):
+        result.setdefault("oauth_provider_error", True)
+    return result
+
+
+def _is_opencode_go_deployment(dep: Deployment) -> bool:
+    api_base = (dep.api_base or "").rstrip("/")
+    return api_base.startswith(OPENCODE_GO_DEFAULT_API_BASE.rstrip("/"))
+
+
+def _served_model_matches_exact_request(dep: Deployment, actual_model: str) -> bool:
+    if actual_model == dep.model:
+        return True
+    if not _is_opencode_go_deployment(dep):
+        return False
+
+    requested = opencode_go_model_id(dep.model).casefold()
+    actual = actual_model.casefold()
+    if requested and requested in actual:
+        return True
+
+    requested_compact = requested.replace(".", "").replace("-", "")
+    actual_compact = actual.replace(".", "").replace("-", "")
+    return bool(requested_compact and requested_compact in actual_compact)
+
+
 def _deadline_remaining_s(deadline_at: float | None) -> float | None:
     if deadline_at is None:
         return None
@@ -249,6 +289,37 @@ def _deadline_timeout_details(
     return {key: value for key, value in details.items() if value is not None}
 
 
+def _safe_api_base_host(api_base: str | None) -> str | None:
+    if not api_base:
+        return None
+    parsed = urlparse(api_base)
+    return parsed.netloc or None
+
+
+def _record_provider_bound_diagnostics(
+    diagnostics: dict[str, Any] | None,
+    *,
+    dep: Deployment,
+    provider: str,
+    body_keys: list[str] | set[str],
+    stream: bool,
+) -> None:
+    """Record prompt-free provider-bound request shape for reliability debugging."""
+    if diagnostics is None:
+        return
+    keys = sorted(str(key) for key in body_keys)
+    diagnostics.update({
+        "provider": provider,
+        "model": dep.model,
+        "api_base_host": _safe_api_base_host(dep.api_base),
+        "body_keys": keys,
+        "token_cap_fields_present": [
+            field for field in ("max_tokens", "max_completion_tokens") if field in keys
+        ],
+        "stream": bool(stream),
+    })
+
+
 def _deadline_exceeded(
     kwargs: dict[str, Any],
     *,
@@ -278,6 +349,43 @@ def _deadline_exceeded(
 # Router
 # ---------------------------------------------------------------------------
 
+
+
+
+def _is_moonshot_deployment(dep: Deployment) -> bool:
+    base = (dep.api_base or "").lower()
+    return "moonshot.ai" in base or "moonshot.cn" in base
+
+
+def _has_image_url_messages(messages: list[dict[str, Any]]) -> bool:
+    for msg in messages:
+        if not isinstance(msg, dict):
+            continue
+        content = msg.get("content")
+        if isinstance(content, list):
+            for part in content:
+                if isinstance(part, dict) and part.get("type") == "image_url":
+                    return True
+        if isinstance(content, dict) and "image_url" in content:
+            return True
+    return False
+
+
+def _apply_moonshot_multimodal_kwargs(
+    dep: Deployment,
+    messages: list[dict[str, Any]],
+    kwargs: dict[str, Any],
+) -> dict[str, Any]:
+    """Moonshot kimi-k2.6 accepts image_url; disable thinking for deterministic text."""
+    if not _is_moonshot_deployment(dep) or not _has_image_url_messages(messages):
+        return kwargs
+    updated = dict(kwargs)
+    extra_body = dict(updated.get("extra_body") or {})
+    thinking = extra_body.get("thinking")
+    if not isinstance(thinking, dict) or thinking.get("type") != "enabled":
+        extra_body["thinking"] = {"type": "disabled"}
+        updated["extra_body"] = extra_body
+    return updated
 
 class Router:
     """Route completion requests across model groups with fallback cascade.
@@ -667,11 +775,15 @@ class Router:
         override = kwargs.pop("_max_retries_override", None)
         deadline_at_raw = kwargs.pop("_deadline_at", None)
         deadline_at = float(deadline_at_raw) if deadline_at_raw is not None else None
+        provider_bound_diagnostics = kwargs.pop("_provider_bound_diagnostics", None)
         kwargs.pop("_deadline_timeout_s", None)
         kwargs.pop("_deadline_started_at", None)
         kwargs.pop("_caller_skill", None)
         kwargs.pop("_scillm_metadata", None)
         kwargs.pop("_cascade_attempts", None)
+        requested_exact_model = bool(kwargs.pop("require_exact_model", False))
+        allow_model_remap = kwargs.pop("allow_model_remap", None)
+        require_exact_model = requested_exact_model or allow_model_remap is False
 
         # Dynamic timeout from TimeoutEstimatorMiddleware (ms -> seconds)
         # Use MAX of dynamic estimate and config timeout — config is a floor
@@ -702,6 +814,18 @@ class Router:
         is_ollama = dep.api_base and ("11434" in dep.api_base or "ollama" in dep.api_base.lower())
         if is_ollama and "response_format" in kwargs:
             logger.debug("Stripping response_format for Ollama deployment {}", dep.model)
+            kwargs = {k: v for k, v in kwargs.items() if k != "response_format"}
+
+        is_opencode_go_chat = (
+            dep.custom_llm_provider is None
+            and bool(dep.api_base)
+            and "opencode.ai/zen/go" in dep.api_base
+        )
+        if is_opencode_go_chat and "response_format" in kwargs:
+            # OpenCode Go chat/completions models such as GLM can hang when
+            # OpenAI JSON mode is forwarded. Keep scillm's JSON guard active at
+            # the middleware layer, but ask the model for JSON in the prompt.
+            logger.debug("Stripping response_format for OpenCode Go chat deployment {}", dep.model)
             kwargs = {k: v for k, v in kwargs.items() if k != "response_format"}
 
         # Gemini native API path: when messages contain inlineData parts
@@ -736,6 +860,7 @@ class Router:
         if dep.custom_llm_provider == "opencode-go-messages":
             if kwargs.get("stream", False):
                 stream_kwargs = {k: v for k, v in kwargs.items() if k != "stream"}
+                stream_kwargs["_provider_bound_diagnostics"] = provider_bound_diagnostics
                 return opencode_go_messages_stream(
                     dep.model,
                     dep.api_base or OPENCODE_GO_DEFAULT_API_BASE,
@@ -750,6 +875,7 @@ class Router:
                 dep.api_key or "",
                 messages,
                 timeout=timeout_sec,
+                _provider_bound_diagnostics=provider_bound_diagnostics,
                 **kwargs,
             )
 
@@ -778,12 +904,42 @@ class Router:
                             final_provider_error=last_exc,
                         )
                     timeout_sec = min(timeout_sec, remaining)
+                provider_name = (
+                    "opencode-go"
+                    if is_opencode_go_chat
+                    else dep.custom_llm_provider or "openai-compatible"
+                )
+                provider_body_keys = {"model", "messages", *kwargs.keys()}
+                _record_provider_bound_diagnostics(
+                    provider_bound_diagnostics,
+                    dep=dep,
+                    provider=provider_name,
+                    body_keys=provider_body_keys,
+                    stream=bool(kwargs.get("stream", False)),
+                )
+                call_kwargs = _apply_moonshot_multimodal_kwargs(dep, messages, kwargs)
                 resp = await client.chat.completions.create(
                     model=dep.model,
                     messages=messages,
                     timeout=timeout_sec,
-                    **kwargs,
+                    **call_kwargs,
                 )
+                if require_exact_model and not kwargs.get("stream", False):
+                    actual_model = getattr(resp, "model", None)
+                    if (
+                        isinstance(actual_model, str)
+                        and actual_model
+                        and not _served_model_matches_exact_request(dep, actual_model)
+                    ):
+                        raise ProxyError(
+                            502,
+                            f"Provider returned model={actual_model!r}; required exact model={dep.model!r}",
+                            details={
+                                "requested_model": dep.model,
+                                "served_model": actual_model,
+                                "provider": dep.custom_llm_provider or "openai-compatible",
+                            },
+                        )
                 return resp
             except (
                 openai.InternalServerError,
@@ -990,12 +1146,16 @@ class Router:
 
         # Every group in the chain failed
         skipped_msg = f" (skipped in cooldown: {skipped})" if skipped else ""
+        details = _details_for_exception(last_exc)
+        if skipped:
+            details["skipped_groups"] = skipped
+        details.setdefault("fallback_chain", chain)
         msg = (
             f"All groups exhausted for model={model!r} "
             f"(chain={chain}){skipped_msg}: {last_exc}"
         )
         logger.error(msg)
-        raise ProxyError(last_status, msg)
+        raise ProxyError(last_status, msg, details=details)
 
     # ------------------------------------------------------------------
     # Health / introspection

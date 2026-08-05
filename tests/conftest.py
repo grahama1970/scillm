@@ -48,8 +48,8 @@ def proxy_reachable(client: httpx.Client) -> bool:
 @pytest.fixture(scope="session")
 def any_model_live(client: httpx.Client) -> str | None:
     """Return a model group name that actually responds, or None."""
-    # Try text-gemini first (cheapest), then text, then local-text
-    for model in ("text-gemini", "text", "local-text"):
+    # Try current public routes first, then local fallback.
+    for model in ("gemini-flash", "chutes-deepseek", "local-text"):
         try:
             r = client.post(
                 "/v1/chat/completions",

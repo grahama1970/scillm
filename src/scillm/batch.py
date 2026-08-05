@@ -2,6 +2,7 @@ from __future__ import annotations
 """Parallel async LLM completion engine with concurrency control and retry logic."""
 
 import asyncio as _asyncio
+import importlib.util as _importlib_util
 import json as _json
 from pathlib import Path as _Path
 from typing import List, Dict, AsyncIterator, Any, Optional, Callable
@@ -25,6 +26,8 @@ from .preprocess import expand_requests_io as _expand_requests_io
 
 # Cache of AsyncOpenAI clients keyed by (api_base, api_key)
 _clients: dict[tuple[str, str], _openai.AsyncOpenAI] = {}
+_clean_json_string_func: Callable[..., Any] | None = None
+_clean_json_string_loaded = False
 
 
 def _get_client(api_base: str, api_key: str) -> _openai.AsyncOpenAI:
@@ -32,6 +35,24 @@ def _get_client(api_base: str, api_key: str) -> _openai.AsyncOpenAI:
     if key not in _clients:
         _clients[key] = _openai.AsyncOpenAI(base_url=api_base, api_key=api_key)
     return _clients[key]
+
+
+def _is_scillm_api_base(api_base: str) -> bool:
+    return any(host in str(api_base) for host in ("localhost:4001", "127.0.0.1:4001", "scillm:4001"))
+
+
+def _as_bool(value: Any, default: bool = False) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return default
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"1", "true", "yes", "on"}:
+            return True
+        if normalized in {"0", "false", "no", "off", ""}:
+            return False
+    return bool(value)
 
 
 async def _acompletion(*, model: str, messages: list, api_base: str, api_key: str,
@@ -46,6 +67,12 @@ async def _acompletion(*, model: str, messages: list, api_base: str, api_key: st
     scillm_metadata = kwargs.pop("scillm_metadata", None)
     if scillm_metadata is not None:
         extra_body["scillm_metadata"] = scillm_metadata
+    stream_control_body: dict[str, Any] = {}
+    for key in ("stream_progress_events", "stream_heartbeat_s", "heartbeat_interval_s"):
+        if key in kwargs:
+            stream_control_body[key] = kwargs.pop(key)
+    if _is_scillm_api_base(api_base):
+        extra_body.update(stream_control_body)
     client = _get_client(api_base, api_key)
     return await client.chat.completions.create(
         model=model,
@@ -96,6 +123,16 @@ def _repair_json_text(text: str) -> tuple[Any | None, str | None]:
 
     Returns (parsed_object, error_string_or_none).
     """
+    # Stage 0: shared memory/scillm tolerant JSON helper. This path handles
+    # common streamed-output damage such as markdown fences and trailing text.
+    clean_json_string = _load_clean_json_string()
+    if clean_json_string is not None:
+        try:
+            cleaned = clean_json_string(text, return_dict=True)
+            if isinstance(cleaned, (dict, list)) and cleaned:
+                return cleaned, None
+        except Exception:
+            pass
     # Stage 1: json_repair library (handles trailing commas, single quotes, etc.)
     if _repair_json_lib is not None:
         try:
@@ -114,6 +151,100 @@ def _repair_json_text(text: str) -> tuple[Any | None, str | None]:
     except Exception as e:
         return None, str(e)
     return None, "no_braces"
+
+
+def _load_clean_json_string() -> Callable[..., Any] | None:
+    """Load memory's JSON cleaner without importing the noisy services package."""
+    global _clean_json_string_func, _clean_json_string_loaded
+    if _clean_json_string_loaded:
+        return _clean_json_string_func
+    _clean_json_string_loaded = True
+
+    candidates = [
+        _pathlib.Path(__file__).resolve().parents[2]
+        / "services"
+        / "memory"
+        / "graph_memory"
+        / "extras"
+        / "json_utils.py"
+    ]
+    for path in candidates:
+        if not path.exists():
+            continue
+        try:
+            module_name = "_scillm_memory_json_utils"
+            spec = _importlib_util.spec_from_file_location(module_name, path)
+            if spec is None or spec.loader is None:
+                continue
+            try:
+                from loguru import logger as _loguru_logger
+
+                _loguru_logger.disable(module_name)
+            except Exception:
+                pass
+            module = _importlib_util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            func = getattr(module, "clean_json_string", None)
+            if callable(func):
+                _clean_json_string_func = func
+                return _clean_json_string_func
+        except Exception:
+            continue
+    return None
+
+
+def _message_text_size(messages: list) -> int:
+    total = 0
+    for message in messages:
+        if not isinstance(message, dict):
+            total += len(str(message))
+            continue
+        content = message.get("content")
+        if isinstance(content, str):
+            total += len(content)
+        elif isinstance(content, list):
+            for part in content:
+                if isinstance(part, dict):
+                    total += len(str(part.get("text") or ""))
+                elif isinstance(part, str):
+                    total += len(part)
+        elif content is not None:
+            total += len(str(content))
+    return total
+
+
+def _auto_stream_enabled() -> bool:
+    return _as_bool(_os.environ.get("SCILLM_AUTO_STREAM_LARGE_PROMPTS", "1"))
+
+
+def _stream_threshold_chars() -> int:
+    try:
+        return max(1, int(_os.environ.get("SCILLM_AUTO_STREAM_THRESHOLD_CHARS", "12000")))
+    except Exception:
+        return 12000
+
+
+def _should_stream_request(req: dict, model: str | None, messages: list) -> bool:
+    """Return whether the batch helper should use SSE for this request.
+
+    Explicit ``stream`` on the request wins. Otherwise large prompts default to
+    streaming so scillm heartbeats keep long open-source reasoning calls alive.
+    """
+    if "stream" in req:
+        return _as_bool(req.get("stream"))
+    if not _auto_stream_enabled():
+        return False
+    if _message_text_size(messages) < _stream_threshold_chars():
+        return False
+    return bool(model)
+
+
+async def _collect_stream_response(resp: Any) -> Any:
+    from scillm.proxy.streaming import collect_response
+
+    if hasattr(resp, "__aiter__"):
+        return await collect_response(resp)
+    return resp
 
 
 def _resolve_source(source: str | list[str] | None) -> str | None:
@@ -301,6 +432,12 @@ async def parallel_acompletions(
         _rf = req.get("response_format") or response_format
         _mt = req.get("max_tokens", default_max_tokens)
         _temp = req.get("temperature", default_temperature)
+        _stream = _should_stream_request(req, model, messages)
+        _stream_progress_events = _as_bool(req.get("stream_progress_events"), _stream)
+        _stream_heartbeat_s = req.get(
+            "stream_heartbeat_s",
+            req.get("heartbeat_interval_s", _os.environ.get("SCILLM_STREAM_HEARTBEAT_S", 5)),
+        )
         start = _asyncio.get_running_loop().time()
         attempt = 0
         last_err: dict | None = None
@@ -315,8 +452,11 @@ async def parallel_acompletions(
                             response_format=_rf,
                             max_tokens=_mt,
                             temperature=_temp,
+                            stream=_stream,
                             timeout=timeout,
                         )
+                        if _stream:
+                            resp = await _collect_stream_response(resp)
                     else:
                         resp = await _acompletion(
                             model=model,
@@ -327,10 +467,15 @@ async def parallel_acompletions(
                             response_format=_rf,
                             max_tokens=_mt,
                             temperature=_temp,
+                            stream=_stream,
+                            stream_progress_events=_stream_progress_events,
+                            stream_heartbeat_s=_stream_heartbeat_s,
                             timeout=timeout,
                             retry_on_empty=False,
                             empty_retries=0,
                         )
+                        if _stream:
+                            resp = await _collect_stream_response(resp)
                     # Extract content now to allow json validation/retry
                     try:
                         content = _extract_content_from_response(resp)
@@ -633,6 +778,12 @@ async def parallel_acompletions_iter(
         _temp = req.get("temperature", default_temperature)
         _extra_headers = req.get("extra_headers")
         _scillm_metadata = req.get("scillm_metadata")
+        _stream = _should_stream_request(req, model, messages)
+        _stream_progress_events = _as_bool(req.get("stream_progress_events"), _stream)
+        _stream_heartbeat_s = req.get(
+            "stream_heartbeat_s",
+            req.get("heartbeat_interval_s", _os.environ.get("SCILLM_STREAM_HEARTBEAT_S", 5)),
+        )
         start = loop.time()
         attempt = 0
         last_err: dict | None = None
@@ -647,8 +798,11 @@ async def parallel_acompletions_iter(
                             response_format=_rf,
                             max_tokens=_mt,
                             temperature=_temp,
+                            stream=_stream,
                             timeout=timeout,
                         )
+                        if _stream:
+                            resp = await _collect_stream_response(resp)
                     else:
                         resp = await _acompletion(
                             model=model,
@@ -659,12 +813,17 @@ async def parallel_acompletions_iter(
                             response_format=_rf,
                             max_tokens=_mt,
                             temperature=_temp,
+                            stream=_stream,
+                            stream_progress_events=_stream_progress_events,
+                            stream_heartbeat_s=_stream_heartbeat_s,
                             extra_headers=_extra_headers,
                             scillm_metadata=_scillm_metadata,
                             timeout=timeout,
                             retry_on_empty=False,
                             empty_retries=0,
                         )
+                        if _stream:
+                            resp = await _collect_stream_response(resp)
                     # Extract content now to allow json validation/retry
                     content = _extract_content_from_response(resp)
                     need_validate = strict_env or schema is not None or retry_invalid_json > 0 or effective_repair

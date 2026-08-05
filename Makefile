@@ -120,3 +120,22 @@ budget-lite-smoke:
 	@curl -s -D /tmp/bl_h -H 'Content-Type: application/json' --data @/tmp/bl_payload.json http://127.0.0.1:4011/v1/chat/completions > /tmp/bl_resp.json || true
 	@echo "-- headers --"; rg -n "^x-(ratelimit|budget)" -i /tmp/bl_h || true
 	@echo "-- budget meta --"; jq '.additional_kwargs.scillm.budget' /tmp/bl_resp.json || true
+
+# ── OpenCode serve (fork @ ../opencode, :4098) ───────────────────────
+COMPOSE_CORE := docker compose -p scillm -f deploy/docker/compose.scillm.core.yml
+OPENCODE_GIT_REF ?= $(shell git -C ../opencode rev-parse --short HEAD 2>/dev/null || echo dev)
+
+.PHONY: opencode-serve-build opencode-serve-up opencode-serve-rebuild opencode-serve-logs
+
+opencode-serve-build:
+	OPENCODE_GIT_REF=$(OPENCODE_GIT_REF) $(COMPOSE_CORE) build opencode-serve
+	@echo "built opencode-serve @ fork $(OPENCODE_GIT_REF)"
+
+opencode-serve-up:
+	$(COMPOSE_CORE) up -d --force-recreate opencode-serve
+	@echo "opencode serve: http://127.0.0.1:4098"
+
+opencode-serve-rebuild: opencode-serve-build opencode-serve-up
+
+opencode-serve-logs:
+	$(COMPOSE_CORE) logs -f --tail=200 opencode-serve

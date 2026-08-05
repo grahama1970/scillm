@@ -9,7 +9,8 @@ Extracted reference for `/scillm`. Load on demand — do not duplicate in SKILL.
 | `text` | Chutes DeepSeek-V3 (non-TEE → V3.1-TEE) | General text, extraction, summarization | → text-gemini → text-gemini-paid → text-deepseek |
 | `vlm` | Gemini 2.5 Flash (free key) | Image/PDF/screenshot description | → vlm-paid → vlm-claude → vlm-codex |
 | `local-text` | Ollama qwen2.5:0.5b (local) | Smoke tests, always-on fallback | (none) |
-| `moonshot-text` | Moonshot Kimi K2 | Alternative text provider | (none) |
+| `moonshot-text` | Moonshot `kimi-k2.6` | Text + native multimodal (`image_url` PNG/JPEG) | (none) |
+| `oc-kimi` | OpenCode Go Kimi lane | Kimi chat via OpenCode Go (not raw Moonshot HTTP) | (none) |
 | `text-gemini` | Gemini 2.5 Flash (free key) | Fast, 1M context | → text-gemini-paid → text-deepseek |
 | `text-gemini-paid` | Gemini 2.5 Flash (paid key) | Paid fallback when free exhausted | (none) |
 | `text-gemini-3` | Gemini 3 Flash Preview (free key) | Thinking model, 1M context | → text-gemini-3-paid |
@@ -50,5 +51,15 @@ Cascade aliases still work: `text` (Chutes → Gemini free → Gemini paid → D
 
 **Discover live OpenCode Go models:** call `GET /v1/scillm/opencode-go/models?refresh=true`. The proxy runs `opencode models --refresh opencode-go` inside Docker first, using the mounted host OpenCode auth/config/cache, then falls back to `opencode serve /provider`, then a built-in registry. Use `models[*].id` directly as the chat `model`.
 
-**OpenCode Go multimodal caveat:** `opencode models opencode-go --verbose` currently reports DeepSeek V4 Flash/Pro with `attachment=false`, `input.image=false`, and `input.pdf=false`. Through `/scillm`, `opencode-go/deepseek-v4-*` and `opencode-go/minimax-*` are text-only lanes. Do not use `opencode run --file` as a headless multimodal workaround yet: upstream OpenCode issues #16723 and #20802 are open for broken MIME/file attachment handling in CLI/custom-provider paths. For high-volume image work, use `model: "vlm-chutes"`; for high-reasoning image work, call `model: "gpt-5.5"` directly with OpenAI-compatible `image_url` parts. Avoid generic `model: "vlm"` when Gemini quota limits matter, because the configured cascade starts with Gemini.
+**Moonshot Kimi routing (do not confuse these):**
 
+| Goal | Surface | Model |
+|------|---------|-------|
+| Native Moonshot Kimi + image | `POST /v1/chat/completions` | `moonshot-text` + OpenAI `image_url` parts |
+| Native Moonshot Kimi text | same | `moonshot-text` |
+| Kimi via OpenCode Go | same | `oc-kimi` or `opencode-go/kimi-k2.6` |
+| One-shot CLI worker (text only) | `POST /v1/scillm/exec` | `kimi_exec` / profile `kimi-k2.6` |
+
+Never use `kimi_exec` for images. Never use generic `vlm` when you specifically want Moonshot Kimi — `vlm` is the Gemini → Claude → Codex cascade. `moonshot-text` with images is **not** rewritten to `vlm`.
+
+**OpenCode Go multimodal caveat:** `opencode models opencode-go --verbose` currently reports DeepSeek V4 Flash/Pro with `attachment=false`, `input.image=false`, and `input.pdf=false`. Through `/scillm`, `opencode-go/deepseek-v4-*` and `opencode-go/minimax-*` are text-only lanes. Do not use `opencode run --file` as a headless multimodal workaround yet: upstream OpenCode issues #16723 and #20802 are open for broken MIME/file attachment handling in CLI/custom-provider paths. For Kimi images on Moonshot billing, use `moonshot-text`. For high-volume Chutes image work, select an exact live `Org/Model` with `ops-chutes` and use `/v1/scillm/chutes/*`; for high-reasoning image work, call `model: "gpt-5.5"` directly with OpenAI-compatible `image_url` parts. Avoid generic `model: "vlm"` when Gemini quota limits matter, because the configured cascade starts with Gemini.

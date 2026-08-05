@@ -377,29 +377,31 @@ def load_config(path: str | Path) -> ProxyConfig:
         ollama_base = _normalize_ollama_base_for_runtime(ollama_base)
         logger.info("Ollama auto-routing enabled (base={})", ollama_base)
 
-    # Auto-detect Chutes base URL and API key from env or sniff from text group
+    # Auto-detect Chutes base URL and API key from env. Chutes chat aliases are
+    # intentionally not inferred from configured groups; callers must pass exact
+    # live provider/model IDs selected from current inventory.
     chutes_base = os.environ.get("CHUTES_API_BASE")
     chutes_key = os.environ.get("CHUTES_API_KEY")
-    if not chutes_base and "text" in model_groups:
-        for dep in model_groups["text"].deployments:
-            if dep.api_base and "chutes" in dep.api_base.lower():
-                chutes_base = dep.api_base
-                chutes_key = chutes_key or dep.api_key
-                break
     if chutes_base:
         # Ensure /v1 suffix
         if not chutes_base.rstrip("/").endswith("/v1"):
             chutes_base = chutes_base.rstrip("/") + "/v1"
         logger.info("Chutes auto-routing enabled (base={})", chutes_base)
 
-    # Auto-detect Gemini base URL and API key from env or sniff from text-gemini group
+    # Auto-detect Gemini base URL and API key from env or sniff from Gemini groups
     gemini_base = os.environ.get("GEMINI_API_BASE")
     gemini_key = os.environ.get("GEMINI_API_KEY")
-    if not gemini_base and "text-gemini" in model_groups:
-        for dep in model_groups["text-gemini"].deployments:
-            if dep.api_base and "generativelanguage.googleapis.com" in dep.api_base:
-                gemini_base = dep.api_base
-                gemini_key = gemini_key or dep.api_key
+    if not gemini_base:
+        for group_name in ("gemini-flash", "gemini-flash-high", "vlm"):
+            group = model_groups.get(group_name)
+            if not group:
+                continue
+            for dep in group.deployments:
+                if dep.api_base and "generativelanguage.googleapis.com" in dep.api_base:
+                    gemini_base = dep.api_base
+                    gemini_key = gemini_key or dep.api_key
+                    break
+            if gemini_base:
                 break
     if gemini_base:
         logger.info("Gemini auto-routing enabled (base={})", gemini_base)

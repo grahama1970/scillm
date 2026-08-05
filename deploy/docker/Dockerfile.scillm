@@ -23,6 +23,9 @@ RUN curl -LsSf https://astral.sh/uv/install.sh | sh && cp /root/.local/bin/uv /u
 
 # Copy scillm source and install
 COPY . /app
+RUN apt-get update && apt-get install -y --no-install-recommends docker.io \
+    && rm -rf /var/lib/apt/lists/*
+
 RUN uv pip install --system -e ".[proxy]"
 
 COPY deploy/docker/entrypoint.sh /app/entrypoint.sh

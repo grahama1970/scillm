@@ -34,6 +34,10 @@ class ActiveCall:
     provider: str = ""
     stream: bool = False
     timeout_s: float | None = None
+    dynamic_timeout_s: float | None = None
+    timeout_source: str = ""
+    stream_heartbeat_s: float | None = None
+    stream_progress_events: bool = False
     pool: str = ""
     lane: str = ""
 
@@ -44,17 +48,30 @@ class ActiveCall:
 
     def to_dict(self, *, live_status: str = "live") -> dict:
         elapsed_ms = round((time.monotonic() - self.started_at) * 1000)
+        duration_s = round(elapsed_ms / 1000.0, 3)
         return {
             "call_id": self.call_id,
             "model": self.model,
+            "model_requested": self.model,
+            # The definitive served model is known only after provider return.
+            # While in flight, expose the selected/requested route so operators
+            # can identify the stalled lane from /active-calls alone.
+            "model_served": self.model,
             "caller": self.caller,
             "provider": self.provider,
             "stream": self.stream,
             "timeout_s": self.timeout_s,
+            "deadline_timeout_s": self.timeout_s,
+            "dynamic_timeout_s": self.dynamic_timeout_s,
+            "timeout_source": self.timeout_source,
+            "stream_heartbeat_s": self.stream_heartbeat_s,
+            "stream_progress_events": self.stream_progress_events,
             "pool": self.pool,
             "lane": self.lane,
             "started_ts": self.started_ts,
+            "created_at": self.started_ts,
             "elapsed_ms": elapsed_ms,
+            "duration_s": duration_s,
             "live_status": live_status,
             "stale_after_s": self.stale_after_s(),
         }
@@ -323,7 +340,7 @@ def start_active_call_janitor(interval_s: float = ACTIVE_CALL_JANITOR_INTERVAL_S
 def _infer_provider(model: str) -> str:
     """Infer provider from model name."""
     m = model.lower()
-    if m.startswith("opencode-go/"):
+    if m.startswith("opencode-go/") or m in {"oc-kimi", "oc-glm", "oc-qwen", "oc-deepseek"}:
         return "opencode-go"
     if "/" in m and not m.startswith("http"):
         return "chutes"
@@ -360,6 +377,10 @@ class ActiveCallsMiddleware(BaseMiddleware):
             provider=str(request.get("_concurrency_provider") or _infer_provider(request.get("model", ""))),
             stream=bool(request.get("stream")),
             timeout_s=_request_timeout_s(request),
+            dynamic_timeout_s=_dynamic_timeout_s(request),
+            timeout_source=str(request.get("_timeout_source") or ""),
+            stream_heartbeat_s=_stream_heartbeat_s(request),
+            stream_progress_events=bool(request.get("stream_progress_events") or request.get("progress_events")),
             pool=str(request.get("_scillm_pool") or ""),
             lane=str(request.get("_scillm_pool_lane") or ""),
         )
@@ -402,10 +423,39 @@ class ActiveCallsMiddleware(BaseMiddleware):
 
 
 def _request_timeout_s(request: dict) -> float | None:
-    timeout = request.get("timeout")
-    if timeout is None and "_dynamic_timeout_ms" in request:
+    explicit_timeout = request.get("timeout")
+    if explicit_timeout is not None:
+        try:
+            return float(explicit_timeout)
+        except (TypeError, ValueError):
+            return None
+
+    timeout = None
+    if "_dynamic_timeout_ms" in request:
         timeout = float(request["_dynamic_timeout_ms"]) / 1000.0
+    if _infer_provider(str(request.get("model", ""))) == "opencode-go":
+        timeout = max(float(timeout or 0), 600.0)
     try:
         return float(timeout) if timeout is not None else None
     except (TypeError, ValueError):
         return None
+
+
+def _dynamic_timeout_s(request: dict) -> float | None:
+    try:
+        if "_dynamic_timeout_ms" in request:
+            return float(request["_dynamic_timeout_ms"]) / 1000.0
+    except (TypeError, ValueError):
+        return None
+    return None
+
+
+def _stream_heartbeat_s(request: dict) -> float | None:
+    for key in ("stream_heartbeat_s", "heartbeat_interval_s", "idle_timeout", "read_timeout"):
+        try:
+            value = request.get(key)
+            if value is not None and float(value) > 0:
+                return float(value)
+        except (TypeError, ValueError):
+            continue
+    return None

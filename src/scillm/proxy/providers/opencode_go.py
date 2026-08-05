@@ -91,6 +91,7 @@ def describe_opencode_go_model(model: str, *, key_configured: bool) -> dict[str,
     model_id = opencode_go_model_id(model)
     endpoint_type = opencode_go_endpoint_type(model_id)
     supported = endpoint_type in {ENDPOINT_CHAT_COMPLETIONS, ENDPOINT_MESSAGES}
+    input_capabilities = opencode_go_input_capabilities(model)
     return {
         "id": f"{OPENCODE_GO_PREFIX}{model_id}",
         "model": model_id,
@@ -100,6 +101,32 @@ def describe_opencode_go_model(model: str, *, key_configured: bool) -> dict[str,
         "requires_key": True,
         "key_configured": key_configured,
         "route": "/v1/chat/completions",
+        "input": input_capabilities,
+        "capabilities": {
+            "text_input": input_capabilities["text"],
+            "image_input": input_capabilities["image"],
+            "pdf_input": input_capabilities["pdf"],
+            "image_output": False,
+            "streaming": True,
+            "tools": True,
+        },
+    }
+
+
+def opencode_go_input_capabilities(model: str) -> dict[str, bool]:
+    """Return current per-model OpenCode Go input capabilities.
+
+    The provider is mixed-capability: DeepSeek/MiniMax use the Anthropic-style
+    /messages route and are text-only here, while Kimi accepts normal
+    OpenAI-style image_url parts on the chat/completions route.
+    """
+    model_id = opencode_go_model_id(model)
+    endpoint_type = opencode_go_endpoint_type(model_id)
+    image = model_id.startswith("kimi-k2.")
+    return {
+        "text": endpoint_type in {ENDPOINT_CHAT_COMPLETIONS, ENDPOINT_MESSAGES},
+        "image": image,
+        "pdf": False,
     }
 
 
@@ -331,6 +358,28 @@ def _build_messages_body(
     return body
 
 
+def _record_provider_bound_diagnostics(
+    diagnostics: dict[str, Any] | None,
+    *,
+    model: str,
+    api_base: str,
+    body: dict[str, Any],
+) -> None:
+    """Record prompt-free provider-bound body shape for diagnostics."""
+    if diagnostics is None:
+        return
+    diagnostics.update({
+        "provider": OPENCODE_GO_PROVIDER,
+        "model": model,
+        "api_base_host": httpx.URL(api_base).host,
+        "body_keys": sorted(body.keys()),
+        "token_cap_fields_present": [
+            field for field in ("max_tokens", "max_completion_tokens") if field in body
+        ],
+        "stream": bool(body.get("stream")),
+    })
+
+
 def _messages_headers(api_key: str) -> dict[str, str]:
     if not api_key:
         raise OpenCodeGoHTTPError(401, "OPENCODE_GO_API_KEY is required")
@@ -350,7 +399,14 @@ async def opencode_go_messages_completion(
     **kwargs: Any,
 ) -> openai.types.chat.ChatCompletion:
     """Call an OpenCode Go Anthropic-compatible messages model."""
+    diagnostics = kwargs.pop("_provider_bound_diagnostics", None)
     body = _build_messages_body(model, messages, dict(kwargs))
+    _record_provider_bound_diagnostics(
+        diagnostics,
+        model=model,
+        api_base=api_base,
+        body=body,
+    )
     url = f"{api_base.rstrip('/')}/messages"
     logger.info("OpenCode Go messages call: model={}, {} messages", model, len(body["messages"]))
 
@@ -370,10 +426,17 @@ async def opencode_go_messages_stream(
     **kwargs: Any,
 ) -> AsyncIterator[bytes]:
     """Stream an OpenCode Go messages response as OpenAI-compatible SSE."""
+    diagnostics = kwargs.pop("_provider_bound_diagnostics", None)
     stream_kwargs = dict(kwargs)
     stream_kwargs["stream"] = True
     body = _build_messages_body(model, messages, stream_kwargs)
     body["stream"] = True
+    _record_provider_bound_diagnostics(
+        diagnostics,
+        model=model,
+        api_base=api_base,
+        body=body,
+    )
     url = f"{api_base.rstrip('/')}/messages"
     headers = _messages_headers(api_key)
     chunk_id = make_chunk_id()

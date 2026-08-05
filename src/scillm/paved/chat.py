@@ -26,7 +26,7 @@ from scillm.batch import parallel_acompletions_iter
 
 
 # Defaults - can be overridden via env vars or function args
-DEFAULT_MODEL = os.getenv("SCILLM_MODEL", "text")
+DEFAULT_MODEL = os.getenv("SCILLM_MODEL", "gpt-5.5")
 DEFAULT_VISION_MODEL = os.getenv("SCILLM_VISION_MODEL", "vlm")
 DEFAULT_API_BASE = os.getenv("SCILLM_API_BASE", "http://localhost:4001")
 DEFAULT_API_KEY = os.getenv("SCILLM_PROXY_KEY", os.getenv("OPENROUTER_API_KEY", "sk-dev-proxy-123"))
@@ -46,7 +46,7 @@ async def chat(
 
     Args:
         prompt: User message
-        model: Model ID (default: SCILLM_MODEL or "text" via proxy)
+        model: Model ID (default: SCILLM_MODEL or "gpt-5.5" via proxy)
         system: Optional system prompt
         api_base: API endpoint (default: SCILLM_API_BASE or localhost:4001)
         api_key: API key (default: SCILLM_PROXY_KEY)

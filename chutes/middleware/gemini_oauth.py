@@ -4,7 +4,7 @@ Bypasses API rate limits (20 RPD) by using OAuth credentials from ~/.gemini/.
 Best for long-context tasks (1M tokens) where API quotas are prohibitive.
 
 Usage in proxy config:
-  - model_name: text-gemini-oauth
+  - model_name: gemini-flash-oauth
     scillm_params:
       provider: gemini-oauth
       model: gemini-2.5-flash  # or gemini-3-flash-preview

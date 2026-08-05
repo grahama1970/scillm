@@ -63,6 +63,11 @@ _DEFAULT_LIMITS: Dict[str, int] = {
 }
 DEFAULT_LIMIT = 6
 
+OPENCODE_GO_ALIASES = {"oc-kimi", "oc-glm", "oc-qwen", "oc-deepseek"}
+PROVIDER_SLOT_MAX_AGE_S = {
+    "opencode-go": 600.0,
+}
+
 
 def _load_provider_limits() -> Dict[str, int]:
     """Load provider limits with env var overrides."""
@@ -233,7 +238,7 @@ def _resolve_provider(model: str) -> str:
 
     # OpenCode Go model ids also contain "/", so detect before generic
     # provider/model slash routing to Chutes.
-    if model_lower.startswith("opencode-go/"):
+    if model_lower.startswith("opencode-go/") or model_lower in OPENCODE_GO_ALIASES:
         return "opencode-go"
 
     # ── Chutes detection FIRST (Org/Model format) ─────────────────────────
@@ -394,6 +399,10 @@ def _generate_request_id() -> str:
     return f"req_{_request_counter}_{time.monotonic():.3f}"
 
 
+def _slot_max_age_s(provider: str) -> float:
+    return PROVIDER_SLOT_MAX_AGE_S.get(provider, SLOT_MAX_AGE_S)
+
+
 def _release_stale_slots() -> int:
     """Release slots held longer than SLOT_MAX_AGE_S. Returns count released."""
     global _last_stale_check
@@ -405,9 +414,10 @@ def _release_stale_slots() -> int:
     _last_stale_check = now
 
     released = 0
-    cutoff = now - SLOT_MAX_AGE_S
 
     for provider, slots in list(_slot_acquired_at.items()):
+        max_age_s = _slot_max_age_s(provider)
+        cutoff = now - max_age_s
         stale_ids = [req_id for req_id, acquired in slots.items() if acquired < cutoff]
         for req_id in stale_ids:
             acquired = slots[req_id]
@@ -420,7 +430,7 @@ def _release_stale_slots() -> int:
             released += 1
             logger.warning(
                 "concurrency_guard: {} released STALE slot {} (held {:.0f}s > {:.0f}s limit)",
-                provider, req_id, now - acquired, SLOT_MAX_AGE_S,
+                provider, req_id, now - acquired, max_age_s,
             )
 
     if released:
@@ -493,10 +503,11 @@ async def _background_stale_cleanup() -> None:
 def _release_stale_slots_force() -> int:
     """Release stale slots unconditionally (no rate limit check)."""
     now = time.monotonic()
-    cutoff = now - SLOT_MAX_AGE_S
     released = 0
 
     for provider, slots in list(_slot_acquired_at.items()):
+        max_age_s = _slot_max_age_s(provider)
+        cutoff = now - max_age_s
         stale_ids = [req_id for req_id, acquired in slots.items() if acquired < cutoff]
         for req_id in stale_ids:
             acquired = slots[req_id]
@@ -798,11 +809,11 @@ def get_concurrency_status() -> Dict[str, Any]:
         # Slot age info (zombie detection)
         slots = _slot_acquired_at.get(provider, {})
         oldest_slot_age_s = 0.0
-        stale_warning_count = 0  # Slots > 80% of SLOT_MAX_AGE_S
+        stale_warning_count = 0  # Slots > 80% of provider stale limit
         if slots:
             ages = [now - acquired for acquired in slots.values()]
             oldest_slot_age_s = max(ages)
-            stale_warning_threshold = SLOT_MAX_AGE_S * 0.8
+            stale_warning_threshold = _slot_max_age_s(provider) * 0.8
             stale_warning_count = len([a for a in ages if a > stale_warning_threshold])
 
         status[provider] = {

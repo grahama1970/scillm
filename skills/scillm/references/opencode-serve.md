@@ -22,7 +22,7 @@ Enable in Docker: `SCILLM_OPENCODE_SERVE_ENABLED=1` (see `deploy/docker/compose.
 | Situation | ✅ Good | ❌ Bad |
 |-----------|---------|--------|
 | Fix a bug with grep + read + optional patch | `POST /v1/scillm/opencode/runs` with `"agent": "build"` or `"scillm-debugger"`, `"skills": ["memory","debugger","dogpile","scillm","best-practices-scillm","best-practices-python"]` | `POST /v1/chat/completions` with `"model": "opencode-go/kimi-k2.6"` in a loop — no tool loop |
-| One-shot “summarize this paragraph” | `POST /v1/chat/completions` with `oc-kimi` or `chutes-deepseek` | OpenCode serve (heavy session + tools you do not need) |
+| One-shot “summarize this paragraph” | `POST /v1/chat/completions` with `oc-kimi`, or `/v1/scillm/chutes/completions` with an exact live `Org/Model` | OpenCode serve (heavy session + tools you do not need) |
 | One bounded `opencode run` in a worktree | `scillm exec oc-chutes-deepseek` (`opencode_exec`, skills denied in generated config) | OpenCode serve |
 | Standing Codex worker (lease/turn) | `/v1/scillm/agents/*` | OpenCode serve |
 | Retry after a bad edit in the same investigation | `fork_from_session_id` + `fork_at_message_id` on `/opencode/runs`; parent kept with `cleanup_session: false` | New `opencode serve` per retry |
@@ -89,7 +89,7 @@ OpenCode serve does **not** replace `/memory`, `/dogpile`, `/debugger`, or `/sci
 2. /dogpile search "…" (if novel/ambiguous) → report in prompt; learn after via memory post-hook
 3. /debugger (if 2+ failed fixes OR hidden runtime state) → breakpoint proof BEFORE patch
 4. POST /v1/scillm/opencode/runs            → agent does repo work; optional skills allowlist
-5. /scillm chat (only for cheap side calls)  → model gpt-5.5 / chutes-deepseek with X-Caller-Skill
+5. /scillm chat (only for cheap side calls)  → model gpt-5.5 with X-Caller-Skill; for Chutes use `/v1/scillm/chutes/*` with an exact live `Org/Model`
 6. /memory store lesson                      → after verified fix (tags + problem/solution)
 ```
 
@@ -162,7 +162,7 @@ Poll/async: `GET /v1/scillm/opencode/runs/{run_id}` · tail: `GET .../runs/{run_
 #### Agent profiles vs model names
 
 - **`agent`**: OpenCode profile from `.opencode/agents/*.md` / serve config (`build`, `scillm-debugger`, …).
-- **`model` on chat completions**: `opencode-go/kimi-k2.6`, `oc-kimi`, `chutes-deepseek` — **different namespace**.
+- **`model` on chat completions**: `opencode-go/kimi-k2.6`, `oc-kimi`, `gpt-5.5`; Chutes text uses exact live `Org/Model` IDs on `/v1/scillm/chutes/*` — **different namespace**.
 
 `GET /v1/scillm/opencode/agents` → use exact names from `agents[]`.
 
@@ -274,5 +274,4 @@ data = resp.json()
 print(data["status"], data.get("assistant_text", "")[:500])
 print("artifacts:", data.get("artifacts"))
 ```
-
 

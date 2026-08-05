@@ -85,7 +85,7 @@ resp = httpx.post(
 
 ### Option C: Images via image_url (all VLM providers)
 
-For images (not PDFs), use the OpenAI-compat `image_url` format. For this project, prefer direct `model: "gpt-5.5"` for high-reasoning image calls or `model: "vlm-chutes"` for higher-throughput VLM calls. Avoid generic `model: "vlm"` when Gemini quota limits matter, because the configured cascade starts with Gemini:
+For images (not PDFs), use the OpenAI-compat `image_url` format. For this project, prefer direct `model: "gpt-5.5"` for high-reasoning image calls. For Chutes VLM work, select an exact live `Org/Model` with `ops-chutes` and use `/v1/scillm/chutes/*`; do not use `vlm-chutes`. Avoid generic `model: "vlm"` when Gemini quota limits matter, because the configured cascade starts with Gemini:
 
 ```python
 with open("screenshot.png", "rb") as f:
@@ -145,4 +145,3 @@ The proxy auto-detects unknown model names and routes them to the local Ollama i
 Available Ollama models: anything you've pulled with `ollama pull`. Check with `ollama list`.
 
 ---
-

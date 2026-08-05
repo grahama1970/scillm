@@ -195,9 +195,9 @@ Use generous timeouts for LLM calls (30-120s). The proxy handles retries interna
 Add `response_format: {"type": "json_object"}` for structured output. The proxy auto-validates and retries.
 
 ### Model Selection
-- `text` — general text (Chutes → Gemini → DeepSeek cascade)
+- `chutes-deepseek` — general Chutes DeepSeek text
 - `vlm` — images/PDFs (auto-detected from image_url content)
-- `text-gemini` — direct Gemini (1M context)
+- `gemini-flash` — direct Gemini (1M context)
 - `local-text` — Ollama (always-on, no cost)
 
 ### Error Handling
@@ -250,7 +250,7 @@ Keep it concise — under 200 words total. Format as markdown."""
                     "X-Caller-Skill": "scillm.debug-endpoint",
                 },
                 json={
-                    "model": "text-gemini",
+                    "model": "gemini-flash",
                     "messages": [{"role": "user", "content": prompt}],
                 },
                 timeout=60.0,

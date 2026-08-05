@@ -2097,6 +2097,19 @@ async def _execute_run(
         )
         if follow_message is not None:
           message = follow_message
+      try:
+        _latest_messages, _latest_text, latest_message = await _snapshot_run_thread(client, run)
+      except Exception:
+        latest_message = message
+      if _awaiting_terminal_text_after_tools(latest_message):
+        run.emit("assistant_waiting_for_terminal_text", reason="final_snapshot_tool_call_finish")
+        return await _timeout_run_result(
+          run,
+          spec,
+          receipt=receipt,
+          timeout_s=timeout_s,
+          partial_assistant_text=assistant_text,
+        )
       diff, diff_evidence = await _diff_with_fallback(client, run, before_snapshot=before_snapshot)
 
   except asyncio.TimeoutError:
