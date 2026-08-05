@@ -37,7 +37,7 @@ class TestAuth:
         """Request with NO Authorization header must get 401."""
         r = httpx.post(
             f"{proxy_base}/v1/chat/completions",
-            json={"model": "text", "messages": [{"role": "user", "content": "hi"}]},
+            json={"model": "chutes-deepseek", "messages": [{"role": "user", "content": "hi"}]},
             timeout=10.0,
         )
         assert r.status_code == 401, f"Expected 401, got {r.status_code}: {r.text[:200]}"
@@ -46,7 +46,7 @@ class TestAuth:
         """Request with an incorrect Bearer token must get 401."""
         r = httpx.post(
             f"{proxy_base}/v1/chat/completions",
-            json={"model": "text", "messages": [{"role": "user", "content": "hi"}]},
+            json={"model": "chutes-deepseek", "messages": [{"role": "user", "content": "hi"}]},
             headers={"Authorization": "Bearer wrong-key-12345"},
             timeout=10.0,
         )
@@ -56,7 +56,7 @@ class TestAuth:
         """Authorization without 'Bearer ' prefix must get 401."""
         r = httpx.post(
             f"{proxy_base}/v1/chat/completions",
-            json={"model": "text", "messages": [{"role": "user", "content": "hi"}]},
+            json={"model": "chutes-deepseek", "messages": [{"role": "user", "content": "hi"}]},
             headers={"Authorization": "sk-dev-proxy-123"},  # no Bearer prefix
             timeout=10.0,
         )
@@ -92,11 +92,17 @@ class TestOpsEndpoints:
         assert isinstance(data["fallbacks"], dict)
 
     def test_scillm_health_fallback_chain(self, client: httpx.Client):
-        """Fallback chain must match expected cascade."""
+        """Chutes DeepSeek must not fallback to provider IDs absent from inventory."""
         data = client.get("/v1/scillm/health").json()
         fb = data["fallbacks"]
-        assert "text" in fb, "text group must have fallbacks"
-        assert fb["text"] == ["text-deepseek", "text-gemini"], f"Unexpected cascade: {fb['text']}"
+        assert "chutes-deepseek" not in fb or fb["chutes-deepseek"] == []
+        stale = {
+            "deepseek-ai/DeepSeek-V3.1-TEE",
+            "deepseek-ai/DeepSeek-R1-0528-TEE",
+            "deepseek-ai/DeepSeek-R1-0528",
+        }
+        assert stale.isdisjoint(set(data["model_groups"]))
+        assert all(stale.isdisjoint(set(chain)) for chain in fb.values())
 
     def test_scillm_models_structure(self, client: httpx.Client):
         r = client.get("/v1/scillm/models")
@@ -104,6 +110,18 @@ class TestOpsEndpoints:
         data = r.json()
         assert "groups" in data
         assert "aliases" in data
+        assert "models" in data
+        assert "selectable_models" in data
+        assert "review_fanout_models" in data
+        assert "text" not in data["aliases"]
+        assert "text" not in data["models"]
+        assert "text" not in data["selectable_models"]
+        assert all(not model.startswith("text-") for model in data["selectable_models"])
+        for model in ("gpt-5.5", "oc-kimi", "oc-glm", "oc-deepseek", "oc-qwen"):
+            assert model in data["review_fanout_models"]
+            assert data["models"][model]["selectable"] is True
+            assert data["models"][model]["review_fanout_default"] is True
+        assert data["models"]["gpt-4o"]["selectable"] is False
         # Every group must have deployments and models
         for name, group in data["groups"].items():
             assert "deployments" in group, f"Group {name} missing deployments"
@@ -118,7 +136,7 @@ class TestOpsEndpoints:
         assert "data" in data
         ids = [m["id"] for m in data["data"]]
         # Core groups must be present
-        for g in ("text", "text-gemini", "vlm", "local-text"):
+        for g in ("chutes-deepseek", "gemini-flash", "vlm", "local-text"):
             assert g in ids, f"Model group '{g}' missing from /v1/models"
 
     def test_budget_endpoint_contract(self, client: httpx.Client):
@@ -148,7 +166,7 @@ class TestRouting:
         assert r.status_code >= 400, f"Expected error, got {r.status_code}"
 
     def test_alias_resolves(self, client: httpx.Client):
-        """Alias 'gpt-chutes' must be accepted (resolves to 'text')."""
+        """Alias 'gpt-chutes' must be accepted (resolves to chutes-deepseek)."""
         r = _chat(client, "gpt-chutes", "Reply: OK")
         # May fail at backend level, but must NOT be rejected as unknown model
         # A 401/500 from the provider is fine — 404 "model not found at proxy level" is not
@@ -170,14 +188,14 @@ class TestRouting:
 
     def test_exhausted_cascade_reports_chain(self, client: httpx.Client):
         """When all fallbacks fail, error must mention the cascade chain or detect thinking exhaustion."""
-        # Use text-gemini directly (no further fallbacks) — if backend is down,
+        # Use gemini-flash directly — if backend is down,
         # the error should mention the model/group. If the model is a thinking model
         # with low max_tokens, the proxy detects thinking-budget exhaustion instead.
-        r = _chat(client, "text-gemini", "Reply: OK")
+        r = _chat(client, "gemini-flash", "Reply: OK")
         if r.status_code >= 400:
             body = r.text
             assert (
-                "text-gemini" in body or "thinking_budget_exhausted" in body
+                "gemini-flash" in body or "thinking_budget_exhausted" in body
             ), "Error should reference the failed model group or detect thinking exhaustion"
 
 
@@ -188,11 +206,23 @@ class TestRouting:
 class TestRequestValidation:
     """Verify the proxy validates requests before forwarding to backends."""
 
+    def test_text_alias_rejected(self, client: httpx.Client):
+        """The retired text alias must not be accepted at runtime."""
+        r = client.post(
+            "/v1/chat/completions",
+            json={"model": "text", "messages": [{"role": "user", "content": "hi"}]},
+            timeout=10.0,
+        )
+        assert r.status_code == 400
+        data = r.json()
+        assert data["error"]["type"] == "invalid_request_error"
+        assert "Unknown model 'text'" in data["error"]["message"]
+
     def test_empty_messages_rejected(self, client: httpx.Client):
         """Empty messages array must be rejected."""
         r = client.post(
             "/v1/chat/completions",
-            json={"model": "text", "messages": []},
+            json={"model": "chutes-deepseek", "messages": []},
             timeout=10.0,
         )
         assert r.status_code >= 400
@@ -222,15 +252,15 @@ class TestRequestValidation:
 # ===================================================================
 
 class TestVlmAutoRouting:
-    """Verify VLM router detects image_url and reroutes text→vlm."""
+    """Verify VLM router detects image_url and reroutes text-only groups to vlm."""
 
     def test_image_url_triggers_vlm_route(self, client: httpx.Client):
-        """Message with image_url content part should route to vlm, not text."""
+        """Message with image_url content part should route to vlm."""
         content = [
             {"type": "text", "text": "Describe this image"},
             {"type": "image_url", "image_url": {"url": "https://example.com/test.png"}},
         ]
-        r = _chat(client, "text", content)
+        r = _chat(client, "chutes-deepseek", content)
         # If VLM router works, the request should have been rerouted to vlm group.
         # We verify by checking proxy logs or response model field on success.
         # On error, we accept any response — the point is it didn't hang or crash.
@@ -249,17 +279,17 @@ class TestVlmAutoRouting:
             {"type": "text", "text": "What is this?"},
             {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{tiny_png}"}},
         ]
-        r = _chat(client, "text", content)
+        r = _chat(client, "chutes-deepseek", content)
         # Verify the request was processed (not rejected as invalid)
         assert r.status_code > 0, "Request should not hang"
 
-    def test_no_image_stays_on_text(self, client: httpx.Client):
+    def test_no_image_stays_on_requested_text_group(self, client: httpx.Client):
         """Plain text message should NOT be rerouted to vlm."""
-        r = _chat(client, "text", "What is 2+2?")
+        r = _chat(client, "chutes-deepseek", "What is 2+2?")
         if r.status_code >= 400:
             body = r.text
-            # Should reference text group, not vlm
-            assert "vlm" not in body.lower() or "text" in body.lower(), (
+            # Should reference the requested text-only group, not vlm.
+            assert "vlm" not in body.lower() or "chutes-deepseek" in body.lower(), (
                 f"Plain text was unexpectedly routed to vlm: {body[:300]}"
             )
 
@@ -372,7 +402,7 @@ class TestErrorPropagation:
 
     def test_provider_error_returns_structured_json(self, client: httpx.Client):
         """Provider failures must return structured JSON error, not raw 500."""
-        r = _chat(client, "text-gemini", "hi")
+        r = _chat(client, "gemini-flash", "hi")
         if r.status_code >= 400:
             data = r.json()
             assert "error" in data

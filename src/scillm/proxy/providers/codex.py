@@ -16,7 +16,9 @@ import openai
 from loguru import logger
 
 from scillm.proxy.providers import make_chunk_id, sse_chunk, sse_done, sse_format, streaming_timeout
+from scillm.proxy.errors import ProviderOAuthError, provider_error_code_for_status
 from scillm.proxy.providers.auth import get_codex_credentials
+from scillm.proxy.providers.claude import _extract_provider_error, _oauth_error_message
 
 CODEX_API_URL = "https://chatgpt.com/backend-api/codex/responses"
 
@@ -230,6 +232,48 @@ def _parse_codex_response(events: list[dict[str, Any]], model: str) -> openai.ty
     )
 
 
+
+def _codex_credentials_or_raise(model: str, *, force_refresh: bool = False) -> tuple[str, str]:
+    creds = get_codex_credentials(force_refresh=force_refresh)
+    if not creds:
+        raise ProviderOAuthError(
+            provider="codex-oauth",
+            status_code=401,
+            message="No Codex OAuth token available.",
+            provider_error_code="PROVIDER_AUTH_FAILED",
+            model_requested=model,
+            provider_auth_status="not_configured_or_expired",
+            project_agent_message=(
+                "Run `codex login` on the host, ensure ~/.codex/auth.json is mounted into "
+                "the scillm proxy, then check GET /v1/scillm/auth before retrying."
+            ),
+        )
+    return creds
+
+
+def _raise_codex_http_error(*, model: str, status_code: int, error_text: str) -> None:
+    provider_error_type, provider_message = _extract_provider_error(error_text)
+    provider_error_code = provider_error_code_for_status(status_code)
+    auth_status = "provider_rejected" if status_code in (401, 403) else "configured"
+    if status_code in (401, 403) and (
+        "token_invalidated" in error_text
+        or "token_revoked" in error_text
+        or "invalidated oauth token" in error_text.lower()
+    ):
+        auth_status = "invalidated"
+    raise ProviderOAuthError(
+        provider="codex-oauth",
+        status_code=status_code if status_code in (400, 401, 403, 404, 429) else 502,
+        message=f"Codex API {status_code}: {provider_message}",
+        provider_error_code=provider_error_code,
+        provider_status_code=status_code,
+        model_requested=model,
+        provider_auth_status=auth_status,
+        provider_error_type=provider_error_type,
+        project_agent_message=_oauth_error_message(status_code, "Codex"),
+    )
+
+
 async def codex_completion(
     model: str,
     messages: list[dict[str, Any]],
@@ -240,11 +284,6 @@ async def codex_completion(
     Uses SSE streaming internally, collects all events, returns as
     a single OpenAI ChatCompletion.
     """
-    creds = get_codex_credentials()
-    if not creds:
-        raise Exception("No Codex OAuth token available. Run Pi CLI /login first.")
-
-    access_token, account_id = creds
     instructions, input_items = _openai_messages_to_codex_input(messages)
 
     body: dict[str, Any] = {
@@ -257,51 +296,59 @@ async def codex_completion(
         "text": {"verbosity": "medium"},
         "include": ["reasoning.encrypted_content"],
     }
-    # ChatGPT Codex backend does NOT support: temperature, max_output_tokens, top_p
-
-    # Tool use: translate OpenAI Chat tools to Codex Responses API format
     if "tools" in kwargs and kwargs["tools"]:
         body["tools"] = _openai_tools_to_codex(kwargs["tools"])
         body["tool_choice"] = "auto"
         body["parallel_tool_calls"] = True
 
-    headers = {
-        "Authorization": f"Bearer {access_token}",
-        "Content-Type": "application/json",
-        "Accept": "text/event-stream",
-        "chatgpt-account-id": account_id,
-    }
-
-    logger.info("Codex OAuth call: model={}, {} input items, {} tools", model, len(input_items), len(body.get("tools", [])))
-
     timeout = kwargs.get("timeout", 120)
     events: list[dict[str, Any]] = []
 
-    async with httpx.AsyncClient(timeout=float(timeout)) as client:
-        async with client.stream("POST", CODEX_API_URL, json=body, headers=headers) as resp:
-            if resp.status_code != 200:
-                error_body = await resp.aread()
-                error_text = error_body.decode("utf-8", errors="replace")
-                logger.warning("Codex API error {}: {}", resp.status_code, error_text[:500])
-                raise Exception(f"Codex API {resp.status_code}: {error_text[:500]}")
+    for attempt in range(2):
+        creds = get_codex_credentials(force_refresh=attempt > 0)
+        if not creds:
+            creds = _codex_credentials_or_raise(model, force_refresh=attempt > 0)
+        access_token, account_id = creds
+        headers = {
+            "Authorization": f"Bearer {access_token}",
+            "Content-Type": "application/json",
+            "Accept": "text/event-stream",
+            "chatgpt-account-id": account_id,
+        }
+        logger.info(
+            "Codex OAuth call: model={}, {} input items, {} tools, attempt={}",
+            model,
+            len(input_items),
+            len(body.get("tools", [])),
+            attempt + 1,
+        )
+        async with httpx.AsyncClient(timeout=float(timeout)) as client:
+            async with client.stream("POST", CODEX_API_URL, json=body, headers=headers) as resp:
+                if resp.status_code != 200:
+                    error_body = await resp.aread()
+                    error_text = error_body.decode("utf-8", errors="replace")
+                    logger.warning("Codex API error {}: {}", resp.status_code, error_text[:500])
+                    if resp.status_code in (401, 403) and attempt == 0:
+                        continue
+                    _raise_codex_http_error(model=model, status_code=resp.status_code, error_text=error_text)
 
-            # Parse SSE events
-            buffer = ""
-            async for chunk in resp.aiter_text():
-                buffer += chunk
-                while "\n\n" in buffer:
-                    event_str, buffer = buffer.split("\n\n", 1)
-                    for line in event_str.split("\n"):
-                        if line.startswith("data: "):
-                            data_str = line[6:]
-                            if data_str.strip() == "[DONE]":
-                                break
-                            try:
-                                events.append(json.loads(data_str))
-                            except json.JSONDecodeError:
-                                pass
+                buffer = ""
+                async for chunk in resp.aiter_text():
+                    buffer += chunk
+                    while "\n\n" in buffer:
+                        event_str, buffer = buffer.split("\n\n", 1)
+                        for line in event_str.split("\n"):
+                            if line.startswith("data: "):
+                                data_str = line[6:]
+                                if data_str.strip() == "[DONE]":
+                                    break
+                                try:
+                                    events.append(json.loads(data_str))
+                                except json.JSONDecodeError:
+                                    pass
+                return _parse_codex_response(events, model)
 
-    return _parse_codex_response(events, model)
+    _codex_credentials_or_raise(model)
 
 
 async def codex_completion_stream(
@@ -314,10 +361,7 @@ async def codex_completion_stream(
     Translates Codex SSE events (response.output_text.delta,
     response.completed) into OpenAI-compatible ``chat.completion.chunk`` format.
     """
-    creds = get_codex_credentials()
-    if not creds:
-        raise Exception("No Codex OAuth token available.")
-
+    creds = _codex_credentials_or_raise(model)
     access_token, account_id = creds
     instructions, input_items = _openai_messages_to_codex_input(messages)
 
@@ -350,48 +394,89 @@ async def codex_completion_stream(
     tool_call_index = 0
     tool_call_ids: dict[str, int] = {}  # call_id → index
 
-    try:
-        async with httpx.AsyncClient(timeout=streaming_timeout(timeout)) as client:
-            async with client.stream("POST", CODEX_API_URL, json=body, headers=headers) as resp:
-                if resp.status_code != 200:
-                    error_body = await resp.aread()
-                    error_text = error_body.decode("utf-8", errors="replace")
-                    logger.warning("Codex stream error {}: {}", resp.status_code, error_text[:500])
-                    err = sse_format({"error": {"message": f"Codex API {resp.status_code}: {error_text[:300]}", "type": "provider_error"}})
-                    yield err.encode()
-                    yield sse_done().encode()
-                    return
+    for attempt in range(2):
+        if attempt > 0:
+            refreshed = get_codex_credentials(force_refresh=True)
+            if refreshed:
+                access_token, account_id = refreshed
+                headers["Authorization"] = f"Bearer {access_token}"
+                headers["chatgpt-account-id"] = account_id
+        try:
+            async with httpx.AsyncClient(timeout=streaming_timeout(timeout)) as client:
+                async with client.stream("POST", CODEX_API_URL, json=body, headers=headers) as resp:
+                    if resp.status_code != 200:
+                        error_body = await resp.aread()
+                        error_text = error_body.decode("utf-8", errors="replace")
+                        logger.warning("Codex stream error {}: {}", resp.status_code, error_text[:500])
+                        if resp.status_code in (401, 403) and attempt == 0:
+                            continue
+                        try:
+                            _raise_codex_http_error(
+                                model=model,
+                                status_code=resp.status_code,
+                                error_text=error_text,
+                            )
+                        except ProviderOAuthError as exc:
+                            err = sse_format({"error": exc.to_dict()["error"]})
+                            yield err.encode()
+                            yield sse_done().encode()
+                            return
 
-                buffer = ""
-                async for text_chunk in resp.aiter_text():
-                    buffer += text_chunk
-                    while "\n\n" in buffer:
-                        event_str, buffer = buffer.split("\n\n", 1)
-                        for line in event_str.split("\n"):
-                            if not line.startswith("data: "):
-                                continue
-                            data_str = line[6:]
-                            if data_str.strip() == "[DONE]":
-                                yield sse_done().encode()
-                                return
+                    buffer = ""
+                    async for text_chunk in resp.aiter_text():
+                        buffer += text_chunk
+                        while "\n\n" in buffer:
+                            event_str, buffer = buffer.split("\n\n", 1)
+                            for line in event_str.split("\n"):
+                                if not line.startswith("data: "):
+                                    continue
+                                data_str = line[6:]
+                                if data_str.strip() == "[DONE]":
+                                    yield sse_done().encode()
+                                    return
 
-                            try:
-                                event = json.loads(data_str)
-                            except json.JSONDecodeError:
-                                continue
+                                try:
+                                    event = json.loads(data_str)
+                                except json.JSONDecodeError:
+                                    continue
 
-                            event_type = event.get("type", "")
+                                event_type = event.get("type", "")
 
-                            if event_type == "response.output_text.delta":
-                                delta = event.get("delta", "")
-                                if delta:
-                                    chunk = sse_chunk(chunk_id, model, content_delta=delta)
-                                    yield sse_format(chunk).encode()
+                                if event_type == "response.output_text.delta":
+                                    delta = event.get("delta", "")
+                                    if delta:
+                                        chunk = sse_chunk(chunk_id, model, content_delta=delta)
+                                        yield sse_format(chunk).encode()
 
-                            elif event_type == "response.output_item.added":
-                                item = event.get("item", {})
-                                if item.get("type") == "function_call":
-                                    call_id = item.get("call_id", item.get("id", ""))
+                                elif event_type == "response.output_item.added":
+                                    item = event.get("item", {})
+                                    if item.get("type") == "function_call":
+                                        call_id = item.get("call_id", item.get("id", ""))
+                                        if call_id and call_id not in tool_call_ids:
+                                            tool_call_ids[call_id] = tool_call_index
+                                            tc = [{
+                                                "index": tool_call_index,
+                                                "id": call_id,
+                                                "type": "function",
+                                                "function": {
+                                                    "name": item.get("name", ""),
+                                                    "arguments": "",
+                                                },
+                                            }]
+                                            tool_call_index += 1
+                                            chunk = sse_chunk(chunk_id, model, tool_calls=tc)
+                                            yield sse_format(chunk).encode()
+
+                                elif event_type == "response.output_item.done":
+                                    item = event.get("item", {})
+                                    if item.get("type") == "function_call":
+                                        call_id = item.get("call_id", item.get("id", ""))
+                                        if call_id and call_id not in tool_call_ids:
+                                            tool_call_ids[call_id] = tool_call_index
+                                            tool_call_index += 1
+
+                                elif event_type == "response.function_call_arguments.done":
+                                    call_id = event.get("call_id", "")
                                     if call_id and call_id not in tool_call_ids:
                                         tool_call_ids[call_id] = tool_call_index
                                         tc = [{
@@ -399,82 +484,70 @@ async def codex_completion_stream(
                                             "id": call_id,
                                             "type": "function",
                                             "function": {
-                                                "name": item.get("name", ""),
-                                                "arguments": "",
+                                                "name": event.get("name", ""),
+                                                "arguments": event.get("arguments", ""),
                                             },
                                         }]
                                         tool_call_index += 1
                                         chunk = sse_chunk(chunk_id, model, tool_calls=tc)
                                         yield sse_format(chunk).encode()
 
-                            elif event_type == "response.output_item.done":
-                                item = event.get("item", {})
-                                if item.get("type") == "function_call":
-                                    call_id = item.get("call_id", item.get("id", ""))
-                                    if call_id and call_id not in tool_call_ids:
+                                elif event_type == "response.function_call_arguments.delta":
+                                    call_id = event.get("call_id", "")
+                                    if call_id not in tool_call_ids:
+                                        # First chunk for this tool call — emit initial with name
                                         tool_call_ids[call_id] = tool_call_index
+                                        tc = [{
+                                            "index": tool_call_index,
+                                            "id": call_id,
+                                            "type": "function",
+                                            "function": {
+                                                "name": event.get("name", ""),
+                                                "arguments": event.get("delta", ""),
+                                            },
+                                        }]
                                         tool_call_index += 1
-
-                            elif event_type == "response.function_call_arguments.done":
-                                call_id = event.get("call_id", "")
-                                if call_id and call_id not in tool_call_ids:
-                                    tool_call_ids[call_id] = tool_call_index
-                                    tc = [{
-                                        "index": tool_call_index,
-                                        "id": call_id,
-                                        "type": "function",
-                                        "function": {
-                                            "name": event.get("name", ""),
-                                            "arguments": event.get("arguments", ""),
-                                        },
-                                    }]
-                                    tool_call_index += 1
+                                    else:
+                                        # Subsequent argument delta
+                                        tc = [{
+                                            "index": tool_call_ids[call_id],
+                                            "function": {
+                                                "arguments": event.get("delta", ""),
+                                            },
+                                        }]
                                     chunk = sse_chunk(chunk_id, model, tool_calls=tc)
                                     yield sse_format(chunk).encode()
 
-                            elif event_type == "response.function_call_arguments.delta":
-                                call_id = event.get("call_id", "")
-                                if call_id not in tool_call_ids:
-                                    # First chunk for this tool call — emit initial with name
-                                    tool_call_ids[call_id] = tool_call_index
-                                    tc = [{
-                                        "index": tool_call_index,
-                                        "id": call_id,
-                                        "type": "function",
-                                        "function": {
-                                            "name": event.get("name", ""),
-                                            "arguments": event.get("delta", ""),
-                                        },
-                                    }]
-                                    tool_call_index += 1
-                                else:
-                                    # Subsequent argument delta
-                                    tc = [{
-                                        "index": tool_call_ids[call_id],
-                                        "function": {
-                                            "arguments": event.get("delta", ""),
-                                        },
-                                    }]
-                                chunk = sse_chunk(chunk_id, model, tool_calls=tc)
-                                yield sse_format(chunk).encode()
+                                elif event_type == "response.completed":
+                                    resp_data = event.get("response", {})
+                                    actual_model = resp_data.get("model", model)
+                                    resp_usage = resp_data.get("usage", {})
+                                    usage = {
+                                        "prompt_tokens": resp_usage.get("input_tokens", 0),
+                                        "completion_tokens": resp_usage.get("output_tokens", 0),
+                                        "total_tokens": resp_usage.get("input_tokens", 0) + resp_usage.get("output_tokens", 0),
+                                    }
+                                    finish = "tool_calls" if tool_call_ids else "stop"
+                                    chunk = sse_chunk(chunk_id, actual_model, finish_reason=finish, usage=usage)
+                                    yield sse_format(chunk).encode()
+                                    yield sse_done().encode()
+                                    return
 
-                            elif event_type == "response.completed":
-                                resp_data = event.get("response", {})
-                                actual_model = resp_data.get("model", model)
-                                resp_usage = resp_data.get("usage", {})
-                                usage = {
-                                    "prompt_tokens": resp_usage.get("input_tokens", 0),
-                                    "completion_tokens": resp_usage.get("output_tokens", 0),
-                                    "total_tokens": resp_usage.get("input_tokens", 0) + resp_usage.get("output_tokens", 0),
-                                }
-                                finish = "tool_calls" if tool_call_ids else "stop"
-                                chunk = sse_chunk(chunk_id, actual_model, finish_reason=finish, usage=usage)
-                                yield sse_format(chunk).encode()
-                                yield sse_done().encode()
-                                return
-
-    except Exception as exc:
-        logger.error("Codex stream interrupted: {}", exc)
-        err = sse_format({"error": {"message": f"stream_interrupted: {exc}", "type": "stream_error"}})
-        yield err.encode()
-        yield sse_done().encode()
+        except httpx.RemoteProtocolError as exc:
+            if attempt == 0:
+                logger.warning(
+                    "Codex stream disconnected mid-body (attempt 1/2), retrying fresh stream: {}",
+                    exc,
+                )
+                continue
+            logger.error("Codex stream interrupted: {}", exc)
+            err = sse_format({"error": {"message": f"stream_interrupted: {exc}", "type": "stream_error"}})
+            yield err.encode()
+            yield sse_done().encode()
+            return
+        except Exception as exc:
+            logger.error("Codex stream interrupted: {}", exc)
+            err = sse_format({"error": {"message": f"stream_interrupted: {exc}", "type": "stream_error"}})
+            yield err.encode()
+            yield sse_done().encode()
+            return

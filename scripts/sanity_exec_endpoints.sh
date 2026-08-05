@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
+# Fail-closed sanity for scillm exec: deterministic HTTP contract + live LLM runners.
 set -euo pipefail
 
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BASE="${SCILLM_BASE_URL:-http://127.0.0.1:4001}"
 KEY="${SCILLM_PROXY_KEY:-sk-dev-proxy-123}"
 PYTHON_BIN="${PYTHON_BIN:-python}"
@@ -15,7 +17,7 @@ curl -sf "${BASE}/health/liveliness" >/dev/null
 
 EXEC_RUN_ID="$(run_id sanity-exec-local)"
 printf '== /v1/scillm/exec local_command (%s) ==\n' "$EXEC_RUN_ID"
-curl -sf -X POST "${BASE}/v1/scillm/exec" "${AUTH[@]}" -d @- | jq . <<JSON
+curl -sf -X POST "${BASE}/v1/scillm/exec" "${AUTH[@]}" -d @- <<JSON | jq .
 {
   "run_id": "${EXEC_RUN_ID}",
   "id": "local_ok",
@@ -33,7 +35,7 @@ curl -sf "${BASE}/v1/scillm/exec/${EXEC_RUN_ID}/events?tail=20" "${AUTH[@]}" | j
 
 BATCH_ID="$(run_id sanity-exec-batch)"
 printf '== /v1/scillm/exec/batch (%s) ==\n' "$BATCH_ID"
-curl -sf -X POST "${BASE}/v1/scillm/exec/batch" "${AUTH[@]}" -d @- | jq . <<JSON
+curl -sf -X POST "${BASE}/v1/scillm/exec/batch" "${AUTH[@]}" -d @- <<JSON | jq .
 {
   "batch_id": "${BATCH_ID}",
   "graph_goal": "Run two independent deterministic exec workers.",
@@ -58,7 +60,7 @@ JSON
 GRAPH_ID="$(run_id sanity-exec-graph)"
 TMP_REPO="$(mktemp -d)"
 printf '== /v1/scillm/exec/graph (%s) ==\n' "$GRAPH_ID"
-curl -sf -X POST "${BASE}/v1/scillm/exec/graph" "${AUTH[@]}" -d @- | jq . <<JSON
+curl -sf -X POST "${BASE}/v1/scillm/exec/graph" "${AUTH[@]}" -d @- <<JSON | jq .
 {
   "graph_id": "${GRAPH_ID}",
   "graph_goal": "Run a small dependency DAG with deterministic local commands.",
@@ -100,49 +102,46 @@ LONG_PID=$!
 sleep 2
 curl -sf -X POST "${BASE}/v1/scillm/exec/${CANCEL_ID}/cancel" "${AUTH[@]}" | jq .
 wait "$LONG_PID" || true
+CANCEL_STATUS="$(jq -r '.status' /tmp/scillm-exec-cancel-response.json)"
+if [[ "${CANCEL_STATUS}" != "failed" && "${CANCEL_STATUS}" != "cancelled" ]]; then
+  echo "FAIL cancel endpoint: expected failed/cancelled, got ${CANCEL_STATUS}" >&2
+  jq . /tmp/scillm-exec-cancel-response.json >&2
+  exit 1
+fi
 cat /tmp/scillm-exec-cancel-response.json | jq .
 
-printf '== optional codex_exec smoke ==\n'
-if command -v codex >/dev/null 2>&1; then
-  CODEX_ID="$(run_id sanity-codex-exec)"
-  curl -sf -X POST "${BASE}/v1/scillm/exec" "${AUTH[@]}" -d @- | jq . <<JSON
-{
-  "run_id": "${CODEX_ID}",
-  "id": "codex_smoke",
-  "type": "codex_exec",
-  "model": "gpt-5.5",
-  "sandbox": "read-only",
-  "node_goal": "Return a tiny JSON smoke result.",
-  "prompt": "Return JSON only: {\"status\":\"ok\",\"runner\":\"codex_exec\"}",
-  "output_schema": {
-    "type": "object",
-    "required": ["status", "runner"]
-  }
-}
-JSON
-else
-  echo "codex not found; skipping optional codex_exec smoke"
-fi
+printf '== live runner + chat + agents (fail-closed bash, no pytest) ==\n'
+export SCILLM_EXEC_SMOKE_CWD="${REPO_ROOT}"
+"${REPO_ROOT}/scripts/sanity_live_runners.sh"
 
-printf '== optional claude_print smoke ==\n'
-if command -v claude >/dev/null 2>&1; then
-  CLAUDE_ID="$(run_id sanity-claude-print)"
-  curl -sf -X POST "${BASE}/v1/scillm/exec" "${AUTH[@]}" -d @- | jq . <<JSON
-{
-  "run_id": "${CLAUDE_ID}",
-  "id": "claude_smoke",
-  "type": "claude_print",
-  "sandbox": "read-only",
-  "node_goal": "Return a tiny JSON smoke result.",
-  "prompt": "Return JSON only: {\"status\":\"ok\",\"runner\":\"claude_print\"}",
-  "output_schema": {
-    "type": "object",
-    "required": ["status", "runner"]
-  }
-}
-JSON
-else
-  echo "claude not found; skipping optional claude_print smoke"
-fi
+echo "PASS scillm exec+agents live sanity (deterministic HTTP + real runners + standing agent)"
 
-echo "PASS scillm exec endpoint sanity"
+if [[ "${SCILLM_CURSOR_STREAM_PROBE:-}" == "1" ]]; then
+  FAKE_AGENT="${REPO_ROOT}/scripts/test_fixtures/fake_cursor_stream_agent.py"
+  printf '== cursor_exec stream probe (fake agent; restart proxy with SCILLM_CURSOR_AGENT_BINARY=%s) ==\n' "$FAKE_AGENT"
+  CURSOR_RUN_ID="$(run_id sanity-cursor-stream)"
+  WORKSPACE="${REPO_ROOT}/.scillm/exec-stream-probe"
+  mkdir -p "$WORKSPACE"
+  BODY="$(jq -n --arg run_id "$CURSOR_RUN_ID" --arg cwd "$WORKSPACE" '{
+    run_id: $run_id,
+    id: "cursor_stream",
+    type: "cursor_exec",
+    model: "cursor-auto",
+    node_goal: "Sanity: oversized stream-json line completes",
+    graph_goal: "cursor stream probe",
+    cwd: $cwd,
+    sandbox: "read-only",
+    timeout_s: 30,
+    idle_timeout_s: 10,
+    prompt: "Return success."
+  }')"
+  RESP="$(curl -sf -X POST "${BASE}/v1/scillm/exec" "${AUTH[@]}" -d "$BODY")"
+  echo "$RESP" | jq '{status, ok: .result.ok, failure_type: .result.failure_type, stream_completed: .result.stream_completed}'
+  OK="$(echo "$RESP" | jq -r '.result.ok')"
+  FC="$(echo "$RESP" | jq -r '.result.failure_type // empty')"
+  SC="$(echo "$RESP" | jq -r '.result.stream_completed')"
+  if [[ "$OK" != "true" || "$SC" != "true" ]]; then
+    echo "cursor stream probe failed: ok=$OK stream_completed=$SC failure_type=$FC" >&2
+    exit 1
+  fi
+fi

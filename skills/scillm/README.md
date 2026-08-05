@@ -11,9 +11,10 @@ Use the project README when a person (not a slash skill) needs setup, surfaces, 
 | Topic | Section in [../../README.md](../../README.md) |
 |-------|--------------------------------------------------|
 | Docker, ports, disk, `network_mode: host` | [Before you start](../../README.md#before-you-start) |
-| QRA, VLM, project agent, Pi, utls/JA3 | [Glossary](../../README.md#glossary-first-use) |
+| QRA, VLM, Planner, Orchestrator, Executor, Pi, utls/JA3 | [Glossary](../../README.md#glossary-first-use) |
 | Install + first `curl` | [Quick Start](../../README.md#quick-start) |
-| Chat vs exec vs OpenCode serve vs transport vs agents | [Which surface?](../../README.md#which-surface-should-i-use) · [Invocation surfaces](../../README.md#invocation-surfaces) |
+| Chat vs exec vs OpenCode serve vs transport vs agents vs orchestrated runs | [Which surface?](../../README.md#which-surface-should-i-use) · [Invocation surfaces](../../README.md#invocation-surfaces) |
+| `$pdf-lab` OpenCode serve/transport hardening lane | [pdf-lab hardening lane](SKILL.md#pdf-lab-hardening-lane) · [Invocation surfaces](../../README.md#invocation-surfaces) |
 | OpenCode Go vs serve (not the same) | [OpenCode Go vs serve](../../README.md#opencode-go-vs-opencode-serve-do-not-confuse) |
 | Why proxy vs `pip install` | [Why Docker](../../README.md#why-docker-not-pip-install) · [Why scillm](../../README.md#why-scillm) |
 | Feature reference (themed) | [What You Get](../../README.md#what-you-get) |

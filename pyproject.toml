@@ -24,6 +24,7 @@ dependencies = [
   "aiohttp>=3.10",
   "pydantic>=2.5.0",
   "jsonschema>=4.22.0",
+  "pyyaml>=6.0.1",
   "rapidfuzz>=3.9.7",
   "chutes>=0.0.26",
   "apscheduler>=3.11.0",
@@ -40,6 +41,9 @@ dependencies = [
 Homepage = "https://github.com/grahama1970/scillm"
 Repository = "https://github.com/grahama1970/scillm"
 Documentation = "https://github.com/grahama1970/scillm#readme"
+
+[project.scripts]
+scillm = "scillm.cli:main"
 
 [project.optional-dependencies]
 proxy = [

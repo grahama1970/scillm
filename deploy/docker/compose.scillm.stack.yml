@@ -15,15 +15,35 @@ services:
   redis:
     image: redis:7-alpine
     ports:
-      - "6379:6379"
+      - "127.0.0.1:6379:6379"
 
   ollama:
     image: ollama/ollama:latest
-    # Internal only to avoid host port conflicts
-    # ports:
-    #   - "11434:11434"
+    container_name: ollama-inference
+    restart: unless-stopped
+    ports:
+      - "${OLLAMA_PORT:-11434}:11434"
+    environment:
+      OLLAMA_HOST: 0.0.0.0:11434
+      OLLAMA_ORIGINS: ${OLLAMA_ORIGINS:-*}
     volumes:
-      - ollama_models:/root/.ollama
+      - "${HOME}/.ollama:/root/.ollama"
+      - "/mnt/storage12tb:/mnt/storage12tb:ro"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 15s
 
   codeworld-bridge:
     build:
@@ -61,19 +81,17 @@ services:
     environment:
       PYTHONPATH: /app/src
       CONFIG_FILE_PATH: /app/config.yaml
-      LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY:-sk-dev-proxy-123}
+      LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY:?set LITELLM_MASTER_KEY in .env; do not use the development default}
       METRICS_ENV: ${METRICS_ENV:-dev}
       # Redis removed from scillm — all logging via ArangoDB
       # Redis service kept for codeworld-bridge only
-    network_mode: host
+    ports:
+      - "127.0.0.1:4001:4001"
     volumes:
       - "../../local/proxy_server_config.yaml:/app/config.yaml:ro"
     healthcheck:
-      test: ["CMD", "curl", "-sf", "-H", "Authorization: Bearer $${LITELLM_MASTER_KEY:-sk-dev-proxy-123}", "http://127.0.0.1:4001/health/liveliness"]
+      test: ["CMD", "curl", "-sf", "-H", "Authorization: Bearer $${LITELLM_MASTER_KEY}", "http://127.0.0.1:4001/health/liveliness"]
       interval: 15s
       timeout: 10s
       retries: 5
       start_period: 30s
-
-volumes:
-  ollama_models: {}

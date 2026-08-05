@@ -255,6 +255,7 @@ async def collect_response(stream: Any) -> dict[str, Any]:
     """
     result: dict[str, Any] = {}
     collected_content: list[str] = []
+    collected_reasoning_content: list[str] = []
     tool_calls_by_index: dict[int, dict[str, Any]] = {}
 
     try:
@@ -279,6 +280,8 @@ async def collect_response(stream: Any) -> dict[str, Any]:
             # Accumulate text content.
             if delta.get("content"):
                 collected_content.append(delta["content"])
+            if delta.get("reasoning_content"):
+                collected_reasoning_content.append(delta["reasoning_content"])
 
             # Accumulate tool calls.
             for tc in delta.get("tool_calls") or []:
@@ -307,6 +310,13 @@ async def collect_response(stream: Any) -> dict[str, Any]:
     message: dict[str, Any] = {"role": "assistant"}
     if collected_content:
         message["content"] = "".join(collected_content)
+    elif collected_reasoning_content:
+        # Some OpenCode/Kimi routes stream useful visible output under
+        # reasoning_content. Preserve it as fallback content so helper callers
+        # do not receive an empty response.
+        message["content"] = "".join(collected_reasoning_content)
+    if collected_reasoning_content:
+        message["reasoning_content"] = "".join(collected_reasoning_content)
     if tool_calls_by_index:
         message["tool_calls"] = [
             tool_calls_by_index[i] for i in sorted(tool_calls_by_index)

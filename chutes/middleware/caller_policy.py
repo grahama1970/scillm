@@ -19,13 +19,14 @@ _TEXT_MODEL_NAMES = {
     "text",
     "local-text",
     "moonshot-text",
-    "text-deepseek",
-    "text-gemini",
-    "text-gemini-oauth",
-    "text-gemini-3",
-    "text-kimi",
-    "text-qwen3",
-    "text-qwen3-large",
+    "chutes-deepseek",
+    "chutes-kimi",
+    "chutes-qwen",
+    "chutes-qwen-large",
+    "deepseek-direct",
+    "gemini-flash",
+    "gemini-flash-oauth",
+    "gemini-flash-high",
 }
 
 

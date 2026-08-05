@@ -14,6 +14,7 @@ import hashlib
 import json
 import os
 import time
+import uuid as _uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -36,6 +37,35 @@ _JSONL_BACKUP_DIR = Path(os.environ.get(
 _client: httpx.AsyncClient | None = None
 
 
+def _float_or_none(value: Any) -> float | None:
+    try:
+        return float(value) if value is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _request_timeout_s(request: dict) -> float | None:
+    explicit_timeout = _float_or_none(request.get("timeout"))
+    if explicit_timeout is not None:
+        return explicit_timeout
+    return _float_or_none(request.get("_policy_max_timeout_s"))
+
+
+def _dynamic_timeout_s(request: dict) -> float | None:
+    dynamic_timeout_ms = _float_or_none(request.get("_dynamic_timeout_ms"))
+    if dynamic_timeout_ms is None:
+        return None
+    return dynamic_timeout_ms / 1000.0
+
+
+def _stream_heartbeat_s(request: dict) -> float | None:
+    for key in ("stream_heartbeat_s", "heartbeat_interval_s", "idle_timeout", "read_timeout"):
+        value = _float_or_none(request.get(key))
+        if value is not None and value > 0:
+            return value
+    return None
+
+
 def _get_client() -> httpx.AsyncClient:
     global _client
     if _client is None:
@@ -45,8 +75,6 @@ def _get_client() -> httpx.AsyncClient:
         )
     return _client
 
-
-import uuid as _uuid
 
 def _make_key(ts_iso: str, model: str) -> str:
     """Unique _key per request — includes UUID suffix to avoid batch collisions."""
@@ -94,6 +122,9 @@ class ArangoLogMiddleware(BaseMiddleware):
         try:
             # Include both error type and message for debugging
             error_str = f"{type(error).__name__}: {str(error)[:500]}"
+            details = getattr(error, "details", None)
+            if isinstance(details, dict):
+                request["_provider_error_details"] = dict(details)
             await self._write(request, {}, error=error_str)
         except Exception as exc:
             logger.debug("arango_log: on_error write failed: {}", exc)
@@ -167,13 +198,49 @@ class ArangoLogMiddleware(BaseMiddleware):
             "task_type": "llm_api_call",
             "model_requested": request.get("model", ""),
             "model_served": model_served,
-            "provider": _infer_provider(model_served),
+            "provider": (
+                request.get("_provider_bound_diagnostics", {}).get("provider")
+                if isinstance(request.get("_provider_bound_diagnostics"), dict)
+                and request.get("_provider_bound_diagnostics", {}).get("provider")
+                else _infer_provider(model_served)
+            ),
             "duration_ms": duration_ms,
             "prompt_tokens": usage.get("prompt_tokens", 0),
             "completion_tokens": usage.get("completion_tokens", 0),
             "total_tokens": usage.get("total_tokens", 0),
             "cost_usd": cost_usd,
             "stream": bool(request.get("stream")),
+            "stream_progress_events": bool(request.get("stream_progress_events") or request.get("progress_events")),
+            "stream_heartbeat_s": _stream_heartbeat_s(request),
+            "deadline_timeout_s": _request_timeout_s(request),
+            "dynamic_timeout_s": _dynamic_timeout_s(request),
+            "timeout_source": request.get("_timeout_source"),
+            "provider_bound_request_keys": (
+                request.get("_provider_bound_diagnostics", {}).get("body_keys")
+                if isinstance(request.get("_provider_bound_diagnostics"), dict)
+                else None
+            ),
+            "provider_bound_token_cap_fields": (
+                request.get("_provider_bound_diagnostics", {}).get("token_cap_fields_present")
+                if isinstance(request.get("_provider_bound_diagnostics"), dict)
+                else None
+            ),
+            "provider_bound_provider": (
+                request.get("_provider_bound_diagnostics", {}).get("provider")
+                if isinstance(request.get("_provider_bound_diagnostics"), dict)
+                else None
+            ),
+            "provider_bound_model": (
+                request.get("_provider_bound_diagnostics", {}).get("model")
+                if isinstance(request.get("_provider_bound_diagnostics"), dict)
+                else None
+            ),
+            "stream_terminal_finish_reason": request.get("_stream_terminal_finish_reason"),
+            "stream_terminal_usage": request.get("_stream_terminal_usage"),
+            "stream_saw_done": request.get("_stream_saw_done"),
+            "stream_visible_output": request.get("_stream_visible_output"),
+            "stream_reasoning_output": request.get("_stream_reasoning_output"),
+            "stream_reasoning_chars": request.get("_stream_reasoning_chars"),
             # cache_hit field removed — cache hits are not logged (they skip _write)
             "status": "error" if error else "ok",
             "error": error,
@@ -186,6 +253,17 @@ class ArangoLogMiddleware(BaseMiddleware):
             "request_prompt": last_user_message,
             "response_content": response_content,
         }
+        details = request.get("_provider_error_details") if isinstance(request.get("_provider_error_details"), dict) else {}
+        if details:
+            doc.update({
+                "provider_error_code": details.get("provider_error_code"),
+                "provider_status_code": details.get("provider_status_code"),
+                "provider_auth_status": details.get("provider_auth_status"),
+                "provider_error_type": details.get("provider_error_type"),
+                "project_agent_message": details.get("project_agent_message"),
+            })
+            if details.get("model_served"):
+                doc["model_served"] = details["model_served"]
 
         # JSONL backup FIRST — survives DB wipes, append-only, can't be corrupted by agents
         _write_jsonl_backup(doc, now)
@@ -207,6 +285,8 @@ class ArangoLogMiddleware(BaseMiddleware):
 def _infer_provider(model: str) -> str:
     """Infer provider name from model string."""
     m = model.lower()
+    if m.startswith("opencode-go/") or m in {"oc-kimi", "oc-glm", "oc-qwen", "oc-deepseek"}:
+        return "opencode-go"
     if "deepseek" in m:
         return "chutes" if "v3" in m or "r1" in m else "deepseek"
     if "gemini" in m or "flash" in m:

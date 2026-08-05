@@ -71,6 +71,9 @@ class CacheMiddleware(BaseMiddleware):
         self._disabled = os.environ.get(
             "SCILLM_CACHE_DISABLE", ""
         ).strip().lower() in ("1", "true", "yes")
+        self._dedupe_enabled = os.environ.get(
+            "SCILLM_CACHE_DEDUPE_ENABLE", ""
+        ).strip().lower() in ("1", "true", "yes")
         self._backend: str = "none"
         self._arango_available: bool = False
 
@@ -117,12 +120,20 @@ class CacheMiddleware(BaseMiddleware):
 
         key = _make_cache_key(model, messages)
 
-        # Check for in-flight duplicate request (deduplication)
+        # Check for in-flight duplicate request. The current middleware chain
+        # cannot short-circuit before the provider call, so in-flight dedupe is
+        # opt-in only; otherwise a duplicate can make a successful provider
+        # response wait on an abandoned future from a disconnected client.
         if key in _inflight:
-            logger.debug("cache_middleware: DEDUPE waiting for in-flight {}", model)
-            request["_cache_dedupe"] = True
-            request["_cache_key"] = key
-            return request
+            if self._dedupe_enabled:
+                logger.debug("cache_middleware: DEDUPE waiting for in-flight {}", model)
+                request["_cache_dedupe"] = True
+                request["_cache_key"] = key
+                return request
+            future = _inflight.pop(key, None)
+            if future and not future.done():
+                future.set_exception(RuntimeError("cache in-flight dedupe superseded by independent request"))
+            logger.debug("cache_middleware: in-flight dedupe disabled; running independent {}", model)
 
         # Check cache
         cached = await self._cache_get(key)

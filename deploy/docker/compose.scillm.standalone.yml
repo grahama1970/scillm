@@ -132,13 +132,14 @@ services:
     environment:
       PYTHONPATH: /app/src
       CONFIG_FILE_PATH: /app/config.yaml
-      SCILLM_MASTER_KEY: ${SCILLM_MASTER_KEY:-sk-dev-proxy-123}
+      SCILLM_MASTER_KEY: ${SCILLM_MASTER_KEY:?set SCILLM_MASTER_KEY in .env; do not use the development default}
+      LITELLM_MASTER_KEY: ${SCILLM_MASTER_KEY:?set SCILLM_MASTER_KEY in .env; do not use the development default}
       METRICS_ENV: ${METRICS_ENV:-dev}
       # Point to containerized services
       MEMORY_URL: http://memory:8601
       EMBEDDING_SERVICE_URL: http://embedding:8602
     ports:
-      - "4001:4001"
+      - "127.0.0.1:4001:4001"
     restart: unless-stopped
     depends_on:
       memory:
@@ -154,7 +155,7 @@ services:
       - "${HOME}/.codex/auth.json:/root/.codex/auth.json:ro"
       - "${HOME}/.gemini:/root/.gemini"
     healthcheck:
-      test: ["CMD", "curl", "-sf", "-H", "Authorization: Bearer ${SCILLM_MASTER_KEY:-sk-dev-proxy-123}", "http://127.0.0.1:4001/health/liveliness"]
+      test: ["CMD", "curl", "-sf", "-H", "Authorization: Bearer $${SCILLM_MASTER_KEY}", "http://127.0.0.1:4001/health/liveliness"]
       interval: 15s
       timeout: 10s
       retries: 5

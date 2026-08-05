@@ -53,7 +53,7 @@ def _find_live_model() -> str | None:
     """Probe cheapest models to find one that responds."""
     if not _REACHABLE:
         return None
-    for model in ("local-text", "text-gemini", "text"):
+    for model in ("local-text", "gemini-flash", "chutes-deepseek"):
         try:
             r = httpx.post(
                 f"{PROXY_BASE}/v1/chat/completions",
@@ -121,7 +121,7 @@ class TestAuthEnforcement:
             r = await c.post(
                 "/v1/chat/completions",
                 json={
-                    "model": "text",
+                    "model": "chutes-deepseek",
                     "messages": [{"role": "user", "content": "hi"}],
                     "max_tokens": 4,
                 },
@@ -139,7 +139,7 @@ class TestAuthEnforcement:
             r = await c.post(
                 "/v1/chat/completions",
                 json={
-                    "model": "text",
+                    "model": "chutes-deepseek",
                     "messages": [{"role": "user", "content": "hi"}],
                     "max_tokens": 4,
                 },
@@ -160,7 +160,7 @@ class TestAuthEnforcement:
             r = await c.post(
                 "/v1/chat/completions",
                 json={
-                    "model": "text",
+                    "model": "chutes-deepseek",
                     "messages": [{"role": "user", "content": "hi"}],
                     "max_tokens": 4,
                 },
@@ -207,17 +207,17 @@ class TestAuthEnforcement:
 
 
 class TestRouterFallbackCascade:
-    """Verify the text -> text-deepseek -> text-gemini cascade works."""
+    """Verify the Chutes DeepSeek same-family cascade works."""
 
     @pytest.mark.asyncio
-    async def test_text_model_succeeds_via_cascade(self):
-        """A request to 'text' must succeed — hitting any provider in the chain."""
+    async def test_chutes_deepseek_model_succeeds_via_cascade(self):
+        """A request to 'chutes-deepseek' must succeed or fail as a known model."""
         async with httpx.AsyncClient(
             base_url=PROXY_BASE, headers=AUTH_HEADERS
         ) as c:
-            r = await _achat(c, "text", "Reply with exactly: PONG")
+            r = await _achat(c, "chutes-deepseek", "Reply with exactly: PONG")
             # Accept 200 (success) or 5xx (all providers down) but NOT 404 (model unknown)
-            assert r.status_code != 404, "text model not recognized by router"
+            assert r.status_code != 404, "chutes-deepseek model not recognized by router"
             if r.status_code == 200:
                 data = r.json()
                 assert "choices" in data
@@ -225,7 +225,7 @@ class TestRouterFallbackCascade:
 
     @pytest.mark.asyncio
     async def test_fallback_chain_in_health(self):
-        """Health endpoint must expose the exact fallback ordering."""
+        """Health endpoint must not expose removed DeepSeek variants as fallbacks."""
         async with httpx.AsyncClient(
             base_url=PROXY_BASE, headers=AUTH_HEADERS
         ) as c:
@@ -233,21 +233,24 @@ class TestRouterFallbackCascade:
             assert r.status_code == 200
             data = r.json()
             fb = data.get("fallbacks", {})
-            assert "text" in fb, f"text group must declare fallbacks, got: {fb}"
-            chain = fb["text"]
-            assert "text-deepseek" in chain, f"Missing text-deepseek in chain: {chain}"
-            assert "text-gemini" in chain, f"Missing text-gemini in chain: {chain}"
+            chain = fb.get("chutes-deepseek", [])
+            stale = {
+                "deepseek-ai/DeepSeek-V3.1-TEE",
+                "deepseek-ai/DeepSeek-R1-0528-TEE",
+                "deepseek-ai/DeepSeek-R1-0528",
+            }
+            assert stale.isdisjoint(set(chain)), f"Chutes fallback chain contains removed models: {chain}"
 
     @pytest.mark.asyncio
-    async def test_tail_of_cascade_independently_addressable(self):
-        """text-gemini (tail) should be directly addressable, not return 'unknown model'."""
+    async def test_qwen_fallback_tail_independently_addressable(self):
+        """chutes-qwen-large (tail) should be directly addressable, not return 'unknown model'."""
         async with httpx.AsyncClient(
             base_url=PROXY_BASE, headers=AUTH_HEADERS
         ) as c:
-            r = await _achat(c, "text-gemini", "Reply: PONG")
+            r = await _achat(c, "chutes-qwen-large", "Reply: PONG")
             if r.status_code >= 400:
                 body = r.text.lower()
-                assert "unknown" not in body, "text-gemini not recognized as model"
+                assert "unknown" not in body, "chutes-qwen-large not recognized as model"
 
     @pytest.mark.asyncio
     async def test_retry_policy_exposed(self):
@@ -398,7 +401,7 @@ class TestVlmAutoRouting:
         async with httpx.AsyncClient(
             base_url=PROXY_BASE, headers=AUTH_HEADERS
         ) as c:
-            r = await _achat(c, "text", content)
+            r = await _achat(c, "chutes-deepseek", content)
             # Should not 404 — VLM router should intercept and reroute
             assert r.status_code != 404, "VLM auto-routing failed: got 404"
             # Accept success or provider error, but not 'unknown model'
@@ -419,7 +422,7 @@ class TestVlmAutoRouting:
         async with httpx.AsyncClient(
             base_url=PROXY_BASE, headers=AUTH_HEADERS
         ) as c:
-            r = await _achat(c, "text", content)
+            r = await _achat(c, "chutes-deepseek", content)
             assert r.status_code > 0  # Must not crash
 
     @pytest.mark.asyncio
@@ -568,7 +571,7 @@ class TestErrorPropagation:
         ) as c:
             r = await c.post(
                 "/v1/chat/completions",
-                json={"model": "text", "max_tokens": 4},
+                json={"model": "chutes-deepseek", "max_tokens": 4},
                 timeout=HEALTH_TIMEOUT,
             )
             assert r.status_code == 400
@@ -632,7 +635,7 @@ class TestErrorPropagation:
             r = await c.post(
                 "/v1/chat/completions",
                 json={
-                    "model": "text",
+                    "model": "chutes-deepseek",
                     "messages": [{"role": "user", "content": None}],
                     "max_tokens": 4,
                 },
@@ -676,13 +679,13 @@ class TestModelList:
 
     @pytest.mark.asyncio
     async def test_known_models_present(self):
-        """Core model groups (text, vlm, local-text) must appear in the list."""
+        """Core model groups must appear in the list."""
         async with httpx.AsyncClient(
             base_url=PROXY_BASE, headers=AUTH_HEADERS
         ) as c:
             data = (await c.get("/v1/models", timeout=HEALTH_TIMEOUT)).json()
             ids = {m["id"] for m in data["data"]}
-            for expected in ("text", "vlm", "local-text"):
+            for expected in ("chutes-deepseek", "vlm", "local-text"):
                 assert expected in ids, f"'{expected}' not in model list: {ids}"
 
 

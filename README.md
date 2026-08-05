@@ -4,7 +4,6 @@
 
 <h3 align="center">One proxy. Any provider. Zero provider glue in your application.</h3>
 <p align="center">Agents and humans call <code>/scillm</code> — it routes, retries, and repairs.</p>
-<p align="center"><em>Name:</em> informal “single control plane for LLM calls” — say <strong>skill-um</strong> or <strong>sci-L-M</strong>.</p>
 
 ---
 
@@ -35,7 +34,12 @@ The proxy handles OAuth refresh, format translation, SSE streaming, retries, and
 | **SSE** | Server-Sent Events streaming (`text/event-stream`) |
 | **NDJSON** | Newline-delimited JSON (one JSON object per line; used for exec `stream-json`) |
 | **DAG** | Directed acyclic graph of exec / harness nodes |
-| **Project agent** | **Your** orchestrator (Cursor agent, harness, script): picks the surface, validates artifacts, owns merge authority — not a built-in scillm daemon |
+| **Planner** | Human-facing project agent: owns user intent, scope, tradeoffs, communication, and final claims |
+| **Orchestrator** | Agentic / Execution Harness: owns DAG or loop state, scheduling, worker coordination, receipts, validation, retries, amendments, and terminal run status |
+| **Executor** | Bounded evidence-producing worker: OpenCode subagent, Debugger, Patcher, Reviewer, Researcher, test runner, `scillm exec`, or standing Codex worker |
+| **Project agent** | Backend/doc alias for **Planner** — not a built-in scillm daemon |
+| **Execution Harness** | Backend/doc alias for **Orchestrator** |
+| **OpenCode worker** | Common **Executor** called through OpenCode serve or transport; it inspects, patches, tests, and returns artifacts, but does not own truth or merge authority |
 | **Pi** | Optional **exec lane** via the Pi CLI fork for low-overhead Kimi/Chutes runs; **not** required to run the proxy |
 | **utls / JA3** | TLS fingerprint proxy sidecar for Codex (`utls-proxy` on **8444**); presents a browser-like JA3 fingerprint to Cloudflare-protected endpoints |
 
@@ -50,8 +54,61 @@ The proxy handles OAuth refresh, format translation, SSE streaming, retries, and
 | Delegate a bounded repo investigation (tools/skills, optional patch) | `POST /v1/scillm/opencode/runs` |
 | Stream reasoning, permissions, DAG parent/child, steer | `POST /v1/scillm/opencode/transport/*` |
 | Multi-turn Codex authorship in a leased worktree | `/v1/scillm/agents/*` |
+| Run delegated work with durable state, receipts, validation, retries, or amendment | **Orchestrator / Execution Harness** |
 
 Full matrix: [Invocation surfaces](#invocation-surfaces) below.
+
+### Planner / Orchestrator / Executor routing
+
+These are human-facing role labels, not implementation class names or schema identifiers. **Planner** means the human-facing Project Agent; it does not mean the internal DAG planner.
+
+Use the Orchestrator when delegated work needs more than one bounded action: DAG or loop state, scheduling, worker coordination, receipt collection, validation gates, retries, amendments, and durable run-terminal status.
+
+```text
+Planner (Project Agent)
+  -> owns user intent, scope, tradeoffs, communication, final claims
+
+Orchestrator (Execution Harness)
+  -> owns delegated execution: DAG/loop state, scheduling, receipts,
+     validation, retries, amendment, run-terminal status
+
+Executors (OpenCode workers, Debugger, Patcher, Reviewer, test runner)
+  -> own bounded task attempts: inspect, patch, test, return evidence/diff/events
+```
+
+Internal Orchestrator run types:
+
+```text
+Phase Run
+  bounded implementation / validation phase
+
+Campaign Run
+  long-running scheduled red/blue/evolve workflow
+
+Role Actor
+  red, blue, judge, patcher, validator, researcher
+```
+
+Good fit:
+
+```text
+Implement Phase 19 with multiple dependent steps, validation gates,
+worker receipts, and amendment if a worker fails.
+
+Run an overnight authorized red/blue campaign with scheduled rounds,
+attempt ledgers, patch validation, and terminal run status.
+```
+
+Not a good fit:
+
+```text
+Rename one function.
+Run one deterministic test.
+Patch one obvious bug.
+Ask one model a question.
+```
+
+Short rule: if the task needs DAG/loop state, scheduling, worker coordination, receipts, retries, validation, or amendment, delegate the run to the Orchestrator. If it is a single bounded action, the Planner handles it directly or calls one simple Executor surface.
 
 
 ### Option A: Standalone (Recommended for new users)
@@ -128,6 +185,10 @@ one-shot chat ──► bounded exec node ──► bounded OpenCode session ─
      │                    │                      │                           │
  POST /v1/chat      scillm exec /           POST …/opencode/runs        /v1/scillm/agents/*
  completions         exec graph              (+ transport for SSE)
+
+Planner ──► Orchestrator ──► Executors
+             Phase Run       Debugger / Patcher / Reviewer / test runner
+             Campaign Run    OpenCode worker / standing Codex worker / exec node
 ```
 
 scillm is not only a chat proxy. Pick the surface by **job**, not by “strongest model”:
@@ -139,12 +200,53 @@ scillm is not only a chat proxy. Pick the surface by **job**, not by “stronges
 | **OpenCode serve** | `POST /v1/scillm/opencode/runs` | Bounded **coding/patch delegate**: read/grep/tools/skills in one session | **Yes** — project agent launches, validates diff/text, merges or forks retry |
 | **OpenCode transport** | `POST /v1/scillm/opencode/transport/*` | Same family as serve, plus DAG parent/child, **SSE** reasoning/permissions, steer | **Yes** — course correction on long investigations |
 | **Standing agents** | `/v1/scillm/agents/*` | Multi-turn **Codex** authorship in a leased worktree | **Yes** — handoff → lease → turn → result; memory stays in `/memory` |
+| **Orchestrated run** | Execution Harness / local harness APIs | Delegated work needing DAG/loop state, receipts, validation, retries, amendments, terminal run status | **Yes** — Planner audits Orchestrator receipts before human-facing claims |
+
+### Orchestrator vs direct OpenCode
+
+The Orchestrator, also called the Execution Harness in backend docs and schemas, is the delegated execution controller. It is not the human-facing Planner. It may run Phase Runs or Campaign Runs, coordinate Role Actors, and dispatch OpenCode serve/transport workers for bounded DAG nodes, but Executors return evidence, not human-facing truth. Orchestrator terminal status must be based on receipts and validation gates, and human-facing claims still need Planner audit.
+
+Call OpenCode directly when there is one bounded coding attempt and the Planner can validate the result immediately. Call the Orchestrator when the Planner is delegating work that needs durable state, a DAG/loop, scheduling, receipts, retries, or amendment.
+
+### pdf-lab repair lane
+
+`$pdf-lab` second-pass repair is the canonical high-trust example for the
+Planner / Orchestrator / Executor split:
+
+| Role | Concrete pdf-lab responsibility |
+|------|---------------------------------|
+| **Planner** | Selects the page case, sets repair scope, communicates with the human, and audits evidence before any final claim |
+| **Orchestrator** | Runs the execution harness/transport DAG, preserves `batch_id`/`case_id`/`page_number`/`transport_run_id`, tracks delivery, validates receipts, and owns terminal run status |
+| **Executor** | OpenCode Debugger/Patcher identifies the code defect, edits only the isolated code root, adds or updates focused tests, and returns text/diff/events as evidence |
+
+Use these scillm surfaces together:
+
+| Need | Surface | Notes |
+|------|---------|-------|
+| Provider/proxy sanity | `POST /v1/chat/completions` | Always send `X-Caller-Skill: pdf-lab`; missing caller must fail with `caller_skill_required` |
+| Single bounded patch delegate | `POST /v1/scillm/opencode/runs` | `agent` is an OpenCode profile such as `build`, not an `opencode-go/*` chat model |
+| DAG, Debugger, collaboration, steer | `POST /v1/scillm/opencode/transport/*` | Parent/child transport run; monitor SSE/events or persisted state |
+
+For live gates, prepare a mounted isolated code root under the project workspace
+so the proxy and OpenCode serve runtime see the same filesystem. Avoid arbitrary
+`/tmp` code roots for acceptance evidence. OpenCode can patch the isolated root;
+the deterministic pdf-lab harness still owns scope validation, tests,
+before/after extraction evidence, commit gate, and rollback evidence.
+
+Minimum evidence before claiming this lane is healthy:
+
+- `GET /health/liveliness`
+- `GET /v1/scillm/opencode/health`
+- chat preflight with `X-Caller-Skill: pdf-lab`
+- missing-caller negative test returning `caller_skill_required`
+- OpenCode serve canary with receipt validation, patch scope validation, patch delta, and passing tests
+- transport parent/child/message canary with `delivery_state=completed`, non-empty `assistant_text`, `diff=[]` for read-only canaries, and clean isolated worktree status
 
 ### Why OpenCode serve (between chat and exec)
 
 **Chat** returns one completion — no repo tool loop. **`scillm exec`** runs a **single** bounded headless worker (`codex exec`, Pi, one-shot `opencode run` with skills/shell denied in generated config) — good for pipeline **gates**, not for “investigate this repo and propose a patch.”
 
-**OpenCode serve** is the **tier‑1.5 coding delegate**: a bounded OpenCode session with an **agent profile** (`build`, `scillm-debugger`, …), native tools, and an optional Agent Skills allowlist. The **project agent** still owns the goal, `/memory` recall, deterministic validation, and **merge authority**. The serve worker returns **evidence** (`assistant_text`, `events.jsonl`, optional `diff` under `.scillm/opencode-serve/`); harness validators and the project agent decide pass/fail — OpenCode output is not auto-merged.
+**OpenCode serve** is the **tier‑1.5 coding delegate**: a bounded OpenCode session with an **agent profile** (`build`, `scillm-debugger`, …), native tools, and an optional Agent Skills allowlist. The **Planner** still owns the goal, `/memory` recall, deterministic validation, and **merge authority**. The serve Executor returns **evidence** (`assistant_text`, `events.jsonl`, optional `diff` under `.scillm/opencode-serve/`); Orchestrator validators and the Planner decide pass/fail — OpenCode output is not auto-merged.
 
 Use **standing `/v1/scillm/agents/*`** when you need a **long-lived Codex** worker across many turns in an isolated worktree. Use **transport** when the harness or `/agent-debugger` needs **streaming** supervision and fork/steer (see [OpenCode transport v1](docs/SCILLM_OPENCODE_TRANSPORT_V1.md)).
 
@@ -230,14 +332,14 @@ Every provider scillm targets speaks OpenAI-compatible `/v1/chat/completions`. A
 - **Wall-time retry budget** — Providers with hot/cold cycling return 503 now but may be back in 20 seconds. Fixed retry counts fail here. scillm retries on a clock — keep trying for 90 seconds, not 3 attempts.
 - **JSON repair inside retry loop** — LLM responses with trailing commas, missing braces, or markdown fences wrapping JSON are repaired automatically instead of wasting the call.
 - **Auto multimodal routing** — Pass an image and scillm figures it out. No model selection needed — the proxy detects images in messages and reroutes to a vision model automatically.
-- **VLM routing** — Images can go directly to `gpt-5.5` through Codex OAuth, to `vlm-chutes` for higher-throughput VLM work, or through the legacy `vlm` cascade. Avoid the generic `vlm` alias when Gemini quota limits matter because it starts with Gemini.
+- **VLM routing** — Images can go directly to `gpt-5.5` through Codex OAuth or through the legacy `vlm` cascade. For Chutes VLM, select an exact live `Org/Model` at runtime with `ops-chutes` and call `/v1/scillm/chutes/*`; do not use a Chutes selector alias.
 - **Gemini free-to-paid key rotation** — Gemini free and paid keys are separate groups. A 429 on the free key cascades immediately to the paid key — no wasted retries on an exhausted quota.
 - **Cold-start warmup** — Chutes models that return 503 (cold) trigger a background warmup API call that posts a bounty for miners. The proxy falls through to the next deployment immediately. On startup, configured Chutes models are pre-warmed.
 - **Bounded concurrency queue** — Chutes.ai has a 5-connection limit. Exceed it and you get a 429 with a 90-second penalty. scillm queues overflow instead of rejecting it. Queue timeout is 600s (10 min) — large batches drain rather than fail.
 - **Batch-friendly error semantics** — Queue exhaustion returns 503 (service unavailable), not 429 (rate limit). 429s come only from upstream providers. Abuse guard is disabled for authenticated callers — no cascade failures from transient errors.
 - **Automatic timeout estimation (chat/batch)** — For `/v1/chat/completions` and batch routes, scillm queries historical latency data (p95 from `llm_call_log`) and sets per-call provider budgets. For long streaming chat calls, use a short connect timeout, SSE heartbeat/idle liveness, and an explicit overall budget. Does **not** replace `cursor_exec` stream-json supervision — see [Exec monitoring](#exec-monitoring-and-timeouts-chat--cursor).
-- **Dynamic fallback chains** — For Chutes models, the ENTIRE fallback chain is built from real-time utilization data. All available models are scored by utilization + rate-limit ratio, sorted best-first, and tried in order. 429s never reach the client — the router cascades through the utilization-sorted chain automatically.
-- **Fallback cascade with circuit breaker** — `text` uses Chutes DeepSeek-family fallbacks. VLM direct targets are preferred for quota-sensitive image work: `gpt-5.5` for Codex OAuth or `vlm-chutes` for Chutes VLM. The legacy `vlm` alias still starts with Gemini. 3 failures trigger a 20-second cooldown per group.
+- **Exact Chutes model calls** — Chutes text and VLM calls use exact live `Org/Model` IDs selected at runtime with `ops-chutes`. Scillm does not expose Chutes chat selector aliases because Chutes inventory changes frequently.
+- **Fallback cascade with circuit breaker** — General configured groups still use same-provider fallback policy where configured. For quota-sensitive image work, prefer `gpt-5.5` for Codex OAuth or an exact Chutes VLM model through `/v1/scillm/chutes/*`. The legacy `vlm` alias still starts with Gemini. 3 failures trigger a 20-second cooldown per group.
 - **Non-TEE fast-fail routing** — Multi-model Chutes groups try non-TEE first (better throughput) with 1 retry, then fall through to TEE. No 8-retry stall on cold non-TEE models.
 - **5xx-specific backoff** — Server errors (503) get different retry timing than rate limits (429).
 - **Ollama auto-routing** — Any locally-pulled Ollama model works without a config entry. The proxy auto-detects unknown model names and routes them to the local Ollama instance.
@@ -607,20 +709,18 @@ Client → scillm :4001 (Python) → Provider API
 
 ## Model Groups
 
-> **VLM routing:** Prefer **`gpt-5.5`** or **`vlm-chutes`** when Gemini quota is tight. The **`vlm`** group is a legacy cascade that may try Gemini first.
+> **VLM routing:** Prefer **`gpt-5.5`** when Gemini quota is tight. For Chutes VLM, use an exact live `Org/Model` through `/v1/scillm/chutes/*`. The **`vlm`** group is a legacy cascade that may try Gemini first.
 
-Callers say `model: "text"` — the proxy picks the provider. When models change, update the config. Callers never change.
+Callers choose stable non-Chutes groups such as `gpt-5.5`, `gemini-flash`, or `claude-sonnet-4-6`. For Chutes, callers pass exact live `Org/Model` IDs selected at runtime.
 
 | Group | Provider | Model | Fallback chain |
 |-------|----------|-------|----------------|
-| `text` | Chutes | DeepSeek-V3 (non-TEE → V3.1-TEE) | → text-gemini → text-gemini-paid → text-deepseek |
 | `text-gemini` | Google | Gemini 2.5 Flash (free key) | → text-gemini-paid → text-deepseek |
 | `text-gemini-paid` | Google | Gemini 2.5 Flash (paid key) | (none) |
 | `text-gemini-3` | Google | Gemini 3 Flash Preview (free) | → text-gemini-3-paid |
 | `vlm` | Google | Gemini 2.5 Flash (free key) | Legacy cascade; avoid for quota-sensitive VLM work |
 | `vlm-claude` | Anthropic (OAuth) | Claude Sonnet | Images + PDFs |
 | `vlm-codex` | OpenAI (OAuth) | `gpt-5.3-codex` | Images + PDFs (chat/VLM group; exec vision: `scillm exec codex-vision`) |
-| `vlm-chutes` | Chutes | GLM-4.6V | Higher-throughput image calls |
 | `gpt-5.5` | OpenAI (OAuth) | Codex high-reasoning model via `~/.codex` | Direct text + image calls |
 | `opencode-go/deepseek-v4-flash` | OpenCode Go | DeepSeek V4 Flash through OpenCode Go/Fireworks | (none) |
 | `opencode-go/deepseek-v4-pro` | OpenCode Go | DeepSeek V4 Pro through OpenCode Go/Fireworks | (none) |
@@ -808,10 +908,7 @@ The compose stack can run embedding services on **8601/8602** for memory/RAG pip
 Possible for development (`uvicorn` + local config) but **Docker is the supported path** (OAuth mounts, utls-proxy sidecar, OpenCode serve). The README and sanity scripts assume compose.
 
 **Is `vlm` the right model alias?**  
-Prefer **`gpt-5.5`** or **`vlm-chutes`** when Gemini quota matters. **`vlm`** is a **legacy cascade** that may try Gemini first.
-
-**What does “scillm” mean?**  
-Informal name for a **single control plane** for LLM calls. Pronounce it **“skill-um”** (like the agent skill command) or **“sci-L-M”** — pick one in your team and stay consistent.
+Prefer **`gpt-5.5`** when Gemini quota matters. For Chutes VLM, use an exact live `Org/Model` through `/v1/scillm/chutes/*`. **`vlm`** is a **legacy cascade** that may try Gemini first.
 
 ## Documentation
 
@@ -825,4 +922,3 @@ Informal name for a **single control plane** for LLM calls. Pronounce it **“sk
 | [`docs/SCILLM_OPENCODE_INTEGRATION.md`](docs/SCILLM_OPENCODE_INTEGRATION.md) | Integrators | Fail-closed control plane; do not call raw serve ports from product code |
 | [`docs/interactive-agents/README.md`](docs/interactive-agents/README.md) | Standing Codex workers | `/v1/scillm/agents/*` handoff → lease → turn; see [routing](docs/interactive-agents/routing.md) |
 | [`docs/SCILLM_EXEC.md`](docs/SCILLM_EXEC.md) | Exec graphs | `scillm exec`, cursor stream-json, exec artifacts |
-

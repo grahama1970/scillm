@@ -31,6 +31,42 @@ from scillm.proxy.opencode_transport_events import (
     parse_sse_json_payload,
 )
 
+
+def _is_opencode_session_not_found(exc: ProxyError) -> bool:
+    message = str(exc)
+    return "Session not found:" in message and "opencode serve" in message
+
+
+def _stale_dialog_response(
+    *,
+    transport_run_id: str,
+    state: TransportState,
+    settings: Any,
+) -> dict[str, Any]:
+    observation = build_transport_observation(
+        transport_run_id=transport_run_id,
+        state=state,
+        settings=settings,
+    )
+    observation["transcript_unavailable_reason"] = "parent_session_not_found"
+    observation["transcript_unavailable_detail"] = (
+        "The transport run metadata exists, but its OpenCode parent session is no longer available in the sidecar."
+    )
+    return {
+        **build_dialog_collaboration_contract(
+            transport_run_id=transport_run_id,
+            state=state,
+        ),
+        "human_can_participate": False,
+        "project_agent_can_participate": False,
+        "turns": [],
+        "pending_human": [],
+        "observation": observation,
+        "not_proven": [
+            "OpenCode parent session was not found in the sidecar; transcript turns are unavailable for this historical run."
+        ],
+    }
+
 def _watch_session_ids_for_state(state: TransportState) -> frozenset[str]:
     ids: set[str] = set()
     if state.parent_session_id:
@@ -138,6 +174,29 @@ def register_opencode_transport_routes(router: APIRouter, auth: AuthCheck) -> No
         async with OpenCodeServeClient(settings) as client:
             caps = await transport.probe_capabilities(client)
         return JSONResponse(caps)
+
+    @router.get("/loop2/capabilities")
+    async def loop2_capabilities(request: Request) -> JSONResponse:
+        await auth(request)
+        settings = load_opencode_serve_settings()
+        transport = OpenCodeTransport()
+        async with OpenCodeServeClient(settings) as client:
+            transport_caps = await transport.probe_capabilities(client)
+        return JSONResponse(
+            {
+                "schema": "scillm.loop2.capabilities.v1",
+                "loop2_api": True,
+                "transport_api": bool(transport_caps.get("transport_api", True)),
+                "required_endpoints": [
+                    "POST /v1/scillm/opencode/transport/runs",
+                    "POST /v1/scillm/opencode/transport/runs/{transport_run_id}/children",
+                    "POST /v1/scillm/opencode/transport/runs/{transport_run_id}/message",
+                    "GET /v1/scillm/opencode/transport/runs/{transport_run_id}/events/stream",
+                ],
+                "caller_skill_header_required": True,
+                "opencode": transport_caps,
+            }
+        )
 
     @router.post("/opencode/transport/runs")
     async def transport_create_run(spec: TransportCreateRequest, request: Request) -> JSONResponse:
@@ -382,8 +441,19 @@ def register_opencode_transport_routes(router: APIRouter, auth: AuthCheck) -> No
         state = store.load(transport_run_id)
         transport = OpenCodeTransport(store)
         async with OpenCodeServeClient(settings) as client:
-            turns = await transport.list_dialog_turns(client, state)
-            pending = await transport.pending_human_turns(client, state)
+            try:
+                turns = await transport.list_dialog_turns(client, state)
+                pending = await transport.pending_human_turns(client, state)
+            except ProxyError as exc:
+                if _is_opencode_session_not_found(exc):
+                    return JSONResponse(
+                        _stale_dialog_response(
+                            transport_run_id=transport_run_id,
+                            state=state,
+                            settings=settings,
+                        )
+                    )
+                raise
         return JSONResponse(
             {
                 **build_dialog_collaboration_contract(

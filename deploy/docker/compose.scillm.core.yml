@@ -16,6 +16,79 @@ services:
       retries: 3
       start_period: 5s
 
+
+  opencode-serve:
+    build:
+      # experiments/ context: includes opencode fork + scillm deploy scripts
+      context: ../../..
+      dockerfile: scillm/deploy/docker/Dockerfile.opencode-serve
+      args:
+        OPENCODE_GIT_REF: ${OPENCODE_GIT_REF:-dev}
+    user: "${OPENCODE_SERVE_USER:-graham:graham}"
+    env_file: ["../../.env"]
+    environment:
+      HOME: /home/graham
+      OPENCODE_SERVE_PORT: ${OPENCODE_SERVE_PORT:-4098}
+      OPENCODE_SERVE_HOSTNAME: ${OPENCODE_SERVE_HOSTNAME:-0.0.0.0}
+      OPENCODE_SERVE_WORKDIR: /workspace/opencode-serve
+      OPENCODE_SERVE_PURE: ${OPENCODE_SERVE_PURE:-0}
+      OPENCODE_SERVE_HEALTH_MAX_CPU: ${OPENCODE_SERVE_HEALTH_MAX_CPU:-120}
+      OPENCODE_SERVER_USERNAME: ${OPENCODE_SERVER_USERNAME:-opencode}
+      OPENCODE_SERVER_PASSWORD: ${OPENCODE_SERVER_PASSWORD:-}
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${OPENCODE_SERVE_PORT:-4098}:${OPENCODE_SERVE_PORT:-4098}"
+      # Codex ChatGPT OAuth browser callback.
+      - "127.0.0.1:1455:1455"
+    volumes:
+      - "${HOME}/.local/share/opencode/auth.json:/home/graham/.local/share/opencode/auth.json:ro"
+      - "${HOME}/.config/opencode:/home/graham/.config/opencode:rw"
+      - "${HOME}/.cache/opencode:/home/graham/.cache/opencode"
+      - "${HOME}/.claude/skills:/home/graham/.claude/skills:ro"
+      - "${HOME}/.codex/skills:/home/graham/.codex/skills:ro"
+      - "${HOME}/workspace:/home/graham/workspace"
+      - "${SCILLM_EXTRA_WORKSPACE_PATH:-/tmp/agent-skills-loop2-main}:${SCILLM_EXTRA_WORKSPACE_PATH:-/tmp/agent-skills-loop2-main}:rw"
+      # Transport DAG workers may receive source/artifact paths on the 12TB data volume.
+      - "/mnt/storage12tb:/mnt/storage12tb"
+      - "../../:/workspace/scillm"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/opencode-serve-healthcheck.sh"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  ollama:
+    image: ollama/ollama:latest
+    container_name: ollama-inference
+    restart: unless-stopped
+    ports:
+      - "${OLLAMA_PORT:-11434}:11434"
+    environment:
+      OLLAMA_HOST: 0.0.0.0:11434
+      OLLAMA_ORIGINS: ${OLLAMA_ORIGINS:-*}
+    volumes:
+      - "${HOME}/.ollama:/root/.ollama"
+      - "/mnt/storage12tb:/mnt/storage12tb:ro"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 15s
+
+
   scillm-proxy:
     build:
       context: ../..
@@ -24,17 +97,56 @@ services:
     environment:
       PYTHONPATH: /app/src
       CONFIG_FILE_PATH: /app/config.yaml
-      SCILLM_MASTER_KEY: ${SCILLM_MASTER_KEY:-sk-dev-proxy-123}
+      SCILLM_MASTER_KEY: ${SCILLM_MASTER_KEY:?set SCILLM_MASTER_KEY in .env; do not use the development default}
+      LITELLM_MASTER_KEY: ${SCILLM_MASTER_KEY:?set SCILLM_MASTER_KEY in .env; do not use the development default}
       METRICS_ENV: ${METRICS_ENV:-dev}
+      SCILLM_MEMORY_URL: ${SCILLM_MEMORY_URL:-http://127.0.0.1:8601}
+      SCILLM_MEMORY_ALLOW_TCP_FALLBACK: ${SCILLM_MEMORY_ALLOW_TCP_FALLBACK:-true}
+      SCILLM_REVIEW_CATALOG_ROOT: /catalog/agent-skills
+      SCILLM_WORKER_AGENTS_ROOT: /catalog/agent-skills/agents
+      SCILLM_PHART_DAG_CHART_DIR: /catalog/agent-skills/skills/phart-dag-chart
+      SCILLM_AGENT_REGISTRY: /home/graham/workspace/experiments/scillm/config/scillm-agents.yaml
+      SCILLM_AGENT_HANDOFF_DIR: /home/graham/workspace/experiments/scillm/.scillm/agent-handoffs
+      SCILLM_AGENT_LEASE_DIR: /home/graham/workspace/experiments/scillm/.scillm/agent-leases
+      SCILLM_AGENT_EVENT_DIR: /home/graham/workspace/experiments/scillm/.scillm/agent-events
+      SCILLM_CURSOR_AGENT_BINARY: ${SCILLM_CURSOR_AGENT_BINARY:-/home/graham/.local/bin/agent}
+      SCILLM_KIMI_BINARY: ${SCILLM_KIMI_BINARY:-/home/graham/.local/bin/kimi}
+      SCILLM_KIMI_EXEC_MODEL: ${SCILLM_KIMI_EXEC_MODEL:-kimi-for-coding}
+      SCILLM_CURSOR_SKILLS_ROOT: /home/graham/.claude/skills
+      # Managed sidecar (4098). Do not inherit .env OPENCODE_SERVER_URL (often host :4097).
+      SCILLM_OPENCODE_SERVE_URL: ${SCILLM_OPENCODE_SERVE_URL:-http://opencode-serve:4098}
+      SCILLM_OPENCODE_SERVE_OUTPUT_DIR: /var/lib/scillm/opencode-serve
+      SCILLM_OPENCODE_SERVE_DEFAULT_MODEL: opencode-go/kimi-k2.6
+      OPENCODE_SERVE_PURE: "0"
+      OPENCODE_SERVE_WORKDIR: /workspace/scillm
+      SCILLM_OPENCODE_SERVE_OUTPUT_HOST_DIR: ${HOME}/workspace/experiments/scillm/.scillm/opencode-serve
+      OPENCODE_SERVER_USERNAME: ${OPENCODE_SERVER_USERNAME:-opencode}
+      OPENCODE_SERVER_PASSWORD: ${OPENCODE_SERVER_PASSWORD:-}
+      SCILLM_OPENCODE_DEBUGGER_RUNTIME_AGENT: explore
+      SCILLM_OPENCODE_DEBUGGER_AGENT: ${SCILLM_OPENCODE_DEBUGGER_AGENT:-scillm-debugger}
+      SCILLM_OPENCODE_SKILL_ROOTS: ${SCILLM_OPENCODE_SKILL_ROOTS:-/catalog/agent-skills/skills:/home/graham/.claude/skills:/home/graham/.codex/skills}
+      SCILLM_OPENCODE_SERVE_DOCKER_SOCK: /var/run/docker.sock
+      SCILLM_OPENCODE_SERVE_COMPOSE_FILE: /app/deploy/docker/compose.scillm.core.yml
+      SCILLM_OPENCODE_SERVE_COMPOSE_PROJECT: ${SCILLM_OPENCODE_SERVE_COMPOSE_PROJECT:-scillm}
+      SCILLM_OPENCODE_SERVE_COMPOSE_SERVICE: opencode-serve
+      SCILLM_OPENCODE_SERVE_DOCKER_CONTROL: ${SCILLM_OPENCODE_SERVE_DOCKER_CONTROL:-true}
       # Bifrost removed — direct provider routing, ArangoDB for logging/monitoring
     restart: unless-stopped
-    network_mode: host
+    ports:
+      - "127.0.0.1:4001:4001"
     depends_on:
       utls-proxy:
         condition: service_healthy
+      opencode-serve:
+        condition: service_healthy
     volumes:
       - "../../local/proxy_server_config.yaml:/app/config.yaml:ro"
-      - "${HOME}/.pi/agent/auth.json:/root/.pi/agent/auth.json:ro"
+      # Dev: live scillm proxy code (host workspace already mounted at /home/graham/workspace)
+      - "../../src:/app/src:ro"
+      - "../../chutes:/app/chutes:ro"
+      - "../../config/scillm-agents.yaml:/app/config/scillm-agents.yaml:ro"
+      # Pi provider registry/auth; writable because pi-mono creates settings locks/history.
+      - "${HOME}/.pi/agent:/root/.pi/agent"
       - "${HOME}/.claude/.credentials.json:/root/.claude/.credentials.json:ro"
       - "${HOME}/.codex/auth.json:/root/.codex/auth.json:ro"
       # Gemini CLI needs write access for history/sessions
@@ -44,10 +156,37 @@ services:
       - "${HOME}/.local/share/opencode/auth.json:/root/.local/share/opencode/auth.json:ro"
       - "${HOME}/.config/opencode:/root/.config/opencode:ro"
       - "${HOME}/.cache/opencode:/root/.cache/opencode"
+      # Pi exec uses the local pi-mono fork through /home/graham/bin/pi.
+      - "${HOME}/bin/pi:/home/graham/bin/pi:ro"
+      - "${HOME}/workspace/experiments/pi-mono:/home/graham/workspace/experiments/pi-mono:ro"
+      # Kimi headless exec worker (kimi-cli uv tool + shim).
+      - "${HOME}/.local/bin/kimi:/home/graham/.local/bin/kimi:ro"
+      - "${HOME}/.local/share/uv/tools/kimi-cli:/home/graham/.local/share/uv/tools/kimi-cli:ro"
+      - "${HOME}/.local/share/uv/python:/home/graham/.local/share/uv/python:ro"
+      - "${HOME}/.kimi:/root/.kimi:rw"
+      # Cursor headless exec worker
+      - "${HOME}/.local/bin/agent:/home/graham/.local/bin/agent:ro"
+      - "${HOME}/.local/share/cursor-agent:/home/graham/.local/share/cursor-agent:ro"
+      - "${HOME}/.claude/skills:/home/graham/.claude/skills:ro"
+      - "${HOME}/.zshrc:/home/graham/.zshrc:ro"
+      # scillm exec receives host workspace paths as cwd; preserve those paths in Docker.
+      - "${HOME}/workspace:/home/graham/workspace:ro"
+      - "${SCILLM_EXTRA_WORKSPACE_PATH:-/tmp/agent-skills-loop2-main}:${SCILLM_EXTRA_WORKSPACE_PATH:-/tmp/agent-skills-loop2-main}:ro"
+      # Shared skill source is read-only in the root-running proxy. Runtime
+      # envs/artifacts must live under per-skill artifact roots, not beside
+      # symlinked/mirrored skill source.
+      - "../../../agent-skills:/home/graham/workspace/experiments/agent-skills:ro"
       # JSONL backup — independent of DB, survives wipes, append-only
+      # Transport DAG workers may receive source/artifact paths on the 12TB data volume.
+      - "/mnt/storage12tb:/mnt/storage12tb:ro"
       - "/mnt/storage12tb/scillm-logs:/mnt/storage12tb/scillm-logs"
+      # Review fanout agent/contract catalog used by the DAG viewer-editor.
+      - "/var/run/docker.sock:/var/run/docker.sock"
+      - "${HOME}/workspace/experiments/scillm/.scillm/opencode-serve:/var/lib/scillm/opencode-serve"
+      - "../../deploy/docker/compose.scillm.core.yml:/app/deploy/docker/compose.scillm.core.yml:ro"
+      - "../../../agent-skills:/catalog/agent-skills:ro"
     healthcheck:
-      test: ["CMD", "curl", "-sf", "-H", "Authorization: Bearer $${SCILLM_MASTER_KEY:-sk-dev-proxy-123}", "http://127.0.0.1:4001/health/liveliness"]
+      test: ["CMD", "curl", "-sf", "-H", "Authorization: Bearer $${SCILLM_MASTER_KEY}", "http://127.0.0.1:4001/health/liveliness"]
       interval: 15s
       timeout: 10s
       retries: 5

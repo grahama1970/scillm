@@ -25,20 +25,33 @@ PROXY_URL="${SCILLM_API_BASE:-http://localhost:4001}"
 PROXY_KEY="${SCILLM_PROXY_KEY:-${SCILLM_MASTER_KEY:-${LITELLM_MASTER_KEY:-sk-dev-proxy-123}}}"
 DEFAULT_MODEL="${SCILLM_MODEL:-text}"
 CALLER_SKILL="${SCILLM_CALLER_SKILL:-scillm}"
+SCILLM_REPO="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
 usage() {
     cat <<'EOF'
 Usage: run.sh [--model MODEL] [--system TEXT] [PROMPT...]
+       run.sh generate-image --prompt-file PATH --out PATH [options]
        run.sh prove [args...]
 
-Examples:
+Chat (one-shot text/VLM):
   run.sh "Explain quantum computing in one sentence"
-  run.sh --model moonshot-text "Explain quantum computing in one sentence"
-  run.sh --model text-kimi --system "Be concise." "Summarize this repo"
-  run.sh prove 'Prove n+0=n'
+  run.sh --model moonshot-text "Describe this screenshot context"
+
+Image generation (NOT chat — use this for create-image tasks):
+  run.sh generate-image \
+    --prompt-file path/to/spec.prompt.md \
+    --out artifacts/images/asset.png \
+    --auth openai-api-key \
+    --model gpt-image-2 \
+    --quality high
+
+Termination contract (image):
+  - Progress NDJSON on stderr: type scillm.image.started | scillm.image.completed | scillm.image.failed
+  - Success: exit 0 AND final stderr line has "scillm.image.completed" with terminal=true
+  - Do NOT use chat run.sh for image generation (it calls /v1/chat/completions and will not produce PNGs).
 
 Notes:
-  - Default model is "text" unless SCILLM_MODEL is set.
+  - Default chat model is "text" unless SCILLM_MODEL is set.
   - Requests go through the local scillm proxy at localhost:4001.
   - The wrapper always sends X-Caller-Skill for traceability.
 EOF
@@ -49,6 +62,19 @@ case "$1" in
     prove)
         shift
         exec uv run --directory "$SCRIPT_DIR" python prove.py "$@"
+        ;;
+    generate-image)
+        shift
+        GEN_ARGS=()
+        while [[ $# -gt 0 ]]; do
+            GEN_ARGS+=("$1")
+            shift
+        done
+        if [[ ${#GEN_ARGS[@]} -eq 0 ]]; then
+            echo "Error: generate-image requires --prompt-file and --out" >&2
+            exit 1
+        fi
+        exec python3 "$SCILLM_REPO/scripts/generate_image.py" "${GEN_ARGS[@]}"
         ;;
     -h|--help|help)
         usage

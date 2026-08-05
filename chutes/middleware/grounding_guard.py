@@ -14,7 +14,7 @@ The course correction message is specific:
 Usage:
     POST /v1/chat/completions
     {
-        "model": "text",
+        "model": "chutes-deepseek",
         "messages": [{"role": "user", "content": "Summarize this"}],
         "source": "The actual source text to ground against...",
         "grounding_threshold": 0.7,

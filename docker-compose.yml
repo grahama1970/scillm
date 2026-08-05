@@ -4,7 +4,7 @@
 #   docker compose up -d --build                        # proxy + Redis
 #   docker compose --profile local up -d --build        # + Ollama (local models)
 #
-# Proxy: http://127.0.0.1:4001  (Bearer sk-dev-proxy-123)
+# Proxy: http://127.0.0.1:4001  (set LITELLM_MASTER_KEY in .env)
 # Redis: localhost:6379 (caching + request logging)
 # Ollama: localhost:11434 (optional, for local-text model group)
 
@@ -13,7 +13,7 @@ services:
     image: redis:7-alpine
     restart: unless-stopped
     ports:
-      - "6379:6379"
+      - "127.0.0.1:6379:6379"
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 10s
@@ -24,31 +24,35 @@ services:
     build:
       context: .
       dockerfile: deploy/docker/Dockerfile.scillm
-    command: ["uvicorn", "scillm.proxy.app:app", "--host", "0.0.0.0", "--port", "4001"]
+    command: ["uvicorn", "scillm.proxy.app_with_exec:app", "--host", "0.0.0.0", "--port", "4001"]
     env_file: [".env"]
     environment:
       PYTHONPATH: /app/src
       CONFIG_FILE_PATH: /app/config.yaml
-      LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY:-sk-dev-proxy-123}
+      LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY:?set LITELLM_MASTER_KEY in .env; do not use the development default}
       METRICS_ENV: ${METRICS_ENV:-dev}
+      SCILLM_OPENCODE_SERVE_URL: ${SCILLM_OPENCODE_SERVE_URL:-http://opencode-serve:4098}
       REDIS_HOST: ${REDIS_HOST:-127.0.0.1}
       REDIS_PORT: ${REDIS_PORT:-6379}
     restart: unless-stopped
-    network_mode: host
+    ports:
+      - "127.0.0.1:4001:4001"
     volumes:
       - "./local/proxy_server_config.yaml:/app/config.yaml:ro"
       - "./chutes/middleware:/app/chutes/middleware"
       - "/run/user/1000/embry/memory.sock:/run/user/1000/embry/memory.sock"
+      - "${HOME}/.codex/auth.json:/root/.codex/auth.json:ro"
       # OpenCode transport receives host workspace paths; the proxy must see the
       # same paths to verify materialized changes instead of reporting
       # workspace_missing.
-      - "${HOME}/workspace:/home/graham/workspace"
-      - "/mnt/storage12tb:/mnt/storage12tb"
+      - "${HOME}/workspace:/home/graham/workspace:ro"
+      - "${SCILLM_EXTRA_WORKSPACE_PATH:-/tmp/agent-skills-loop2-main}:${SCILLM_EXTRA_WORKSPACE_PATH:-/tmp/agent-skills-loop2-main}:ro"
+      - "/mnt/storage12tb:/mnt/storage12tb:ro"
     depends_on:
       redis:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "curl", "-sf", "-H", "Authorization: Bearer $${LITELLM_MASTER_KEY:-sk-dev-proxy-123}", "http://127.0.0.1:4001/health/liveliness"]
+      test: ["CMD", "curl", "-sf", "-H", "Authorization: Bearer $${LITELLM_MASTER_KEY}", "http://127.0.0.1:4001/health/liveliness"]
       interval: 15s
       timeout: 10s
       retries: 5

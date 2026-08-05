@@ -3,7 +3,16 @@ from __future__ import annotations
 from scillm.proxy.config import ProxyConfig
 import pytest
 
-from scillm.proxy.app import _is_direct_chutes_model, _is_empty_length_response, _validate_model_request
+from scillm.proxy.app import (
+    _is_direct_chutes_model,
+    _is_empty_length_response,
+    _models_dev_extract,
+    _models_dev_provider_key,
+    _stream_chunk_has_visible_output,
+    _stream_chunk_reasoning_chars,
+    _stream_terminal_diagnostics_from_chunk,
+    _validate_model_request,
+)
 from scillm.proxy.errors import ProxyError
 from scillm.proxy.providers.opencode_go import (
     ENDPOINT_CHAT_COMPLETIONS,
@@ -18,7 +27,8 @@ from scillm.proxy.providers.opencode_go import (
 )
 from scillm.proxy.router import Router
 from chutes.middleware.chutes_router import _is_chutes_model
-from chutes.middleware.concurrency_guard import _resolve_provider
+from chutes.middleware.concurrency_guard import _resolve_provider, _slot_max_age_s
+from chutes.middleware.active_calls import _infer_provider, _request_timeout_s
 
 
 class _Request:
@@ -47,6 +57,42 @@ def test_describe_opencode_go_model_marks_supported():
     assert model["endpoint_type"] == ENDPOINT_MESSAGES
     assert model["supported"] is True
     assert model["key_configured"] is True
+    assert model["input"] == {"text": True, "image": False, "pdf": False}
+    assert model["capabilities"]["image_input"] is False
+
+
+def test_describe_opencode_go_kimi_reports_image_input():
+    model = describe_opencode_go_model("opencode-go/kimi-k2.6", key_configured=True)
+
+    assert model["endpoint_type"] == ENDPOINT_CHAT_COMPLETIONS
+    assert model["input"] == {"text": True, "image": True, "pdf": False}
+    assert model["capabilities"]["image_input"] is True
+
+
+def test_models_dev_provider_key_maps_opencode_go():
+    assert _models_dev_provider_key("opencode-go") == "opencode"
+    assert _models_dev_provider_key("opencode_go") == "opencode"
+
+
+def test_models_dev_extract_opencode_model_is_advisory():
+    catalog = {
+        "opencode": {
+            "models": {
+                "kimi-k2.6": {
+                    "id": "kimi-k2.6",
+                    "modalities": {"input": ["text", "image"], "output": ["text"]},
+                }
+            }
+        }
+    }
+
+    result = _models_dev_extract(catalog, provider="opencode-go", model="opencode-go/kimi-k2.6")
+
+    assert result["found"] is True
+    assert result["advisory_only"] is True
+    assert result["provider_key"] == "opencode"
+    assert result["model_key"] == "kimi-k2.6"
+    assert result["record"]["modalities"]["input"] == ["text", "image"]
 
 
 def test_router_autocreates_opencode_go_chat_group_before_chutes_slash_route():
@@ -91,7 +137,26 @@ def test_chutes_router_does_not_claim_opencode_go_models():
 def test_concurrency_guard_routes_opencode_go_to_its_own_provider():
     assert _resolve_provider("opencode-go/deepseek-v4-flash") == "opencode-go"
     assert _resolve_provider("opencode-go/minimax-m2.7") == "opencode-go"
+    assert _resolve_provider("oc-glm") == "opencode-go"
+    assert _resolve_provider("oc-kimi") == "opencode-go"
+    assert _resolve_provider("oc-deepseek") == "opencode-go"
+    assert _resolve_provider("oc-qwen") == "opencode-go"
     assert _resolve_provider("deepseek-ai/DeepSeek-V3.2-TEE") == "chutes"
+
+
+def test_concurrency_guard_uses_longer_stale_window_for_opencode_go():
+    assert _slot_max_age_s("opencode-go") == 600.0
+    assert _slot_max_age_s("chutes") == 90.0
+
+
+def test_active_calls_routes_opencode_go_aliases_to_provider():
+    assert _infer_provider("oc-glm") == "opencode-go"
+    assert _infer_provider("oc-kimi") == "opencode-go"
+
+
+def test_active_calls_uses_opencode_go_timeout_floor_for_aliases():
+    assert _request_timeout_s({"model": "oc-glm", "_dynamic_timeout_ms": 10_000}) == 600.0
+    assert _request_timeout_s({"model": "oc-glm", "timeout": 30, "_dynamic_timeout_ms": 10_000}) == 30.0
 
 
 def test_app_validation_allows_direct_chutes_model_ids():
@@ -117,13 +182,75 @@ def test_app_validation_rejects_multimodal_opencode_go_requests():
         _validate_model_request("opencode-go/deepseek-v4-flash", body, _Request())
 
     assert "text-only" in exc.value.message
-    assert "attachment=false" in exc.value.message
+    assert "opencode-go/kimi-k2.6" in exc.value.message
+
+
+def test_app_validation_allows_openai_style_image_url_for_kimi():
+    body = {
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "Describe this image."},
+                    {"type": "image_url", "image_url": {"url": "data:image/png;base64,abc"}},
+                ],
+            }
+        ]
+    }
+
+    _validate_model_request("opencode-go/kimi-k2.6", body, _Request())
 
 
 def test_app_validation_allows_text_opencode_go_requests():
     body = {"messages": [{"role": "user", "content": "Return JSON."}]}
 
     _validate_model_request("opencode-go/deepseek-v4-flash", body, _Request())
+
+
+@pytest.mark.parametrize("field", ["max_tokens", "max_completion_tokens"])
+def test_app_validation_strips_output_token_caps(field):
+    body = {
+        "messages": [{"role": "user", "content": "Return JSON."}],
+        field: 128,
+    }
+
+    _validate_model_request("oc-kimi", body, _Request())
+
+    assert field not in body
+
+
+def test_stream_terminal_diagnostics_extract_finish_reason_and_usage():
+    chunk = (
+        'data: {"choices":[{"delta":{},"finish_reason":"length"}],'
+        '"usage":{"prompt_tokens":10,"completion_tokens":4096,"total_tokens":4106}}\n\n'
+        "data: [DONE]\n\n"
+    )
+
+    diagnostics = _stream_terminal_diagnostics_from_chunk(chunk)
+
+    assert diagnostics["finish_reason"] == "length"
+    assert diagnostics["usage"]["completion_tokens"] == 4096
+    assert diagnostics["saw_done"] is True
+
+
+def test_stream_chunk_visible_output_accepts_reasoning_content():
+    chunk = (
+        'data: {"choices":[{"delta":{"reasoning_content":"visible kimi output"},'
+        '"finish_reason":null}]}\n\n'
+    )
+
+    assert _stream_chunk_has_visible_output(chunk) is True
+
+
+def test_stream_chunk_reasoning_chars_counts_reasoning_content():
+    chunk = (
+        'data: {"choices":[{"delta":{"reasoning_content":"visible "},'
+        '"finish_reason":null}]}\n\n'
+        'data: {"choices":[{"message":{"reasoning_content":"kimi output"},'
+        '"finish_reason":"stop"}]}\n\n'
+    )
+
+    assert _stream_chunk_reasoning_chars(chunk) == len("visible kimi output")
 
 
 def test_empty_length_response_detects_visible_token_exhaustion():
@@ -133,6 +260,20 @@ def test_empty_length_response_detects_visible_token_exhaustion():
     }
 
     assert _is_empty_length_response(response) is True
+
+
+def test_empty_length_response_allows_reasoning_content():
+    response = {
+        "choices": [
+            {
+                "finish_reason": "length",
+                "message": {"content": "", "reasoning_content": "visible kimi output"},
+            }
+        ],
+        "usage": {"completion_tokens": 4096},
+    }
+
+    assert _is_empty_length_response(response) is False
 
 
 def test_empty_length_response_allows_non_empty_length_response():
@@ -152,6 +293,28 @@ def test_opencode_messages_body_omits_default_max_tokens():
     )
 
     assert "max_tokens" not in body
+
+
+def test_opencode_messages_body_records_prompt_free_provider_diagnostics():
+    diagnostics = {}
+    body = _build_messages_body(
+        "deepseek-v4-pro",
+        [{"role": "user", "content": "Return JSON."}],
+        {},
+    )
+    from scillm.proxy.providers.opencode_go import _record_provider_bound_diagnostics
+
+    _record_provider_bound_diagnostics(
+        diagnostics,
+        model="deepseek-v4-pro",
+        api_base="https://opencode.ai/zen/go/v1",
+        body=body,
+    )
+
+    assert diagnostics["provider"] == "opencode-go"
+    assert diagnostics["model"] == "deepseek-v4-pro"
+    assert diagnostics["body_keys"] == ["messages", "model"]
+    assert diagnostics["token_cap_fields_present"] == []
 
 
 def test_opencode_messages_body_preserves_explicit_max_tokens():

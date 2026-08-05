@@ -73,10 +73,16 @@ resp = httpx.post(
 data = json.loads(resp.json()["choices"][0]["message"]["content"])
 ```
 
-## Image Analysis (VLM Auto-Routing)
+## Image analysis (one-shot)
 
-Send images with `model: "text"` — the proxy auto-detects `image_url` parts and
-routes to VLM providers. No need to know the model name:
+Pick the model explicitly when provider choice matters. `X-Caller-Skill` is **required**.
+
+| Intent | Model |
+|--------|-------|
+| High-reasoning vision | `gpt-5.5` |
+| Higher-throughput Chutes VLM | Exact live `Org/Model` from `ops-chutes` via `/v1/scillm/chutes/*` |
+| Kimi + image (Moonshot) | `moonshot-text` |
+| Legacy auto-cascade | `vlm` (Gemini → Claude → Codex — avoid when quota-sensitive) |
 
 ```python
 import base64, httpx
@@ -86,15 +92,18 @@ with open("photo.png", "rb") as f:
 
 resp = httpx.post(
     "http://localhost:4001/v1/chat/completions",
-    headers={"Authorization": "Bearer sk-dev-proxy-123"},
+    headers={
+        "Authorization": "Bearer sk-dev-proxy-123",
+        "X-Caller-Skill": "my-project",
+    },
     json={
-        "model": "text",  # auto-routed to vlm when image detected
+        "model": "gpt-5.5",
         "messages": [{"role": "user", "content": [
             {"type": "text", "text": "Describe this image"},
             {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64}"}},
         ]}],
     },
-    timeout=60.0,
+    timeout=90.0,
 )
 description = resp.json()["choices"][0]["message"]["content"]
 ```
@@ -112,4 +121,3 @@ scillm accepts three forms for `messages` — use whichever is simplest for your
 Plain strings are auto-wrapped as `[{"role": "user", "content": str}]`.
 Convenience fields (`url`, `urls`, `file_path`, `paths`) auto-detect images, base64-encode local files, and route to VLM.
 OpenAI-style arrays pass through unchanged — full control for multi-turn, system prompts, and explicit `image_url` parts.
-

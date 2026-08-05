@@ -131,10 +131,180 @@ async def test_active_call_uses_concurrency_provider():
     await middleware.on_error(request, RuntimeError("cleanup"))
 
 
+@pytest.mark.asyncio
+async def test_streaming_active_call_lifecycle_waits_for_terminal_chunk():
+    active_calls._active_calls.clear()
+    active_calls._completed_calls.clear()
+    chain = MiddlewareChain([ActiveCallsMiddleware()])
+
+    request = await chain.run_pre_call(
+        {
+            "model": "oc-kimi",
+            "_concurrency_provider": "opencode-go",
+            "_headers": {"x-caller-skill": "review-prompt"},
+            "stream": True,
+            "timeout": 30,
+            "stream_heartbeat_s": 0.01,
+            "stream_progress_events": True,
+        }
+    )
+
+    async def provider_stream():
+        yield 'data: {"choices":[{"delta":{"content":"ok"}}]}\n\n'
+        await asyncio.sleep(0)
+        yield "data: [DONE]\n\n"
+
+    wrapped = proxy_app._stream_with_middleware_lifecycle(provider_stream(), request, chain)
+    first = await anext(wrapped)
+
+    assert '"content":"ok"' in first
+    assert len(active_calls._active_calls) == 1
+    call = next(iter(active_calls._active_calls.values())).to_dict()
+    assert call["provider"] == "opencode-go"
+    assert call["stream_heartbeat_s"] == 0.01
+    assert call["stream_progress_events"] is True
+
+    rest = [chunk async for chunk in wrapped]
+
+    assert rest == ["data: [DONE]\n\n"]
+    assert active_calls._active_calls == {}
+    assert active_calls._completed_calls[-1].success is True
+
+
+@pytest.mark.asyncio
+async def test_streaming_active_call_snapshot_exposes_operator_diagnostics():
+    active_calls._active_calls.clear()
+    active_calls._completed_calls.clear()
+    middleware = ActiveCallsMiddleware()
+
+    request = await middleware.pre_call(
+        {
+            "model": "oc-kimi",
+            "_concurrency_provider": "opencode-go",
+            "_headers": {"x-caller-skill": "review-prompt"},
+            "stream": True,
+            "timeout": 180,
+            "_dynamic_timeout_ms": 45000,
+            "_timeout_source": "p95",
+            "stream_heartbeat_s": 5,
+            "stream_progress_events": True,
+        }
+    )
+
+    snapshot = next(iter(active_calls._active_calls.values())).to_dict()
+
+    assert snapshot["model"] == "oc-kimi"
+    assert snapshot["model_requested"] == "oc-kimi"
+    assert snapshot["model_served"] == "oc-kimi"
+    assert snapshot["caller"] == "review-prompt"
+    assert snapshot["provider"] == "opencode-go"
+    assert snapshot["stream"] is True
+    assert snapshot["stream_progress_events"] is True
+    assert snapshot["stream_heartbeat_s"] == 5.0
+    assert snapshot["timeout_s"] == 180.0
+    assert snapshot["deadline_timeout_s"] == 180.0
+    assert snapshot["dynamic_timeout_s"] == 45.0
+    assert snapshot["timeout_source"] == "p95"
+    assert snapshot["started_ts"]
+    assert snapshot["created_at"] == snapshot["started_ts"]
+    assert isinstance(snapshot["elapsed_ms"], int)
+    assert isinstance(snapshot["duration_s"], float)
+    assert snapshot["duration_s"] >= 0.0
+
+    await middleware.on_error(request, RuntimeError("cleanup"))
+
+
+@pytest.mark.asyncio
+async def test_streaming_error_payload_marks_active_call_failed():
+    active_calls._active_calls.clear()
+    active_calls._completed_calls.clear()
+    chain = MiddlewareChain([ActiveCallsMiddleware()])
+
+    request = await chain.run_pre_call(
+        {
+            "model": "oc-kimi",
+            "_concurrency_provider": "opencode-go",
+            "_headers": {"x-caller-skill": "review-prompt"},
+            "stream": True,
+            "timeout": 30,
+        }
+    )
+
+    async def provider_stream():
+        yield 'data: {"error":{"message":"provider timeout","type":"timeout_error"}}\n\n'
+        yield "data: [DONE]\n\n"
+
+    chunks = [
+        chunk
+        async for chunk in proxy_app._stream_with_middleware_lifecycle(provider_stream(), request, chain)
+    ]
+
+    assert chunks[-1] == "data: [DONE]\n\n"
+    assert active_calls._active_calls == {}
+    assert active_calls._completed_calls[-1].success is False
+
+
+@pytest.mark.asyncio
+async def test_empty_stream_marks_active_call_failed():
+    active_calls._active_calls.clear()
+    active_calls._completed_calls.clear()
+    chain = MiddlewareChain([ActiveCallsMiddleware()])
+
+    request = await chain.run_pre_call(
+        {
+            "model": "oc-kimi",
+            "_concurrency_provider": "opencode-go",
+            "_headers": {"x-caller-skill": "review-prompt"},
+            "stream": True,
+            "timeout": 30,
+        }
+    )
+
+    async def provider_stream():
+        yield "event: started\n"
+        yield 'data: {"model":"oc-kimi","elapsed_ms":1}\n\n'
+        yield "event: done\n"
+        yield 'data: {"model":"oc-kimi","elapsed_ms":2}\n\n'
+        yield "data: [DONE]\n\n"
+
+    chunks = [
+        chunk
+        async for chunk in proxy_app._stream_with_middleware_lifecycle(provider_stream(), request, chain)
+    ]
+
+    assert chunks[-1] == "data: [DONE]\n\n"
+    assert active_calls._active_calls == {}
+    assert active_calls._completed_calls[-1].success is False
+
+
 def test_new_semaphore_with_reserved_slots_uses_initial_availability():
     sem = concurrency_guard._new_semaphore_with_reserved_slots(4, 3)
 
     assert sem._value == 1
+
+
+@pytest.mark.asyncio
+async def test_chat_requires_x_caller_skill_before_provider_routing(monkeypatch):
+    class UnusedRouter:
+        async def complete(self, model, messages, **kwargs):
+            raise AssertionError("router should not run without caller skill")
+
+    monkeypatch.setattr(proxy_app, "_config", ProxyConfig(general=GeneralSettings(master_key="")))
+    monkeypatch.setattr(proxy_app, "_router", UnusedRouter())
+    monkeypatch.setattr(proxy_app, "_middleware_chain", MiddlewareChain([]))
+
+    transport = httpx.ASGITransport(app=proxy_app.app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post(
+            "/v1/chat/completions",
+            json={
+                "model": "local-text",
+                "messages": [{"role": "user", "content": "hi"}],
+            },
+        )
+
+    assert response.status_code == 400
+    assert response.json()["error"]["type"] == "caller_skill_required"
 
 
 @pytest.mark.asyncio
@@ -155,7 +325,7 @@ async def test_chat_timeout_unregisters_active_call_and_returns_details(monkeypa
             "/v1/chat/completions",
             headers={"x-caller-skill": "create-evidence-case"},
             json={
-                "model": "text",
+                "model": "chutes-deepseek",
                 "messages": [{"role": "user", "content": "slow"}],
                 "timeout": 0.01,
                 "scillm_metadata": {"batch_id": "b1", "item_id": "i1"},
@@ -194,7 +364,7 @@ async def test_chat_timeout_covers_pre_call_queue_wait(monkeypatch):
             "/v1/chat/completions",
             headers={"x-caller-skill": "deadline-smoke-test"},
             json={
-                "model": "text",
+                "model": "chutes-deepseek",
                 "messages": [{"role": "user", "content": "slow pre-call"}],
                 "timeout": 0.01,
                 "scillm_metadata": {"batch_id": "b1", "item_id": "i2"},
@@ -222,7 +392,7 @@ async def test_timeout_error_handler_skips_llm_analysis(monkeypatch):
         client = None
 
         async def json(self):
-            return {"model": "text"}
+            return {"model": "chutes-deepseek"}
 
     monkeypatch.setattr("scillm.proxy.errors._analyze_error_with_llm", fail_analysis)
 
