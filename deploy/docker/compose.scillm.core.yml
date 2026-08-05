@@ -24,6 +24,10 @@ services:
     environment:
       PYTHONPATH: /app/src
       CONFIG_FILE_PATH: /app/config.yaml
+      # network_mode is host, so the host loopback IS the container loopback;
+      # keep the docker Ollama rewrite pointed at loopback instead of the
+      # bridged-compose "ollama" DNS name.
+      SCILLM_DOCKER_OLLAMA_BASE: ${SCILLM_DOCKER_OLLAMA_BASE:-http://127.0.0.1:11434}
       SCILLM_MASTER_KEY: ${SCILLM_MASTER_KEY:-${LITELLM_MASTER_KEY:-sk-dev-proxy-123}}
       LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY:-${SCILLM_MASTER_KEY:-sk-dev-proxy-123}}
       METRICS_ENV: ${METRICS_ENV:-dev}
