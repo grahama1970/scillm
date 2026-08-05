@@ -236,6 +236,20 @@ def build_default_profiles(config: Any) -> tuple[list[TransportProfile], dict[st
         profiles.append(TransportProfile(**kw))
 
     add(
+        id="claude-fable-model-turn",
+        label="Claude Fable 5 via Anthropic OAuth (premium coordinator model turn)",
+        provider="anthropic-oauth",
+        model="claude-fable-5",
+        auth_source="~/.claude/.credentials.json",
+        mode="model_turn",
+        capabilities=[
+            "streaming", "tool_calling", "structured_output", "vision",
+            "cancellation", "structured_events",
+        ],
+        tags=["coordinator", "review"],
+        fallbacks=["claude-model-turn"],
+    )
+    add(
         id="claude-model-turn",
         label="Claude Sonnet via Anthropic OAuth (Tau-native model turn)",
         provider="anthropic-oauth",
@@ -318,7 +332,7 @@ def build_default_profiles(config: Any) -> tuple[list[TransportProfile], dict[st
 
     have = {p.id for p in profiles}
     aliases_wanted = {
-        "coordinator": "claude-model-turn",
+        "coordinator": "claude-fable-model-turn",
         "backend": "codex-model-turn",
         "frontend": "gemini-vlm",
         "documentation": "chutes-text",
@@ -379,6 +393,48 @@ def _credential_state(profile: TransportProfile) -> tuple[bool, str]:
     return False, f"unknown provider {profile.provider!r}"
 
 
+async def _known_model_ids() -> list[str]:
+    """The proxy's live model listing (configured groups + auto-providers)."""
+    import httpx
+
+    from scillm.proxy import app as app_module
+
+    master_key = app_module._config.general.master_key if app_module._config else ""
+    transport = httpx.ASGITransport(app=app_module.app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://scillm.local", timeout=15) as client:
+        resp = await client.get("/v1/models", headers={"Authorization": f"Bearer {master_key}"})
+    if resp.status_code != 200:
+        raise RuntimeError(f"/v1/models returned HTTP {resp.status_code}")
+    return [str(m.get("id") or "") for m in resp.json().get("data", [])]
+
+
+async def check_profile_model_known(
+    profile: TransportProfile,
+    known_ids: list[str] | None = None,
+) -> dict[str, Any]:
+    """Validate the profile's model against the LIVE model listing.
+
+    Registered profiles can outlive model renames/removals; a DAG that names a
+    dead model should learn it at discovery time, not deep inside a node run.
+    Wildcard-routed ids (``ollama:*``, ``chutes:Org/Model``) pass by prefix.
+    """
+    import difflib
+
+    try:
+        ids = known_ids if known_ids is not None else await _known_model_ids()
+    except Exception as exc:  # noqa: BLE001 - discovery must degrade, not raise
+        return {"known": True, "checked": False, "reason": f"model listing unavailable: {exc}"}
+    if profile.model in ids:
+        return {"known": True, "checked": True}
+    if ":" in profile.model and any(i.split(":", 1)[0] == profile.model.split(":", 1)[0] and i.endswith("*") for i in ids):
+        return {"known": True, "checked": True, "via": "wildcard"}
+    return {
+        "known": False,
+        "checked": True,
+        "suggestions": difflib.get_close_matches(profile.model, ids, n=5, cutoff=0.4),
+    }
+
+
 async def readiness_record(
     profile: TransportProfile,
     live_probe: LiveProbe | None = None,
@@ -405,6 +461,16 @@ async def readiness_record(
         record["reason"] = cred_reason
         return record
     record["state"] = "credential_ready"
+    if profile.mode != "opaque_agent_compat":
+        model_check = await check_profile_model_known(profile)
+        record["evidence"]["model_check"] = model_check
+        if model_check.get("checked") and not model_check.get("known"):
+            record["state"] = "degraded"
+            record["reason"] = (
+                f"model {profile.model!r} is not in the live /v1/models listing; "
+                f"did you mean: {model_check.get('suggestions')}"
+            )
+            return record
     if live_probe is None:
         record["evidence"]["live_probe"] = "not run; live readiness requires ?live=true"
         return record

@@ -215,3 +215,59 @@ class TestRoutes:
     def test_readiness_without_live_never_claims_live(self, client):
         r = client.get("/v1/scillm/profiles/readiness")
         assert all(rec["state"] != "transport_live_ready" for rec in r.json()["readiness"])
+
+
+class TestDynamicModelCheck:
+    @pytest.mark.asyncio
+    async def test_unknown_model_degrades_readiness_with_suggestions(self, monkeypatch):
+        async def fake_ids():
+            return ["claude-fable-5", "claude-sonnet-4-6", "local-text", "ollama:*"]
+
+        monkeypatch.setattr(tp, "_known_model_ids", fake_ids)
+        bad = make_profile(model="claude-fable-6")  # wrong model, as in a mistyped DAG
+        record = await tp.readiness_record(bad)
+        assert record["state"] == "degraded"
+        assert "claude-fable-5" in record["reason"]
+        assert record["evidence"]["model_check"]["known"] is False
+        assert "claude-fable-5" in record["evidence"]["model_check"]["suggestions"]
+
+    @pytest.mark.asyncio
+    async def test_known_model_passes_check(self, monkeypatch):
+        async def fake_ids():
+            return ["local-text"]
+
+        monkeypatch.setattr(tp, "_known_model_ids", fake_ids)
+        record = await tp.readiness_record(make_profile(model="local-text"))
+        assert record["state"] == "credential_ready"
+        assert record["evidence"]["model_check"] == {"known": True, "checked": True}
+
+    @pytest.mark.asyncio
+    async def test_wildcard_routed_model_passes(self, monkeypatch):
+        async def fake_ids():
+            return ["ollama:*"]
+
+        monkeypatch.setattr(tp, "_known_model_ids", fake_ids)
+        record = await tp.readiness_record(make_profile(model="ollama:qwen2.5:0.5b"))
+        assert record["evidence"]["model_check"]["known"] is True
+
+    @pytest.mark.asyncio
+    async def test_listing_unavailable_does_not_block(self, monkeypatch):
+        async def fake_ids():
+            raise RuntimeError("proxy not up")
+
+        monkeypatch.setattr(tp, "_known_model_ids", fake_ids)
+        record = await tp.readiness_record(make_profile())
+        assert record["state"] == "credential_ready"
+        assert record["evidence"]["model_check"]["checked"] is False
+
+
+def test_fable_profile_registered_as_coordinator():
+    profiles, aliases = build_default_profiles(SimpleNamespace())
+    reg = ProfileRegistry(profiles, aliases)
+    fable = reg.get("claude-fable-model-turn")
+    assert fable.model == "claude-fable-5"
+    assert fable.mode == "model_turn"
+    assert {"tool_calling", "structured_events"} <= set(fable.capabilities)
+    assert {"coordinator", "review"} <= set(fable.tags)
+    assert fable.fallbacks == ["claude-model-turn"]
+    assert reg.get("coordinator").id == "claude-fable-model-turn"
