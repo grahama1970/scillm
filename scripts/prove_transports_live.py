@@ -38,6 +38,9 @@ def wait_result(client: httpx.Client, tid: str, timeout: float = 180.0) -> dict:
 
 
 def main() -> int:
+    if "--live" not in sys.argv:
+        print("this proof performs real provider calls; re-run with --live", file=sys.stderr)
+        return 2
     client = httpx.Client(timeout=240)
 
     # -- #27: live readiness readback (OAuth model-turn profile + one more) --
