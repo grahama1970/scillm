@@ -71,6 +71,15 @@ class TransportCreateRequest(BaseModel):
     required_capabilities: list[str] = Field(default_factory=list)
     limits: TransportLimits = Field(default_factory=TransportLimits)
     stream: bool = False
+    # Source grounding (GroundingGuard) — applies to every turn on this
+    # transport. Grounding status is surfaced per turn in events and results.
+    source: str | None = None
+    grounding_threshold: float | None = None
+    grounding_retries: int | None = None
+    # Structured output, e.g. {"type": "json_object"}.
+    response_format: dict[str, Any] | None = None
+    # Caller observability metadata, merged into scillm_metadata.
+    metadata: dict[str, Any] = Field(default_factory=dict)
 
     model_config = {"populate_by_name": True}
 
@@ -95,6 +104,7 @@ class TransportRecord:
         self.messages: list[dict[str, Any]] = list(req.messages)
         self.events: list[dict[str, Any]] = []
         self.result: dict[str, Any] | None = None
+        self.grounding: dict[str, Any] | None = None
         self.upstream: dict[str, Any] = {}
         self.task: asyncio.Task | None = None
         self.event_signal = asyncio.Event()
@@ -150,6 +160,7 @@ async def _default_carrier(record: TransportRecord) -> dict[str, Any]:
         "messages": record.messages,
         "scillm_metadata": {
             "transport_id": record.transport_id,
+            **record.request.metadata,
             **{k: v for k, v in record.request.correlation.model_dump().items() if v is not None},
         },
     }
@@ -157,6 +168,14 @@ async def _default_carrier(record: TransportRecord) -> dict[str, Any]:
         body["tools"] = record.request.tools
     if record.profile.reasoning_effort:
         body["reasoning_effort"] = record.profile.reasoning_effort
+    if record.request.source is not None:
+        body["source"] = record.request.source
+        if record.request.grounding_threshold is not None:
+            body["grounding_threshold"] = record.request.grounding_threshold
+        if record.request.grounding_retries is not None:
+            body["grounding_retries"] = record.request.grounding_retries
+    if record.request.response_format is not None:
+        body["response_format"] = record.request.response_format
     transport = httpx.ASGITransport(app=app_module.app)
     timeout = record.request.limits.timeout_sec
     async with httpx.AsyncClient(transport=transport, base_url="http://scillm.local", timeout=timeout) as client:
@@ -242,6 +261,10 @@ async def _run_turn(record: TransportRecord, carrier: Carrier) -> None:
     }
     if payload.get("usage"):
         record.emit("usage", payload["usage"])
+    grounding = _grounding_status(payload)
+    if grounding is not None:
+        record.grounding = grounding
+        record.emit("grounding", grounding)
     state, data = _summarize_choice(payload)
     record.state = state
     if state == "awaiting_tool_result":
@@ -256,6 +279,20 @@ async def _run_turn(record: TransportRecord, carrier: Carrier) -> None:
         record.state_reason = data.get("reason")
         record.emit("provider_error", data)
     record.result = _result(record, ok=state in ("turn_completed", "awaiting_tool_result"), payload=payload)
+
+
+def _grounding_status(payload: dict[str, Any]) -> dict[str, Any] | None:
+    """Extract GroundingGuard status stamped on the chat payload, if any."""
+    if "grounding_verified" not in payload and "grounding_score" not in payload:
+        return None
+    status = {
+        "verified": payload.get("grounding_verified"),
+        "score": payload.get("grounding_score"),
+        "attempts": payload.get("grounding_attempts"),
+    }
+    if payload.get("grounding_ungrounded_examples"):
+        status["ungrounded_examples"] = payload["grounding_ungrounded_examples"]
+    return status
 
 
 def _result(record: TransportRecord, ok: bool, payload: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -273,6 +310,7 @@ def _result(record: TransportRecord, ok: bool, payload: dict[str, Any] | None = 
         "auth_source": record.profile.auth_source,
         "upstream": record.upstream,
         "usage": (payload or {}).get("usage"),
+        "grounding": getattr(record, "grounding", None),
         "correlation": record.request.correlation.model_dump(),
         "tau_completion": None,
         "note": "transport result only; Tau owns tools, evidence, and completion",
@@ -402,6 +440,7 @@ def create_transports_router(check_auth: AuthCheck, carrier: Carrier | None = No
         record.messages.extend(turn.messages)
         record.turn += 1
         record.result = None  # a fresh provider turn owns the next result
+        record.grounding = None
         record.state = "in_flight"
         record.task = asyncio.create_task(_run_turn(record, carry))
         return JSONResponse(status_code=202, content=record.handle())
