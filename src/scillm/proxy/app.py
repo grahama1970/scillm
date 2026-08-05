@@ -3878,51 +3878,9 @@ async def scillm_auth(request: Request):
     if auth_err:
         raise ProxyError(401, auth_err, "authentication_error")
 
-    import time
-    from scillm.proxy.providers.auth import (
-        _read_claude_code_credentials,
-        _read_codex_auth,
-        _read_auth,
-        CLAUDE_CODE_CREDENTIALS,
-        CODEX_AUTH_FILE,
-        AUTH_FILE,
-    )
+    from scillm.proxy.providers.auth import get_auth_status_snapshot
 
-    now_ms = int(time.time() * 1000)
-    result: dict = {"timestamp": now_ms}
-
-    # Claude
-    cc = _read_claude_code_credentials()
-    if cc:
-        expires = cc.get("expiresAt", 0)
-        remaining_s = max(0, (expires - now_ms) // 1000)
-        result["claude"] = {
-            "status": "valid" if now_ms < expires else "expired",
-            "source": str(CLAUDE_CODE_CREDENTIALS),
-            "expires_in_s": remaining_s,
-            "subscription": cc.get("subscriptionType", "unknown"),
-            "rate_tier": cc.get("rateLimitTier", "unknown"),
-        }
-    else:
-        # Check Pi fallback
-        pi_data = _read_auth()
-        pi_cred = pi_data.get("anthropic", {})
-        if pi_cred.get("type") == "oauth":
-            expires = pi_cred.get("expires", 0)
-            remaining_s = max(0, (expires - now_ms) // 1000)
-            result["claude"] = {
-                "status": "valid" if now_ms < expires else "expired",
-                "source": str(AUTH_FILE),
-                "expires_in_s": remaining_s,
-            }
-        else:
-            result["claude"] = {"status": "not_configured"}
-
-    from scillm.proxy.providers.auth import inspect_codex_auth
-
-    result["codex"] = inspect_codex_auth()
-
-    return result
+    return get_auth_status_snapshot()
 
 
 @app.get("/v1/scillm/auth")

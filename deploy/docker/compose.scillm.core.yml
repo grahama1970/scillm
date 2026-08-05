@@ -34,15 +34,20 @@ services:
       utls-proxy:
         condition: service_healthy
     volumes:
-      - "../../local/proxy_server_config.yaml:/app/config.yaml:ro"
-      - "${HOME}/.pi/agent/auth.json:/root/.pi/agent/auth.json:ro"
-      - "${HOME}/.claude/.credentials.json:/root/.claude/.credentials.json:ro"
-      - "${HOME}/.codex/auth.json:/root/.codex/auth.json:ro"
+      # Keep deploy-time config on the durable checkout, not the invoking
+      # worktree (which may live under /tmp and disappear before a restart).
+      - "${SCILLM_REPO_ROOT:-/home/graham/workspace/experiments/scillm}/local/proxy_server_config.yaml:/app/config.yaml:ro"
+      # Credential CLIs rotate files with atomic rename. Mount their parent
+      # directories read-write so the container follows the replacement inode
+      # and scillm can write refreshed tokens back to the host.
+      - "${HOME}/.pi/agent:/root/.pi/agent"
+      - "${HOME}/.claude:/root/.claude"
+      - "${HOME}/.codex:/root/.codex"
       # Gemini CLI needs write access for history/sessions
       - "${HOME}/.gemini:/root/.gemini"
       # OpenCode Go model discovery needs the connected provider auth/config.
       # Cache is writable so `opencode models --refresh opencode-go` can update.
-      - "${HOME}/.local/share/opencode/auth.json:/root/.local/share/opencode/auth.json:ro"
+      - "${HOME}/.local/share/opencode:/root/.local/share/opencode"
       - "${HOME}/.config/opencode:/root/.config/opencode:ro"
       - "${HOME}/.cache/opencode:/root/.cache/opencode"
       # JSONL backup — independent of DB, survives wipes, append-only
