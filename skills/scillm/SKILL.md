@@ -106,6 +106,14 @@ For this repo's local proxy scripts, resolve it as `${SCILLM_MASTER_KEY:-${LITEL
 | Bounded repo investigate + optional patch | **`POST /v1/scillm/opencode/runs`** | Chat with `opencode-go/*` in a loop |
 | DAG / debugger + SSE steer | **`POST /v1/scillm/opencode/transport/*`** | Blocking serve HTTP with no event tail |
 | Multi-turn Codex in worktree | `/v1/scillm/agents/*` | OpenCode serve for standing lease loops |
+| Tau-native model turn + tool loop carriage | **`POST /v1/scillm/transports`** (profiles via `GET /v1/scillm/profiles`) | Driving opaque agents (OpenCode/standing Codex) through it — those 409 `fork_required` to their native surface |
+
+Profile discovery and readiness (`scillm.transport_profile.v1`) plus the
+normalized transport contracts (`scillm.transport_request/handle/event/result.v1`)
+are documented in [docs/SCILLM_TRANSPORT_PROFILES.md](../../docs/SCILLM_TRANSPORT_PROFILES.md).
+Role aliases (`coordinator`, `backend`, `frontend`, `documentation`, `testing`,
+`independent-review`) resolve server-side to profiles so callers never
+hard-code models.
 
 ### Why OpenCode serve sits between chat and exec
 
