@@ -9,6 +9,7 @@ Run: pytest tests/test_proxy_adversarial.py -v
 from __future__ import annotations
 
 import json
+import os
 
 import httpx
 import pytest
@@ -18,7 +19,9 @@ import pytest
 # ---------------------------------------------------------------------------
 
 PROXY_BASE = "http://127.0.0.1:4001"
-API_KEY = "sk-dev-proxy-123"
+# The configured proxy key is authoritative (see issue #32); the dev default
+# only authenticates on unconfigured dev deployments.
+API_KEY = os.environ.get("SCILLM_MASTER_KEY") or os.environ.get("LITELLM_MASTER_KEY") or "sk-dev-proxy-123"
 AUTH_HEADERS = {"Authorization": f"Bearer {API_KEY}"}
 
 COMPLETION_TIMEOUT = 30.0
@@ -247,10 +250,10 @@ class TestRouterFallbackCascade:
         async with httpx.AsyncClient(
             base_url=PROXY_BASE, headers=AUTH_HEADERS
         ) as c:
-            r = await _achat(c, "chutes-qwen-large", "Reply: PONG")
+            r = await _achat(c, "moonshot-text", "Reply: PONG")
             if r.status_code >= 400:
                 body = r.text.lower()
-                assert "unknown" not in body, "chutes-qwen-large not recognized as model"
+                assert "unknown" not in body, "moonshot-text not recognized as model"
 
     @pytest.mark.asyncio
     async def test_retry_policy_exposed(self):
@@ -401,7 +404,7 @@ class TestVlmAutoRouting:
         async with httpx.AsyncClient(
             base_url=PROXY_BASE, headers=AUTH_HEADERS
         ) as c:
-            r = await _achat(c, "chutes-deepseek", content)
+            r = await _achat(c, "deepseek-direct", content)
             # Should not 404 — VLM router should intercept and reroute
             assert r.status_code != 404, "VLM auto-routing failed: got 404"
             # Accept success or provider error, but not 'unknown model'
@@ -422,7 +425,7 @@ class TestVlmAutoRouting:
         async with httpx.AsyncClient(
             base_url=PROXY_BASE, headers=AUTH_HEADERS
         ) as c:
-            r = await _achat(c, "chutes-deepseek", content)
+            r = await _achat(c, "deepseek-direct", content)
             assert r.status_code > 0  # Must not crash
 
     @pytest.mark.asyncio
@@ -685,7 +688,7 @@ class TestModelList:
         ) as c:
             data = (await c.get("/v1/models", timeout=HEALTH_TIMEOUT)).json()
             ids = {m["id"] for m in data["data"]}
-            for expected in ("chutes-deepseek", "vlm", "local-text"):
+            for expected in ("deepseek-direct", "vlm", "local-text"):
                 assert expected in ids, f"'{expected}' not in model list: {ids}"
 
 
