@@ -90,6 +90,7 @@ class TransportRecord:
         self.profile = profile
         self.state = "created"
         self.state_reason: str | None = None
+        self.error_type: str | None = None
         self.turn = 0
         self.messages: list[dict[str, Any]] = list(req.messages)
         self.events: list[dict[str, Any]] = []
@@ -167,6 +168,15 @@ async def _default_carrier(record: TransportRecord) -> dict[str, Any]:
             },
             json=body,
         )
+    if resp.status_code in (401, 403):
+        # An auth failure must fail the turn as a TYPED auth error, never be
+        # laundered into empty terminal output (issue #29).
+        raise ProxyError(
+            resp.status_code,
+            f"provider turn rejected with HTTP {resp.status_code}: invalid or stale proxy credentials",
+            "transport_auth_invalid",
+            details={"body": resp.text[:500]},
+        )
     if resp.status_code != 200:
         raise ProxyError(
             502,
@@ -214,6 +224,7 @@ async def _run_turn(record: TransportRecord, carrier: Carrier) -> None:
     except ProxyError as exc:
         record.state = "failed"
         record.state_reason = exc.message
+        record.error_type = exc.error_type
         record.emit("provider_error", {"type": exc.error_type, "message": exc.message, "details": exc.details})
         record.result = _result(record, ok=False)
         return
@@ -254,6 +265,7 @@ def _result(record: TransportRecord, ok: bool, payload: dict[str, Any] | None = 
         "ok": ok,
         "state": record.state,
         "state_reason": record.state_reason,
+        "error_type": record.error_type,
         "turn": record.turn,
         "profile": record.profile.id,
         "provider": record.profile.provider,

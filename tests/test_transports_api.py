@@ -284,3 +284,77 @@ class TestOpaqueCompat:
         assert body["error"]["type"] == "fork_required"
         assert body["error"]["native_surface"] == "/v1/scillm/opencode"
         assert "tool_calling" not in body["error"]["reduced_capabilities"]
+
+
+class TestAuthTyped:
+    def test_upstream_401_is_typed_auth_failure_not_empty_output(self):
+        """Issue #29: a 401 from the chat surface must fail the turn with
+        transport_auth_invalid in events and result — never empty output."""
+
+        async def carrier(record):
+            raise ProxyError(
+                401,
+                "provider turn rejected with HTTP 401: invalid or stale proxy credentials",
+                "transport_auth_invalid",
+            )
+
+        client = make_client(carrier)
+        tid = client.post("/v1/scillm/transports", json=REQ).json()["transport_id"]
+        result = wait_result(client, tid)
+        assert result["ok"] is False
+        assert result["state"] == "failed"
+        assert result["error_type"] == "transport_auth_invalid"
+        events = client.get(f"/v1/scillm/transports/{tid}/events").json()["events"]
+        errs = [e for e in events if e["type"] == "provider_error"]
+        assert errs and errs[-1]["data"]["type"] == "transport_auth_invalid"
+
+    def test_bad_bearer_on_create_is_401_not_silent(self):
+        async def carrier(record):  # pragma: no cover
+            raise AssertionError("must not be called")
+
+        profiles = [profile()]
+        tp._registry = ProfileRegistry(profiles, {})
+        app = FastAPI()
+        app.include_router(
+            create_transports_router(lambda r: "Invalid API key", carrier=carrier), prefix="/v1/scillm"
+        )
+
+        @app.exception_handler(ProxyError)
+        async def _handler(request, exc):
+            return JSONResponse(
+                status_code=exc.status_code,
+                content={"error": {"message": exc.message, "type": exc.error_type}},
+            )
+
+        client = TestClient(app)
+        r = client.post("/v1/scillm/transports", json=REQ)
+        assert r.status_code == 401
+        assert r.json()["error"]["type"] == "authentication_error"
+
+    def test_default_carrier_maps_401_to_transport_auth_invalid(self):
+        import asyncio as _asyncio
+        from unittest.mock import patch as _patch
+
+        import httpx as _httpx
+
+        from scillm.proxy import transports_api as ta_mod
+
+        record = ta_mod.TransportRecord(
+            ta_mod.TransportCreateRequest(**{**REQ, "profile": "turn"}), profile()
+        )
+
+        class FakeResp:
+            status_code = 401
+            text = '{"error":{"message":"Invalid API key","type":"authentication_error"}}'
+
+        class FakeClient:
+            def __init__(self, *a, **k): ...
+            async def __aenter__(self): return self
+            async def __aexit__(self, *a): return None
+            async def post(self, *a, **k): return FakeResp()
+
+        with _patch.object(_httpx, "AsyncClient", FakeClient):
+            with pytest.raises(ProxyError) as ei:
+                _asyncio.get_event_loop().run_until_complete(ta_mod._default_carrier(record))
+        assert ei.value.error_type == "transport_auth_invalid"
+        assert ei.value.status_code == 401
