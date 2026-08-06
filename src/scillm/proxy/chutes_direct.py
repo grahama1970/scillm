@@ -359,15 +359,25 @@ async def _ops_chutes_batch_plan(requests: list[dict]) -> dict[str, Any]:
         plan["checks"]["ops_chutes"] = {"ok": True, "skipped": True}
         return plan
 
+    _checker_gone = ("ops_chutes_run_not_found", "ops_chutes_exec_failed", "ops_chutes_timeout")
+
     budget = await _run_ops_chutes("budget-check", timeout=45.0)
     plan["checks"]["budget_check"] = budget
     if not budget.get("ok"):
+        if budget.get("error") in _checker_gone:
+            # Same rule as the model plan (issue #14): an absent checker is
+            # not a failed budget; proceed visibly unverified.
+            plan["preflight_unverified_reason"] = budget.get("error")
+            return plan
         plan.update({"ok": False, "error": "ops_chutes_budget_check_failed"})
         return plan
 
     feasible = await _run_ops_chutes("can-complete", str(len(requests)), timeout=45.0)
     plan["checks"]["can_complete"] = feasible
     if not feasible.get("ok"):
+        if feasible.get("error") in _checker_gone:
+            plan["preflight_unverified_reason"] = feasible.get("error")
+            return plan
         plan.update({"ok": False, "error": "ops_chutes_can_complete_failed"})
         return plan
 

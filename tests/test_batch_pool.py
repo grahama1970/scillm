@@ -310,3 +310,16 @@ class TestOpsChutesPreflightAvailability:
         plan = asyncio.run(cd._ops_chutes_model_plan("deepseek-ai/DeepSeek-V3.2-TEE"))
         assert plan["action"] == "health_check_failed"
         assert plan["error"] == "ops_chutes_model_health_failed"
+
+    def test_batch_checker_unavailable_proceeds_unverified(self, monkeypatch):
+        import asyncio
+
+        from scillm.proxy import chutes_direct as cd
+
+        async def fake_run(*args, timeout=60.0):
+            return {"ok": False, "error": "ops_chutes_run_not_found", "returncode": 127}
+
+        monkeypatch.setattr(cd, "_run_ops_chutes", fake_run)
+        plan = asyncio.run(cd._ops_chutes_batch_plan([{"model": "m", "messages": []}]))
+        assert plan["ok"] is True
+        assert plan["preflight_unverified_reason"] == "ops_chutes_run_not_found"
