@@ -501,15 +501,24 @@ PRICING_MAX_AGE_S = float(os.environ.get("SCILLM_PRICING_MAX_AGE_S", "86400"))
 
 
 async def _pricing_catalog() -> tuple[dict[str, Any] | None, float]:
-    """(catalog, cache_timestamp). Refreshes on the app's models.dev TTL."""
+    """(catalog, wall-clock cache timestamp).
+
+    The app's models.dev cache stamps ``time.monotonic()``; convert to epoch
+    so freshness/as_of are meaningful wall-clock values.
+    """
     from scillm.proxy import app as app_module
+
+    def _epoch(mono_ts: float) -> float:
+        if not mono_ts:
+            return 0.0
+        return time.time() - max(0.0, time.monotonic() - mono_ts)
 
     try:
         catalog = await app_module._fetch_models_dev_catalog()
-        return catalog, app_module._models_dev_cache_ts
+        return catalog, _epoch(app_module._models_dev_cache_ts)
     except Exception:
         # Fall back to whatever cache exists; freshness is judged by the caller.
-        return app_module._models_dev_cache, app_module._models_dev_cache_ts
+        return app_module._models_dev_cache, _epoch(app_module._models_dev_cache_ts)
 
 
 def _pricing_from_catalog(
