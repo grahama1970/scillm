@@ -384,3 +384,13 @@ class TestStrengthSelection:
         r = strength_client.get("/v1/scillm/profiles", params={"strength": "telepathy"})
         assert r.status_code == 422
         assert r.json()["error"]["type"] == "unknown_profile_strength"
+
+
+def test_opus_profile_registered_for_report_roles():
+    profiles, aliases = build_default_profiles(SimpleNamespace())
+    reg = ProfileRegistry(profiles, aliases)
+    opus = reg.get("claude-opus-model-turn")
+    assert opus.model == "claude-opus-4-8"
+    assert set(opus.strengths) == {"docs", "review"}
+    assert opus.pricing_ref == {"provider": "anthropic", "model": "claude-opus-4-8"}
+    assert opus.fallbacks == ["claude-model-turn"]

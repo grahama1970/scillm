@@ -285,6 +285,23 @@ def build_default_profiles(config: Any) -> tuple[list[TransportProfile], dict[st
         fallbacks=["claude-model-turn"],
     )
     add(
+        id="claude-opus-model-turn",
+        label="Claude Opus 4.8 via Anthropic OAuth (report/synthesis)",
+        provider="anthropic-oauth",
+        model="claude-opus-4-8",
+        auth_source="~/.claude/.credentials.json",
+        mode="model_turn",
+        capabilities=[
+            "streaming", "tool_calling", "structured_output", "vision",
+            "cancellation", "structured_events",
+        ],
+        tags=["documentation", "review"],
+        strengths=["docs", "review"],
+        complexity_tier="high",
+        pricing_ref={"provider": "anthropic", "model": "claude-opus-4-8"},
+        fallbacks=["claude-model-turn"],
+    )
+    add(
         id="claude-model-turn",
         label="Claude Sonnet via Anthropic OAuth (Tau-native model turn)",
         provider="anthropic-oauth",
