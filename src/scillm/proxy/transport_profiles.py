@@ -59,6 +59,19 @@ TAU_OWNED_CAPABILITIES = {
     "dag_completion",
 }
 
+# Operator model-strength policy vocabulary (issue #33). A strength names the
+# kind of work a profile is a first-choice carrier for.
+PROFILE_STRENGTHS = {
+    "orchestration",
+    "complex_code",
+    "standard_code",
+    "multimodal_code",
+    "docs",
+    "review",
+}
+
+COMPLEXITY_TIERS = ("premium", "high", "medium", "low")
+
 SEMANTIC_TAGS = {
     "coordinator",
     "backend",
@@ -96,6 +109,10 @@ class TransportProfile(BaseModel):
     reasoning_effort: str | None = None
     capabilities: list[str] = Field(default_factory=list)
     tags: list[str] = Field(default_factory=list)
+    strengths: list[str] = Field(default_factory=list)
+    complexity_tier: str | None = None
+    # models.dev lookup for pricing enrichment: {"provider": ..., "model": ...}
+    pricing_ref: dict[str, str] | None = None
     limits: ProfileLimits = Field(default_factory=ProfileLimits)
     fallbacks: list[str] = Field(default_factory=list)
     caller_policy: dict[str, Any] = Field(default_factory=dict)
@@ -136,6 +153,21 @@ class TransportProfile(BaseModel):
             if tag not in SEMANTIC_TAGS:
                 raise ValueError(f"unknown semantic tag {tag!r}")
         return tags
+
+    @field_validator("strengths")
+    @classmethod
+    def _strengths_known(cls, strengths: list[str]) -> list[str]:
+        for s in strengths:
+            if s not in PROFILE_STRENGTHS:
+                raise ValueError(f"unknown profile strength {s!r}; expected one of {sorted(PROFILE_STRENGTHS)}")
+        return strengths
+
+    @field_validator("complexity_tier")
+    @classmethod
+    def _tier_known(cls, tier: str | None) -> str | None:
+        if tier is not None and tier not in COMPLEXITY_TIERS:
+            raise ValueError(f"unknown complexity_tier {tier!r}; expected one of {COMPLEXITY_TIERS}")
+        return tier
 
     @model_validator(mode="after")
     def _mode_capability_contract(self) -> "TransportProfile":
@@ -247,6 +279,9 @@ def build_default_profiles(config: Any) -> tuple[list[TransportProfile], dict[st
             "cancellation", "structured_events",
         ],
         tags=["coordinator", "review"],
+        strengths=["orchestration", "review"],
+        complexity_tier="premium",
+        pricing_ref={"provider": "anthropic", "model": "claude-fable-5"},
         fallbacks=["claude-model-turn"],
     )
     add(
@@ -261,6 +296,9 @@ def build_default_profiles(config: Any) -> tuple[list[TransportProfile], dict[st
             "cancellation", "structured_events",
         ],
         tags=["coordinator", "backend", "review"],
+        strengths=["standard_code", "review"],
+        complexity_tier="high",
+        pricing_ref={"provider": "anthropic", "model": "claude-sonnet-4-6"},
         fallbacks=[],
     )
     add(
@@ -276,6 +314,9 @@ def build_default_profiles(config: Any) -> tuple[list[TransportProfile], dict[st
             "reasoning_effort",
         ],
         tags=["backend", "testing", "review"],
+        strengths=["standard_code", "review"],
+        complexity_tier="high",
+        pricing_ref={"provider": "openai", "model": "gpt-5.5"},
         fallbacks=["claude-model-turn"],
     )
     groups = set(getattr(config, "model_groups", {}) or {})
@@ -289,6 +330,8 @@ def build_default_profiles(config: Any) -> tuple[list[TransportProfile], dict[st
             mode="model_turn",
             capabilities=["streaming", "structured_output", "cancellation", "structured_events"],
             tags=["bulk", "documentation"],
+            strengths=["docs"],
+            complexity_tier="low",
             fallbacks=[],
         )
     if getattr(config, "gemini_api_base", None):
@@ -304,6 +347,9 @@ def build_default_profiles(config: Any) -> tuple[list[TransportProfile], dict[st
                 "cancellation", "structured_events",
             ],
             tags=["vision", "frontend"],
+            strengths=["multimodal_code"],
+            complexity_tier="medium",
+            pricing_ref={"provider": "google", "model": "gemini-2.5-flash"},
             fallbacks=["claude-model-turn"],
         )
     if getattr(config, "ollama_api_base", None):
@@ -316,6 +362,83 @@ def build_default_profiles(config: Any) -> tuple[list[TransportProfile], dict[st
             mode="model_turn",
             capabilities=["streaming", "cancellation", "structured_events"],
             tags=["local", "testing"],
+            strengths=["standard_code"],
+            complexity_tier="low",
+            fallbacks=[],
+        )
+    add(
+        id="codex-high-model-turn",
+        label="GPT-5.5 high reasoning via ChatGPT OAuth (complex code)",
+        provider="codex-oauth",
+        model="gpt-5.5",
+        auth_source="~/.codex/auth.json",
+        mode="model_turn",
+        reasoning_effort="high",
+        capabilities=[
+            "streaming", "tool_calling", "cancellation", "structured_events",
+            "reasoning_effort",
+        ],
+        tags=["backend", "review"],
+        strengths=["complex_code", "review"],
+        complexity_tier="high",
+        pricing_ref={"provider": "openai", "model": "gpt-5.5"},
+        fallbacks=["claude-fable-model-turn"],
+    )
+    if getattr(config, "opencode_go_api_key", None):
+        add(
+            id="opencode-deepseek-v4",
+            label="OpenCode DeepSeek V4 Flash (medium/low-complexity code)",
+            provider="opencode-go",
+            model="opencode-go/deepseek-v4-flash",
+            auth_source="OPENCODE_GO_API_KEY",
+            mode="model_turn",
+            capabilities=["streaming", "tool_calling", "structured_output", "cancellation", "structured_events"],
+            tags=["backend"],
+            strengths=["standard_code"],
+            complexity_tier="medium",
+            pricing_ref={"provider": "opencode", "model": "deepseek-v4-flash"},
+            fallbacks=[],
+        )
+        add(
+            id="opencode-deepseek-v4-pro",
+            label="OpenCode DeepSeek V4 Pro (less-complex multimodal code)",
+            provider="opencode-go",
+            model="opencode-go/deepseek-v4-pro",
+            auth_source="OPENCODE_GO_API_KEY",
+            mode="model_turn",
+            capabilities=["streaming", "tool_calling", "structured_output", "vision", "cancellation", "structured_events"],
+            tags=["backend", "vision"],
+            strengths=["multimodal_code", "standard_code"],
+            complexity_tier="medium",
+            pricing_ref={"provider": "opencode", "model": "deepseek-v4-pro"},
+            fallbacks=["opencode-deepseek-v4"],
+        )
+        add(
+            id="opencode-kimi-k26",
+            label="OpenCode Kimi K2.6 (documentation)",
+            provider="opencode-go",
+            model="opencode-go/kimi-k2.6",
+            auth_source="OPENCODE_GO_API_KEY",
+            mode="model_turn",
+            capabilities=["streaming", "tool_calling", "structured_output", "cancellation", "structured_events"],
+            tags=["documentation"],
+            strengths=["docs"],
+            complexity_tier="medium",
+            pricing_ref={"provider": "opencode", "model": "kimi-k2.6"},
+            fallbacks=["opencode-kimi-k25"],
+        )
+        add(
+            id="opencode-kimi-k25",
+            label="OpenCode Kimi K2.5 (documentation fallback)",
+            provider="opencode-go",
+            model="opencode-go/kimi-k2.5",
+            auth_source="OPENCODE_GO_API_KEY",
+            mode="model_turn",
+            capabilities=["streaming", "tool_calling", "structured_output", "cancellation", "structured_events"],
+            tags=["documentation"],
+            strengths=["docs"],
+            complexity_tier="low",
+            pricing_ref={"provider": "opencode", "model": "kimi-k2.5"},
             fallbacks=[],
         )
     add(
@@ -369,6 +492,87 @@ def load_registry(config: Any, overlay_path: str | None = None) -> ProfileRegist
 
 
 # ---------------------------------------------------------------------------
+# Pricing (issue #33) — models.dev-backed, TTL auto-refresh, visibly stale
+# ---------------------------------------------------------------------------
+
+# Prices older than this are STALE: served without numbers rather than
+# presenting outdated figures as current.
+PRICING_MAX_AGE_S = float(os.environ.get("SCILLM_PRICING_MAX_AGE_S", "86400"))
+
+
+async def _pricing_catalog() -> tuple[dict[str, Any] | None, float]:
+    """(catalog, cache_timestamp). Refreshes on the app's models.dev TTL."""
+    from scillm.proxy import app as app_module
+
+    try:
+        catalog = await app_module._fetch_models_dev_catalog()
+        return catalog, app_module._models_dev_cache_ts
+    except Exception:
+        # Fall back to whatever cache exists; freshness is judged by the caller.
+        return app_module._models_dev_cache, app_module._models_dev_cache_ts
+
+
+def _pricing_from_catalog(
+    profile: TransportProfile,
+    catalog: dict[str, Any] | None,
+    cache_ts: float,
+) -> dict[str, Any]:
+    source = "models.dev"
+    if profile.pricing_ref is None:
+        return {
+            "status": "unpriced",
+            "reason": "no pricing reference (local or dynamic-group profile)",
+        }
+    as_of = (
+        time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(cache_ts)) if cache_ts else None
+    )
+    if not catalog:
+        return {"status": "unavailable", "source": source, "error": "price catalog unavailable"}
+    age = time.time() - cache_ts if cache_ts else None
+    if age is None or age > PRICING_MAX_AGE_S:
+        # Fail visibly: stale prices are not numbers, they are a stale marker.
+        return {
+            "status": "stale",
+            "source": source,
+            "as_of": as_of,
+            "max_age_s": PRICING_MAX_AGE_S,
+            "error": "price data older than the refresh window; refresh failed",
+        }
+    provider = profile.pricing_ref.get("provider", "")
+    model = profile.pricing_ref.get("model", "")
+    record = ((catalog.get(provider) or {}).get("models") or {}).get(model)
+    cost = (record or {}).get("cost") if isinstance(record, dict) else None
+    if not isinstance(cost, dict):
+        return {
+            "status": "unavailable",
+            "source": source,
+            "as_of": as_of,
+            "error": f"no cost entry for {provider}/{model}",
+        }
+    return {
+        "status": "fresh",
+        "input_per_mtok": cost.get("input"),
+        "output_per_mtok": cost.get("output"),
+        "currency": "USD",
+        "as_of": as_of,
+        "source": source,
+        "billing_note": (
+            "OAuth subscription seats do not bill per token; figures are the "
+            "provider's public API rates for cost comparison"
+            if profile.provider in ("anthropic-oauth", "codex-oauth")
+            else None
+        ),
+    }
+
+
+async def enrich_profiles_with_pricing(
+    profiles: list[TransportProfile],
+) -> dict[str, dict[str, Any]]:
+    catalog, cache_ts = await _pricing_catalog()
+    return {p.id: _pricing_from_catalog(p, catalog, cache_ts) for p in profiles}
+
+
+# ---------------------------------------------------------------------------
 # Readiness
 # ---------------------------------------------------------------------------
 
@@ -387,6 +591,9 @@ def _credential_state(profile: TransportProfile) -> tuple[bool, str]:
         return ok, ("gemini api key set" if ok else "gemini api key missing")
     if profile.provider == "ollama":
         return True, "local provider requires no credential"
+    if profile.provider == "opencode-go":
+        ok = bool(os.environ.get("OPENCODE_GO_API_KEY"))
+        return ok, ("OPENCODE_GO_API_KEY set" if ok else "OPENCODE_GO_API_KEY missing")
     if profile.provider == "opencode-serve":
         ok = bool(os.environ.get("OPENCODE_GO_API_KEY")) or _oauth_available("codex-oauth") or _oauth_available("anthropic-oauth")
         return ok, ("delegate auth available" if ok else "no delegate auth available")
@@ -557,12 +764,42 @@ def create_transport_profiles_router(check_auth: AuthCheck, live_probe: LiveProb
             raise ProxyError(401, err, "authentication_error")
 
     @router.get("/profiles")
-    async def list_profiles(request: Request) -> JSONResponse:
+    async def list_profiles(request: Request, strength: str = "", sort: str = "") -> JSONResponse:
         auth(request)
         reg = get_registry()
+        if strength and strength not in PROFILE_STRENGTHS:
+            raise ProxyError(
+                422,
+                f"unknown profile strength {strength!r}",
+                "unknown_profile_strength",
+                details={"known_strengths": sorted(PROFILE_STRENGTHS)},
+            )
+        if sort and sort != "price":
+            raise ProxyError(422, f"unknown sort {sort!r}; supported: price", "unknown_sort")
+        selected = [
+            p for p in reg.profiles.values()
+            if not strength or strength in p.strengths
+        ]
+        pricing = await enrich_profiles_with_pricing(selected)
+        rows = []
+        for p in selected:
+            row = p.model_dump(by_alias=True)
+            row["pricing"] = pricing[p.id]
+            rows.append(row)
+        if sort == "price":
+            # Cheapest first by output rate; unpriced/stale sort last — an
+            # economical preset must never pick a profile with unknown cost.
+            rows.sort(key=lambda r: (
+                r["pricing"].get("status") != "fresh",
+                r["pricing"].get("output_per_mtok") if r["pricing"].get("output_per_mtok") is not None else float("inf"),
+            ))
         return JSONResponse({
             "schema": PROFILE_SCHEMA,
-            "profiles": [p.model_dump(by_alias=True) for p in reg.profiles.values()],
+            "strength": strength or None,
+            "known_strengths": sorted(PROFILE_STRENGTHS),
+            "complexity_tiers": list(COMPLEXITY_TIERS),
+            "pricing_max_age_s": PRICING_MAX_AGE_S,
+            "profiles": rows,
             "aliases": reg.aliases,
         })
 

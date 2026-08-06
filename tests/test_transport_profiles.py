@@ -5,6 +5,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 import pytest
+import time
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
@@ -271,3 +272,115 @@ def test_fable_profile_registered_as_coordinator():
     assert {"coordinator", "review"} <= set(fable.tags)
     assert fable.fallbacks == ["claude-model-turn"]
     assert reg.get("coordinator").id == "claude-fable-model-turn"
+
+
+FRESH_CATALOG = {
+    "anthropic": {"models": {"claude-fable-5": {"cost": {"input": 10, "output": 50}}}},
+    "openai": {"models": {"gpt-5.5": {"cost": {"input": 5, "output": 30}}}},
+    "opencode": {"models": {
+        "kimi-k2.6": {"cost": {"input": 0.95, "output": 4}},
+        "kimi-k2.5": {"cost": {"input": 0.6, "output": 2.5}},
+    }},
+}
+
+
+class TestStrengthsAndPricing:
+    def test_unknown_strength_rejected(self):
+        with pytest.raises(ValueError, match="unknown profile strength"):
+            make_profile(strengths=["wizardry"])
+
+    def test_unknown_tier_rejected(self):
+        with pytest.raises(ValueError, match="unknown complexity_tier"):
+            make_profile(complexity_tier="galactic")
+
+    def test_operator_policy_profiles_registered(self):
+        config = SimpleNamespace(opencode_go_api_key="k", model_groups={})
+        profiles, aliases = build_default_profiles(config)
+        reg = ProfileRegistry(profiles, aliases)
+        assert reg.get("claude-fable-model-turn").strengths == ["orchestration", "review"]
+        assert reg.get("codex-high-model-turn").reasoning_effort == "high"
+        assert "complex_code" in reg.get("codex-high-model-turn").strengths
+        assert reg.get("opencode-deepseek-v4").complexity_tier == "medium"
+        assert "multimodal_code" in reg.get("opencode-deepseek-v4-pro").strengths
+        assert reg.get("opencode-kimi-k26").fallbacks == ["opencode-kimi-k25"]
+        assert {"docs"} == set(reg.get("opencode-kimi-k25").strengths)
+
+    def test_fresh_pricing_attached(self):
+        p = make_profile(pricing_ref={"provider": "anthropic", "model": "claude-fable-5"})
+        pricing = tp._pricing_from_catalog(p, FRESH_CATALOG, time.time())
+        assert pricing["status"] == "fresh"
+        assert pricing["input_per_mtok"] == 10
+        assert pricing["output_per_mtok"] == 50
+        assert pricing["currency"] == "USD"
+        assert pricing["as_of"]
+
+    def test_stale_pricing_fails_visibly_without_numbers(self):
+        p = make_profile(pricing_ref={"provider": "anthropic", "model": "claude-fable-5"})
+        old_ts = time.time() - tp.PRICING_MAX_AGE_S - 10
+        pricing = tp._pricing_from_catalog(p, FRESH_CATALOG, old_ts)
+        assert pricing["status"] == "stale"
+        assert "input_per_mtok" not in pricing
+        assert "output_per_mtok" not in pricing
+
+    def test_unpriced_and_missing_model_visible(self):
+        assert tp._pricing_from_catalog(make_profile(), FRESH_CATALOG, time.time())["status"] == "unpriced"
+        p = make_profile(pricing_ref={"provider": "anthropic", "model": "ghost-model"})
+        assert tp._pricing_from_catalog(p, FRESH_CATALOG, time.time())["status"] == "unavailable"
+
+
+@pytest.fixture()
+def strength_client(monkeypatch):
+    import time as _time
+
+    fable = make_profile(
+        id="fable", strengths=["orchestration"], complexity_tier="premium",
+        pricing_ref={"provider": "anthropic", "model": "claude-fable-5"},
+    )
+    k26 = make_profile(
+        id="k26", strengths=["docs"], complexity_tier="medium",
+        pricing_ref={"provider": "opencode", "model": "kimi-k2.6"},
+    )
+    k25 = make_profile(
+        id="k25", strengths=["docs"], complexity_tier="low",
+        pricing_ref={"provider": "opencode", "model": "kimi-k2.5"},
+    )
+    unpriced = make_profile(id="unpriced", strengths=["docs"])
+    reg = ProfileRegistry([fable, k26, k25, unpriced], {})
+    monkeypatch.setattr(tp, "_registry", reg)
+
+    async def fake_catalog():
+        return FRESH_CATALOG, _time.time()
+
+    monkeypatch.setattr(tp, "_pricing_catalog", fake_catalog)
+    app = FastAPI()
+    app.include_router(create_transport_profiles_router(lambda r: None), prefix="/v1/scillm")
+
+    @app.exception_handler(ProxyError)
+    async def _handler(request, exc):
+        from fastapi.responses import JSONResponse
+
+        return JSONResponse(status_code=exc.status_code, content={"error": {"type": exc.error_type}})
+
+    return TestClient(app)
+
+
+class TestStrengthSelection:
+    def test_listing_carries_strengths_and_pricing(self, strength_client):
+        body = strength_client.get("/v1/scillm/profiles").json()
+        rows = {r["id"]: r for r in body["profiles"]}
+        assert rows["fable"]["strengths"] == ["orchestration"]
+        assert rows["fable"]["pricing"]["status"] == "fresh"
+        assert rows["fable"]["pricing"]["output_per_mtok"] == 50
+        assert body["known_strengths"] == sorted(tp.PROFILE_STRENGTHS)
+
+    def test_strength_filter_and_cheapest_sort(self, strength_client):
+        body = strength_client.get("/v1/scillm/profiles", params={"strength": "docs", "sort": "price"}).json()
+        ids = [r["id"] for r in body["profiles"]]
+        assert ids[:2] == ["k25", "k26"]  # cheapest fresh first
+        assert ids[-1] == "unpriced"  # unknown cost never wins the economical pick
+        assert "fable" not in ids
+
+    def test_unknown_strength_fails_closed(self, strength_client):
+        r = strength_client.get("/v1/scillm/profiles", params={"strength": "telepathy"})
+        assert r.status_code == 422
+        assert r.json()["error"]["type"] == "unknown_profile_strength"
