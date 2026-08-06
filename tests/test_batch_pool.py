@@ -273,3 +273,40 @@ def test_model_pool_status_uses_live_semaphore_not_stale_registry_rows():
     assert chutes_lane["stale_active_calls"] == 8
     assert chutes_lane["registry_drift"] == 8
     assert status["live_in_flight"] == 1
+
+
+class TestOpsChutesPreflightAvailability:
+    """Issue #14: checker-unavailable must not block healthy models."""
+
+    @staticmethod
+    def _run(coro):
+        import asyncio
+
+        return asyncio.get_event_loop().run_until_complete(coro)
+
+    def test_checker_unavailable_proceeds_unverified(self, monkeypatch):
+        import asyncio
+
+        from scillm.proxy import chutes_direct as cd
+
+        async def fake_run(*args, timeout=60.0):
+            return {"ok": False, "error": "ops_chutes_run_not_found", "returncode": 127}
+
+        monkeypatch.setattr(cd, "_run_ops_chutes", fake_run)
+        plan = asyncio.run(cd._ops_chutes_model_plan("deepseek-ai/DeepSeek-V3.2-TEE"))
+        assert plan["action"] == "proceed_unverified"
+        assert plan["preflight_unverified_reason"] == "ops_chutes_run_not_found"
+        assert plan.get("error") is None
+
+    def test_real_health_failure_still_blocks(self, monkeypatch):
+        import asyncio
+
+        from scillm.proxy import chutes_direct as cd
+
+        async def fake_run(*args, timeout=60.0):
+            return {"ok": False, "error": "model reported DOWN", "stdout": "DOWN", "returncode": 1}
+
+        monkeypatch.setattr(cd, "_run_ops_chutes", fake_run)
+        plan = asyncio.run(cd._ops_chutes_model_plan("deepseek-ai/DeepSeek-V3.2-TEE"))
+        assert plan["action"] == "health_check_failed"
+        assert plan["error"] == "ops_chutes_model_health_failed"
