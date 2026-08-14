@@ -1,0 +1,63 @@
+{
+  "version": 2,
+  "skill": "scillm",
+  "trials": 2,
+  "proof_scope": "dynamic provider model catalog regression guard",
+  "claims": {
+    "proves": "the declared SciLLM unit and live endpoint checks pass repeatedly for dynamic Claude, Codex, and OpenCode Go model catalog discovery and nonexistent-model help payloads",
+    "does_not_prove": "successful paid/provider completions for every advertised model, provider quota health, or full SciLLM release readiness"
+  },
+  "cases": [
+    {
+      "name": "unit-dynamic-provider-catalog-contract",
+      "type": "positive",
+      "real_world": true,
+      "timeout_seconds": 180,
+      "command": [
+        "/usr/bin/python3",
+        "../../../scripts/agentic_eval_provider_models.py",
+        "unit-catalog-contract"
+      ],
+      "expected": {
+        "exit_code": 0,
+        "stdout_contains": [
+          "unit_catalog_contract_ok"
+        ]
+      }
+    },
+    {
+      "name": "live-unified-provider-catalog-endpoint",
+      "type": "positive",
+      "real_world": true,
+      "timeout_seconds": 45,
+      "command": [
+        "/usr/bin/python3",
+        "../../../scripts/agentic_eval_provider_models.py",
+        "live-catalog-endpoint"
+      ],
+      "expected": {
+        "exit_code": 0,
+        "stdout_contains": [
+          "live_provider_catalogs_ok"
+        ]
+      }
+    },
+    {
+      "name": "adversarial-nonexistent-model-dynamic-help",
+      "type": "adversarial",
+      "real_world": true,
+      "timeout_seconds": 60,
+      "command": [
+        "/usr/bin/python3",
+        "../../../scripts/agentic_eval_provider_models.py",
+        "live-invalid-selectors"
+      ],
+      "expected": {
+        "exit_code": 0,
+        "stdout_contains": [
+          "live_invalid_selectors_ok"
+        ]
+      }
+    }
+  ]
+}
