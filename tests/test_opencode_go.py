@@ -218,6 +218,22 @@ def test_app_validation_allows_text_opencode_go_requests():
     _validate_model_request("opencode-go/deepseek-v4-flash", body, _Request())
 
 
+def test_app_validation_rejects_opencode_go_reasoning_with_help():
+    body = {
+        "messages": [{"role": "user", "content": "Return JSON."}],
+        "reasoning_effort": "high",
+    }
+
+    with pytest.raises(ProxyError) as exc:
+        _validate_model_request("opencode-go/kimi-k2.6", body, _Request())
+
+    assert exc.value.error_type == "unsupported_reasoning_effort"
+    assert exc.value.details["provider"] == "opencode-go"
+    assert exc.value.details["available_reasoning_efforts"] == []
+    assert exc.value.details["accepted_reasoning_values"] == ["none"]
+    assert "Omit reasoning" in exc.value.details["project_agent_message"]
+
+
 def test_app_validation_rejects_unknown_opencode_go_with_catalog():
     body = {"messages": [{"role": "user", "content": "Return JSON."}]}
 

@@ -76,6 +76,19 @@ def _require(condition: bool, message: str) -> None:
 
 
 def unit_catalog_contract() -> None:
+    _run_pytest(
+        [
+            "tests/test_claude_model_aliases.py",
+            "tests/test_codex_model_discovery.py",
+            "tests/test_codex_routing.py",
+            "tests/test_opencode_go.py",
+        ],
+        timeout=120,
+    )
+    print("unit_catalog_contract_ok")
+
+
+def _run_pytest(paths: list[str], *, timeout: int) -> None:
     env = os.environ.copy()
     existing_pythonpath = env.get("PYTHONPATH")
     env["PYTHONPATH"] = (
@@ -89,10 +102,7 @@ def unit_catalog_contract() -> None:
             "-m",
             "pytest",
             "-q",
-            "tests/test_claude_model_aliases.py",
-            "tests/test_codex_model_discovery.py",
-            "tests/test_codex_routing.py",
-            "tests/test_opencode_go.py",
+            *paths,
         ],
         cwd=REPO_ROOT,
         text=True,
@@ -105,7 +115,19 @@ def unit_catalog_contract() -> None:
         sys.stdout.write(result.stdout)
         sys.stderr.write(result.stderr)
         raise SystemExit(result.returncode)
-    print("unit_catalog_contract_ok")
+
+
+def unit_reasoning_contract() -> None:
+    _run_pytest(
+        [
+            "tests/test_codex_routing.py::test_validation_allows_dynamic_codex_xhigh_reasoning",
+            "tests/test_codex_routing.py::test_validation_rejects_invalid_codex_reasoning_effort",
+            "tests/test_codex_routing.py::test_validation_rejects_stale_codex_reasoning_effort_with_dynamic_help",
+            "tests/test_opencode_go.py::test_app_validation_rejects_opencode_go_reasoning_with_help",
+        ],
+        timeout=120,
+    )
+    print("unit_reasoning_contract_ok")
 
 
 def live_catalog_endpoint() -> None:
@@ -178,6 +200,7 @@ def live_invalid_selectors() -> None:
 
 COMMANDS = {
     "unit-catalog-contract": unit_catalog_contract,
+    "unit-reasoning-contract": unit_reasoning_contract,
     "live-catalog-endpoint": live_catalog_endpoint,
     "live-invalid-selectors": live_invalid_selectors,
 }

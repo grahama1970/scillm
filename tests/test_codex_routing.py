@@ -89,7 +89,52 @@ def test_validation_normalizes_codex_reasoning_effort(monkeypatch: pytest.Monkey
     assert body["reasoning_effort"] == "high"
 
 
-def test_validation_rejects_invalid_codex_reasoning_effort(monkeypatch: pytest.MonkeyPatch):
+def test_validation_allows_dynamic_codex_xhigh_reasoning(monkeypatch: pytest.MonkeyPatch, tmp_path):
+    path = tmp_path / "models_cache.json"
+    path.write_text(
+        """
+        {
+          "models": [
+            {
+              "slug": "gpt-5.5",
+              "display_name": "GPT-5.5",
+              "supported_reasoning_levels": [{"effort": "high"}, {"effort": "xhigh"}]
+            }
+          ]
+        }
+        """,
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("SCILLM_CODEX_MODELS_CACHE", str(path))
+    monkeypatch.setattr(proxy_app, "_VALID_MODEL_ALIASES", {"chutes-deepseek"})
+    monkeypatch.setattr(proxy_app, "_codex_oauth_available", lambda: True)
+
+    body = {
+        "messages": [{"role": "user", "content": "hi"}],
+        "reasoning_effort": "XHIGH",
+    }
+    _validate_model_request("gpt-5.5", body, _Request())
+
+    assert body["reasoning_effort"] == "xhigh"
+
+
+def test_validation_rejects_invalid_codex_reasoning_effort(monkeypatch: pytest.MonkeyPatch, tmp_path):
+    path = tmp_path / "models_cache.json"
+    path.write_text(
+        """
+        {
+          "models": [
+            {
+              "slug": "gpt-5.5",
+              "display_name": "GPT-5.5",
+              "supported_reasoning_levels": [{"effort": "high"}, {"effort": "xhigh"}]
+            }
+          ]
+        }
+        """,
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("SCILLM_CODEX_MODELS_CACHE", str(path))
     monkeypatch.setattr(proxy_app, "_VALID_MODEL_ALIASES", {"chutes-deepseek"})
     monkeypatch.setattr(proxy_app, "_codex_oauth_available", lambda: True)
 
@@ -97,8 +142,46 @@ def test_validation_rejects_invalid_codex_reasoning_effort(monkeypatch: pytest.M
         "messages": [{"role": "user", "content": "hi"}],
         "reasoning": "mustard",
     }
-    with pytest.raises(ProxyError, match="Unsupported Codex OAuth reasoning effort"):
+    with pytest.raises(ProxyError, match="Unsupported reasoning effort") as exc:
         _validate_model_request("gpt-5.5", body, _Request())
+
+    assert exc.value.error_type == "unsupported_reasoning_effort"
+    assert exc.value.details["provider"] == "codex"
+    assert exc.value.details["available_reasoning_efforts"] == ["high", "xhigh"]
+    assert exc.value.details["accepted_reasoning_values"] == ["none", "high", "xhigh"]
+
+
+def test_validation_rejects_stale_codex_reasoning_effort_with_dynamic_help(monkeypatch: pytest.MonkeyPatch, tmp_path):
+    path = tmp_path / "models_cache.json"
+    path.write_text(
+        """
+        {
+          "models": [
+            {
+              "slug": "gpt-5.5",
+              "display_name": "GPT-5.5",
+              "supported_reasoning_levels": [{"effort": "medium"}, {"effort": "high"}]
+            }
+          ]
+        }
+        """,
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("SCILLM_CODEX_MODELS_CACHE", str(path))
+    monkeypatch.setattr(proxy_app, "_VALID_MODEL_ALIASES", {"chutes-deepseek"})
+    monkeypatch.setattr(proxy_app, "_codex_oauth_available", lambda: True)
+
+    body = {
+        "messages": [{"role": "user", "content": "hi"}],
+        "reasoning_effort": "xhigh",
+    }
+    with pytest.raises(ProxyError) as exc:
+        _validate_model_request("gpt-5.5", body, _Request())
+
+    assert exc.value.error_type == "unsupported_reasoning_effort"
+    assert exc.value.details["requested_reasoning_effort"] == "xhigh"
+    assert exc.value.details["available_reasoning_efforts"] == ["medium", "high"]
+    assert "refresh_provider_models=true" in exc.value.details["refresh_hint"]
 
 
 def test_validation_rejects_unknown_codex_with_reasoning_catalog(monkeypatch: pytest.MonkeyPatch, tmp_path):

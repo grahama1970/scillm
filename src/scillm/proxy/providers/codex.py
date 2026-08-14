@@ -34,9 +34,28 @@ def _apply_codex_reasoning(body: dict[str, Any], model: str, effort: Any) -> Non
     model_info = resolve_codex_model(model, discovered)
     if discovered and model_info is not None and normalized not in model_info.reasoning_efforts:
         allowed = ", ".join(model_info.reasoning_efforts)
-        raise ValueError(
-            f"Codex model {model!r} does not advertise reasoning effort {normalized!r}; "
-            f"available efforts: {allowed}"
+        guidance = (
+            f"Use one of: none, {allowed}; or omit reasoning/reasoning_effort."
+            if allowed
+            else "Omit reasoning/reasoning_effort; this model does not advertise reasoning controls."
+        )
+        raise ProviderOAuthError(
+            provider="codex-oauth",
+            status_code=400,
+            message=(
+                f"Codex model {model!r} does not advertise reasoning effort {normalized!r}; "
+                f"available efforts: {allowed or 'none'}"
+            ),
+            provider_error_code="PROVIDER_BAD_REQUEST",
+            model_requested=model,
+            provider_auth_status="configured",
+            provider_error_type="unsupported_reasoning_effort",
+            project_agent_message=guidance,
+            details={
+                "requested_reasoning_effort": normalized,
+                "available_reasoning_efforts": list(model_info.reasoning_efforts),
+                "accepted_reasoning_values": ["none", *model_info.reasoning_efforts],
+            },
         )
     body["reasoning"] = {"effort": normalized}
 

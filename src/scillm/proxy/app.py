@@ -184,8 +184,6 @@ _UNSUPPORTED_CHATGPT_CODEX_OAUTH_MODELS = {
     "gpt-5.3-codex",
     "gpt-5.2-codex",
 }
-_CODEX_OAUTH_REASONING_EFFORTS = {"none", "low", "medium", "high"}
-
 # Known good model aliases (checked at startup from config)
 _VALID_MODEL_ALIASES: set[str] = set()
 
@@ -630,22 +628,99 @@ def _normalize_reasoning_effort(body: dict[str, Any]) -> str | None:
     return str(effort) if effort is not None else None
 
 
-def _validate_codex_oauth_reasoning_effort(model: str, body: dict[str, Any]) -> None:
+def _reasoning_efforts_from_catalog_row(row: dict[str, Any]) -> tuple[str, ...]:
+    efforts = row.get("reasoning_efforts")
+    if not isinstance(efforts, list):
+        return ()
+    normalized: list[str] = []
+    for effort in efforts:
+        if isinstance(effort, str) and effort.strip():
+            normalized.append(effort.strip().lower())
+    return tuple(dict.fromkeys(normalized))
+
+
+def _reasoning_catalog_for_model(provider: str, model: str) -> tuple[bool, bool, tuple[str, ...], dict[str, Any]]:
+    if provider == "codex":
+        discovered = discover_codex_models()
+        catalog = _provider_model_catalog(provider)
+        if not discovered:
+            return False, False, (), catalog
+        model_info = resolve_codex_model(model, discovered)
+        if model_info is None:
+            return True, False, (), catalog
+        return True, True, model_info.reasoning_efforts, catalog
+
+    catalog = _provider_model_catalog(provider)
+    rows = catalog.get("models", [])
+    normalized_model = model.strip().lower()
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        row_id = row.get("id")
+        if isinstance(row_id, str) and row_id.strip().lower() == normalized_model:
+            return True, True, _reasoning_efforts_from_catalog_row(row), catalog
+    return bool(rows), False, (), catalog
+
+
+def _raise_unsupported_reasoning_effort(
+    *,
+    provider: str,
+    model: str,
+    effort: str,
+    efforts: tuple[str, ...],
+    catalog: dict[str, Any],
+) -> None:
+    available = list(efforts)
+    accepted = ["none", *available]
+    if available:
+        guidance = f"Use one of: {', '.join(accepted)}; or omit reasoning/reasoning_effort."
+    else:
+        guidance = (
+            f"Provider '{provider}' does not advertise reasoning controls for model '{model}'. "
+            "Omit reasoning/reasoning_effort."
+        )
+    details = {
+        "provider": provider,
+        "model": model,
+        "requested_reasoning_effort": effort,
+        "available_reasoning_efforts": available,
+        "accepted_reasoning_values": accepted,
+        "reasoning_source": catalog.get("source"),
+        "reasoning_catalog_live": catalog.get("live"),
+        "reasoning_catalog_available": catalog.get("available"),
+        "project_agent_message": guidance,
+        "refresh_hint": (
+            "/v1/scillm/models?refresh_provider_models=true or /v1/scillm/providers"
+        ),
+    }
+    raise ProxyError(
+        400,
+        (
+            f"Unsupported reasoning effort '{effort}' for provider '{provider}' "
+            f"model '{model}'. {guidance}"
+        ),
+        "unsupported_reasoning_effort",
+        advice=guidance,
+        details=details,
+    )
+
+
+def _validate_provider_reasoning_effort(model: str, body: dict[str, Any]) -> None:
     effort = _normalize_reasoning_effort(body)
     if effort is None:
         return
-    if _oauth_provider_for_model(model) != "codex-oauth":
+    provider = _provider_for_model_selector(model)
+    if provider not in {"codex", "claude", OPENCODE_GO_PROVIDER}:
         return
     normalized = effort.strip().lower()
-    if normalized not in _CODEX_OAUTH_REASONING_EFFORTS:
-        allowed = ", ".join(sorted(_CODEX_OAUTH_REASONING_EFFORTS))
-        raise ProxyError(
-            400,
-            (
-                f"Unsupported Codex OAuth reasoning effort '{effort}'. "
-                f"Use one of: {allowed}; or omit reasoning/reasoning_effort."
-            ),
-            "invalid_request_error",
+    catalog_available, model_found, efforts, catalog = _reasoning_catalog_for_model(provider, model)
+    if catalog_available and model_found and normalized != "none" and normalized not in efforts:
+        _raise_unsupported_reasoning_effort(
+            provider=provider,
+            model=model,
+            effort=effort,
+            efforts=efforts,
+            catalog=catalog,
         )
     if normalized != effort:
         body["reasoning_effort"] = normalized
@@ -1903,7 +1978,7 @@ def _validate_model_request(model: str, body: dict, request: Request) -> None:
             "invalid_request_error",
         )
 
-    _validate_codex_oauth_reasoning_effort(model, body)
+    _validate_provider_reasoning_effort(model, body)
     dynamic_provider_checked = _validate_dynamic_provider_model(model)
 
     # 2. Reject unknown models with helpful error + suggestions
