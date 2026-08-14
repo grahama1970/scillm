@@ -11,6 +11,7 @@ import asyncio
 import json
 import os
 import re
+import subprocess
 from typing import Any, AsyncIterator
 
 import httpx
@@ -167,6 +168,56 @@ async def list_opencode_go_models_from_cli(*, refresh: bool = False, verbose: bo
         err = stderr.decode("utf-8", errors="replace")
         raise RuntimeError(f"{' '.join(args)} failed ({proc.returncode}): {err[:500]}")
     return parse_opencode_models_output(text)
+
+
+def list_opencode_go_models_from_cli_sync(*, refresh: bool = False, verbose: bool = False) -> list[str]:
+    """List OpenCode Go models via the CLI from sync validation code."""
+    args = ["opencode", "models"]
+    if refresh:
+        args.append("--refresh")
+    if verbose:
+        args.append("--verbose")
+    args.append(OPENCODE_GO_PROVIDER)
+
+    proc = subprocess.run(
+        args,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+    if proc.returncode != 0:
+        raise RuntimeError(f"{' '.join(args)} failed ({proc.returncode}): {proc.stderr[:500]}")
+    return parse_opencode_models_output(proc.stdout)
+
+
+def list_opencode_go_models_from_server_sync(
+    *,
+    server_url: str | None = None,
+    username: str | None = None,
+    password: str | None = None,
+) -> list[str]:
+    """List OpenCode Go models from a running ``opencode serve`` instance."""
+    base = (server_url or os.environ.get("OPENCODE_SERVER_URL") or OPENCODE_SERVER_DEFAULT_URL).rstrip("/")
+    auth = None
+    password = password if password is not None else os.environ.get("OPENCODE_SERVER_PASSWORD")
+    username = username if username is not None else os.environ.get("OPENCODE_SERVER_USERNAME", "opencode")
+    if password:
+        auth = (username or "opencode", password)
+
+    with httpx.Client(timeout=1.5, auth=auth) as client:
+        resp = client.get(f"{base}/provider")
+    resp.raise_for_status()
+    data = resp.json()
+
+    providers = data.get("all", []) if isinstance(data, dict) else []
+    for provider in providers:
+        if not isinstance(provider, dict):
+            continue
+        provider_id = str(provider.get("id") or provider.get("providerID") or provider.get("name") or "")
+        if provider_id == OPENCODE_GO_PROVIDER:
+            return _extract_models_from_provider_obj(provider)
+    return []
 
 
 def _extract_models_from_provider_obj(provider: Any) -> list[str]:

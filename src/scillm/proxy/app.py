@@ -33,11 +33,14 @@ from scillm.proxy.providers.opencode_go import (
     describe_opencode_go_model,
     is_opencode_go_model,
     list_opencode_go_models_from_cli,
+    list_opencode_go_models_from_cli_sync,
     list_opencode_go_models_from_server,
+    list_opencode_go_models_from_server_sync,
     opencode_go_input_capabilities,
     static_opencode_go_models,
 )
-from scillm.proxy.providers.codex_models import codex_catalog_payload, discover_codex_models
+from scillm.proxy.providers.claude_models import claude_catalog_payload, static_claude_model_ids
+from scillm.proxy.providers.codex_models import codex_catalog_payload, discover_codex_models, resolve_codex_model
 from scillm.proxy.router import Router
 from scillm.proxy.router import ProxyError as RouterProxyError
 from scillm.proxy.streaming import DEFAULT_STREAM_HEARTBEAT_S, SSE_HEADERS, _sse_generator, sse_liveness_wrapper
@@ -407,6 +410,166 @@ def _codex_oauth_available() -> bool:
         return is_codex_available()
     except Exception:
         return False
+
+
+def _claude_oauth_available() -> bool:
+    """Return true when Claude OAuth credentials are available."""
+    try:
+        from scillm.proxy.providers.auth import is_anthropic_available
+        return is_anthropic_available()
+    except Exception:
+        return False
+
+
+def _provider_for_model_selector(model: str) -> str | None:
+    lower = model.lower()
+    if lower.startswith("claude") and "/" not in model:
+        return "claude"
+    if _is_codex_oauth_model(model):
+        return "codex"
+    if is_opencode_go_model(model):
+        return OPENCODE_GO_PROVIDER
+    return None
+
+
+def _opencode_go_catalog_payload_for_validation(*, refresh: bool = False) -> dict[str, Any]:
+    source = "static_registry"
+    errors: list[str] = []
+    models: list[str] = []
+    if refresh:
+        try:
+            models = list_opencode_go_models_from_cli_sync(refresh=refresh)
+            if models:
+                source = "opencode_cli"
+        except Exception as exc:
+            errors.append(f"cli: {str(exc)[:500]}")
+            models = []
+        if not models:
+            try:
+                models = list_opencode_go_models_from_server_sync()
+                if models:
+                    source = "opencode_server"
+            except Exception as exc:
+                errors.append(f"server: {str(exc)[:500]}")
+                models = []
+    if not models:
+        models = static_opencode_go_models()
+    return {
+        "provider": OPENCODE_GO_PROVIDER,
+        "pattern": "opencode-go/*",
+        "source": source,
+        "available": bool(_config and _config.opencode_go_api_key),
+        "live": source in {"opencode_cli", "opencode_server"},
+        "error": "; ".join(errors) if errors else None,
+        "errors": errors,
+        "models": [
+            {
+                **describe_opencode_go_model(model, key_configured=bool(_config and _config.opencode_go_api_key)),
+                "reasoning_efforts": [],
+                "reasoning_source": "not_advertised",
+            }
+            for model in models
+        ],
+    }
+
+
+def _provider_model_catalog(provider: str, *, refresh: bool = False) -> dict[str, Any]:
+    if provider == "claude":
+        return {
+            "provider": "claude",
+            "pattern": "claude-*",
+            **claude_catalog_payload(refresh=refresh),
+        }
+    if provider == "codex":
+        catalog = codex_catalog_payload()
+        return {
+            "provider": "codex",
+            "pattern": "gpt-* | codex-* | o1* | o3* | o4*",
+            "source": catalog["source"],
+            "available": _codex_oauth_available(),
+            "live": bool(catalog.get("available")),
+            "error": None if catalog.get("available") else "codex_models_cache_unavailable",
+            "models": catalog["models"],
+        }
+    if provider == OPENCODE_GO_PROVIDER:
+        return {
+            "provider": OPENCODE_GO_PROVIDER,
+            "pattern": "opencode-go/*",
+            **_opencode_go_catalog_payload_for_validation(refresh=refresh),
+        }
+    return {
+        "provider": provider,
+        "pattern": None,
+        "source": "unknown",
+        "available": False,
+        "live": False,
+        "error": "unknown_provider",
+        "models": [],
+    }
+
+
+def _model_ids_from_catalog(catalog: dict[str, Any]) -> list[str]:
+    ids: list[str] = []
+    for row in catalog.get("models", []):
+        if isinstance(row, dict) and isinstance(row.get("id"), str):
+            ids.append(row["id"])
+    return ids
+
+
+def _model_not_available_error(model: str, provider: str, catalog: dict[str, Any]) -> ProxyError:
+    ids = _model_ids_from_catalog(catalog)
+    suggestions = difflib.get_close_matches(model.lower(), [item.lower() for item in ids], n=5, cutoff=0.35)
+    lower_to_original = {item.lower(): item for item in ids}
+    resolved_suggestions = [lower_to_original[item] for item in suggestions]
+    details = {
+        "provider": provider,
+        "requested_model": model,
+        "pattern": catalog.get("pattern"),
+        "catalog_source": catalog.get("source"),
+        "catalog_live": catalog.get("live"),
+        "auth_status": "configured" if catalog.get("available") else "unavailable",
+        "available_models": catalog.get("models", []),
+        "suggestions": resolved_suggestions,
+        "refresh_hint": (
+            "/v1/scillm/models?refresh_provider_models=true"
+            if provider in {"claude", OPENCODE_GO_PROVIDER}
+            else "/v1/scillm/models"
+        ),
+    }
+    msg = f"Model '{model}' is not available for provider '{provider}'."
+    if resolved_suggestions:
+        msg += f" Did you mean: {', '.join(resolved_suggestions)}?"
+    raise ProxyError(400, msg, "model_not_available", details=details)
+
+
+def _validate_dynamic_provider_model(model: str) -> bool:
+    """Validate dynamically-routed provider models.
+
+    Returns true when the model belongs to a dynamic provider family and has
+    been accepted or rejected. False means the caller should continue with the
+    legacy configured-alias validation path.
+    """
+    provider = _provider_for_model_selector(model)
+    if provider is None:
+        return False
+
+    if provider == "codex":
+        catalog = _provider_model_catalog(provider)
+        discovered = discover_codex_models()
+        if discovered and resolve_codex_model(model, discovered) is None:
+            _model_not_available_error(model, provider, catalog)
+        return bool(_codex_oauth_available())
+
+    if provider == "claude" and model in static_claude_model_ids():
+        return True
+    if provider == OPENCODE_GO_PROVIDER and model in static_opencode_go_models():
+        return True
+
+    catalog = _provider_model_catalog(provider, refresh=True)
+    ids = set(_model_ids_from_catalog(catalog))
+    if model not in ids:
+        _model_not_available_error(model, provider, catalog)
+    return True
 
 
 def _message_has_multimodal_content(message: dict[str, Any]) -> bool:
@@ -1741,11 +1904,13 @@ def _validate_model_request(model: str, body: dict, request: Request) -> None:
         )
 
     _validate_codex_oauth_reasoning_effort(model, body)
+    dynamic_provider_checked = _validate_dynamic_provider_model(model)
 
     # 2. Reject unknown models with helpful error + suggestions
     # Only check if we have loaded valid aliases (after startup)
     if (
         _VALID_MODEL_ALIASES
+        and not dynamic_provider_checked
         and model not in _VALID_MODEL_ALIASES
         and not is_opencode_go_model(model)
         and not _is_direct_chutes_model(model)
@@ -3484,6 +3649,7 @@ async def scillm_models(
     request: Request,
     include_models_dev: bool = False,
     refresh_models_dev: bool = False,
+    refresh_provider_models: bool = False,
 ):
     """List model groups, aliases, and UI-safe model selection contracts."""
     auth_err = _check_auth(request)
@@ -3504,6 +3670,28 @@ async def scillm_models(
         "endpoint": EMBEDDING_SERVICE_URL,
     }
     models = _build_model_catalog()
+    provider_catalogs = {
+        "claude": _provider_model_catalog("claude", refresh=refresh_provider_models),
+        "codex": _provider_model_catalog("codex", refresh=refresh_provider_models),
+        OPENCODE_GO_PROVIDER: _provider_model_catalog(OPENCODE_GO_PROVIDER, refresh=refresh_provider_models),
+    }
+    for provider, catalog in provider_catalogs.items():
+        for row in catalog.get("models", []):
+            if not isinstance(row, dict):
+                continue
+            model_id = row.get("id")
+            if not isinstance(model_id, str) or model_id in models:
+                continue
+            models[model_id] = _model_catalog_entry(
+                name=model_id,
+                kind="provider_model",
+                target=model_id,
+                deployments=1,
+                capabilities=_public_model_capabilities(model_id),
+            )
+            models[model_id]["provider"] = provider
+            if "reasoning_efforts" in row:
+                models[model_id]["reasoning_efforts"] = row["reasoning_efforts"]
     models_dev_error: str | None = None
     if include_models_dev:
         try:
@@ -3526,6 +3714,7 @@ async def scillm_models(
         "groups": groups,
         "aliases": _config.aliases,
         "models": models,
+        "provider_catalogs": provider_catalogs,
         "selectable_models": selectable_models,
         "review_fanout_models": review_fanout_models,
         "retired_model_prefixes": list(_RETIRED_MODEL_PREFIXES),
@@ -3546,8 +3735,13 @@ async def scillm_models(
         "auto_providers": {
             "codex": {
                 "model_prefixes": ["gpt-", "codex-", "o1", "o3", "o4"],
-                "examples": ["gpt-5.5"],
+                "examples": _model_ids_from_catalog(provider_catalogs["codex"])[:5] or ["gpt-5.5"],
                 "key_configured": _codex_oauth_available(),
+            },
+            "claude": {
+                "model_prefixes": ["claude-"],
+                "examples": _model_ids_from_catalog(provider_catalogs["claude"])[:5],
+                "key_configured": _claude_oauth_available(),
             },
             OPENCODE_GO_PROVIDER: {
                 "model_prefix": "opencode-go/",
@@ -3734,7 +3928,14 @@ async def scillm_opencode_go_models(
         "verbose": verbose,
         "key_configured": key_configured,
         "model_count": len(models),
-        "models": [describe_opencode_go_model(model, key_configured=key_configured) for model in models],
+        "models": [
+            {
+                **describe_opencode_go_model(model, key_configured=key_configured),
+                "reasoning_efforts": [],
+                "reasoning_source": "not_advertised",
+            }
+            for model in models
+        ],
         "errors": errors,
     }
 
@@ -3784,8 +3985,8 @@ async def openai_models(request: Request):
     from scillm.proxy.providers.auth import is_anthropic_available, is_codex_available
     auto_models = []
     if is_anthropic_available():
-        for m in ["claude-sonnet-4-6", "claude-opus-4-6", "claude-haiku-4-5"]:
-            auto_models.append({"id": m, "object": "model", "created": int(_start_time), "owned_by": "anthropic-oauth"})
+        for row in claude_catalog_payload()["models"]:
+            auto_models.append({"id": row["id"], "object": "model", "created": int(_start_time), "owned_by": "anthropic-oauth"})
     if is_codex_available():
         discovered_codex = discover_codex_models()
         for m in [model.slug for model in discovered_codex] or ["gpt-5.5"]:
@@ -3798,7 +3999,8 @@ async def openai_models(request: Request):
     if _config.chutes_api_base:
         auto_models.append({"id": "chutes:Org/Model", "object": "model", "created": int(_start_time), "owned_by": "chutes-auto"})
     if _config.opencode_go_api_key:
-        for model in static_opencode_go_models():
+        opencode_catalog = _opencode_go_catalog_payload_for_validation()
+        for model in _model_ids_from_catalog(opencode_catalog):
             auto_models.append({"id": model, "object": "model", "created": int(_start_time), "owned_by": OPENCODE_GO_PROVIDER})
 
     # Deduplicate (auto models might overlap with configured ones)
@@ -3821,8 +4023,10 @@ async def scillm_providers(request: Request):
 
     from scillm.proxy.providers.auth import is_anthropic_available, is_codex_available
 
-    codex_catalog = codex_catalog_payload()
-    codex_models = [str(item["id"]) for item in codex_catalog["models"]]
+    claude_catalog = _provider_model_catalog("claude")
+    codex_catalog = _provider_model_catalog("codex")
+    opencode_catalog = _provider_model_catalog(OPENCODE_GO_PROVIDER)
+    codex_models = _model_ids_from_catalog(codex_catalog)
     providers = {
         "configured": {
             name: {
@@ -3835,7 +4039,8 @@ async def scillm_providers(request: Request):
             "claude": {
                 "available": is_anthropic_available(),
                 "pattern": "claude-*",
-                "examples": ["claude-sonnet-4-6", "claude-opus-4-6", "claude-haiku-4-5"],
+                "examples": _model_ids_from_catalog(claude_catalog)[:5],
+                "catalog": claude_catalog,
                 "auth": "OAuth via ~/.claude/.credentials.json",
                 "note": "System prompt locked to Claude Code prefix",
             },
@@ -3846,6 +4051,14 @@ async def scillm_providers(request: Request):
                 "catalog": codex_catalog,
                 "auth": "OAuth via ~/.codex/auth.json",
                 "note": "temperature/max_tokens not supported",
+            },
+            OPENCODE_GO_PROVIDER: {
+                "available": bool(_config.opencode_go_api_key),
+                "pattern": "opencode-go/*",
+                "examples": _model_ids_from_catalog(opencode_catalog)[:5],
+                "catalog": opencode_catalog,
+                "auth": "OPENCODE_GO_API_KEY",
+                "note": "Use /v1/scillm/opencode-go/models?refresh=true for an explicit refresh.",
             },
             "gemini": {
                 "available": bool(_config.gemini_api_base),

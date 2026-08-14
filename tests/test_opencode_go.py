@@ -9,6 +9,7 @@ from scillm.proxy.app import (
     _is_empty_zero_usage_response,
     _models_dev_extract,
     _models_dev_provider_key,
+    _opencode_go_catalog_payload_for_validation,
     _stream_chunk_has_visible_output,
     _stream_chunk_reasoning_chars,
     _stream_terminal_diagnostics_from_chunk,
@@ -68,6 +69,15 @@ def test_describe_opencode_go_kimi_reports_image_input():
     assert model["endpoint_type"] == ENDPOINT_CHAT_COMPLETIONS
     assert model["input"] == {"text": True, "image": True, "pdf": False}
     assert model["capabilities"]["image_input"] is True
+
+
+def test_opencode_go_catalog_rows_report_reasoning_not_advertised():
+    catalog = _opencode_go_catalog_payload_for_validation()
+
+    assert catalog["provider"] == "opencode-go"
+    assert catalog["models"]
+    assert catalog["models"][0]["reasoning_efforts"] == []
+    assert catalog["models"][0]["reasoning_source"] == "not_advertised"
 
 
 def test_models_dev_provider_key_maps_opencode_go():
@@ -206,6 +216,18 @@ def test_app_validation_allows_text_opencode_go_requests():
     body = {"messages": [{"role": "user", "content": "Return JSON."}]}
 
     _validate_model_request("opencode-go/deepseek-v4-flash", body, _Request())
+
+
+def test_app_validation_rejects_unknown_opencode_go_with_catalog():
+    body = {"messages": [{"role": "user", "content": "Return JSON."}]}
+
+    with pytest.raises(ProxyError) as exc:
+        _validate_model_request("opencode-go/no-such-model", body, _Request())
+
+    assert exc.value.error_type == "model_not_available"
+    assert exc.value.details["provider"] == "opencode-go"
+    assert any(row["id"] == "opencode-go/kimi-k2.6" for row in exc.value.details["available_models"])
+    assert "refresh_provider_models=true" in exc.value.details["refresh_hint"]
 
 
 @pytest.mark.parametrize("field", ["max_tokens", "max_completion_tokens"])

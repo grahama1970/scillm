@@ -32,6 +32,7 @@ CLAUDE_CODE_SYSTEM_PREFIX = "You are Claude Code, Anthropic's official CLI for C
 
 # Map friendly model names to Anthropic API model IDs
 CLAUDE_MODEL_MAP = {
+    "claude-opus-5": "claude-opus-5",
     "claude-sonnet-5": "claude-sonnet-5",
     "claude-fable-5": "claude-fable-5",
     "claude-sonnet-4-6": "claude-sonnet-4-6",

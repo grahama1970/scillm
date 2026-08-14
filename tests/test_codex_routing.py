@@ -34,6 +34,28 @@ def test_validation_allows_gpt_55_when_codex_available(monkeypatch: pytest.Monke
     _validate_model_request("gpt-5.5", body, _Request())
 
 
+def test_validation_allows_dynamic_claude_provider_model(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(proxy_app, "_VALID_MODEL_ALIASES", {"chutes-deepseek"})
+    monkeypatch.setattr(proxy_app, "_claude_oauth_available", lambda: True)
+
+    body = {"messages": [{"role": "user", "content": "hi"}]}
+    _validate_model_request("claude-opus-5", body, _Request())
+
+
+def test_validation_rejects_unknown_claude_with_provider_catalog(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(proxy_app, "_VALID_MODEL_ALIASES", {"chutes-deepseek"})
+    monkeypatch.setattr(proxy_app, "_claude_oauth_available", lambda: True)
+
+    body = {"messages": [{"role": "user", "content": "hi"}]}
+    with pytest.raises(ProxyError) as exc:
+        _validate_model_request("claude-opus-4-9", body, _Request())
+
+    assert exc.value.error_type == "model_not_available"
+    assert exc.value.details["provider"] == "claude"
+    assert any(row["id"] == "claude-opus-5" for row in exc.value.details["available_models"])
+    assert any(row["reasoning_efforts"] for row in exc.value.details["available_models"])
+
+
 def test_validation_allows_missing_reasoning_for_gpt_55(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(proxy_app, "_VALID_MODEL_ALIASES", {"chutes-deepseek"})
     monkeypatch.setattr(proxy_app, "_codex_oauth_available", lambda: True)
@@ -77,6 +99,36 @@ def test_validation_rejects_invalid_codex_reasoning_effort(monkeypatch: pytest.M
     }
     with pytest.raises(ProxyError, match="Unsupported Codex OAuth reasoning effort"):
         _validate_model_request("gpt-5.5", body, _Request())
+
+
+def test_validation_rejects_unknown_codex_with_reasoning_catalog(monkeypatch: pytest.MonkeyPatch, tmp_path):
+    path = tmp_path / "models_cache.json"
+    path.write_text(
+        """
+        {
+          "models": [
+            {
+              "slug": "gpt-5.6-sol",
+              "display_name": "GPT-5.6 Sol",
+              "supported_reasoning_levels": [{"effort": "high"}, {"effort": "xhigh"}]
+            }
+          ]
+        }
+        """,
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("SCILLM_CODEX_MODELS_CACHE", str(path))
+    monkeypatch.setattr(proxy_app, "_VALID_MODEL_ALIASES", {"chutes-deepseek"})
+    monkeypatch.setattr(proxy_app, "_codex_oauth_available", lambda: True)
+
+    body = {"messages": [{"role": "user", "content": "hi"}]}
+    with pytest.raises(ProxyError) as exc:
+        _validate_model_request("gpt-9.9", body, _Request())
+
+    assert exc.value.error_type == "model_not_available"
+    assert exc.value.details["provider"] == "codex"
+    assert exc.value.details["available_models"][0]["id"] == "gpt-5.6-sol"
+    assert exc.value.details["available_models"][0]["reasoning_efforts"] == ["high", "xhigh"]
 
 
 def test_validation_rejects_gpt_55_when_codex_unavailable(monkeypatch: pytest.MonkeyPatch):
