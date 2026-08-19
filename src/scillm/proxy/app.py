@@ -36,6 +36,7 @@ from scillm.proxy.providers.opencode_go import (
     list_opencode_go_models_from_cli_sync,
     list_opencode_go_models_from_server,
     list_opencode_go_models_from_server_sync,
+    list_opencode_go_models_from_zen_sync,
     opencode_go_input_capabilities,
     static_opencode_go_models,
 )
@@ -450,6 +451,14 @@ def _opencode_go_catalog_payload_for_validation(*, refresh: bool = False) -> dic
             except Exception as exc:
                 errors.append(f"server: {str(exc)[:500]}")
                 models = []
+        if not models:
+            try:
+                models = list_opencode_go_models_from_zen_sync()
+                if models:
+                    source = "zen_gateway"
+            except Exception as exc:
+                errors.append(f"zen: {str(exc)[:500]}")
+                models = []
     if not models:
         models = static_opencode_go_models()
     return {
@@ -457,7 +466,7 @@ def _opencode_go_catalog_payload_for_validation(*, refresh: bool = False) -> dic
         "pattern": "opencode-go/*",
         "source": source,
         "available": bool(_config and _config.opencode_go_api_key),
-        "live": source in {"opencode_cli", "opencode_server"},
+        "live": source in {"opencode_cli", "opencode_server", "zen_gateway"},
         "error": "; ".join(errors) if errors else None,
         "errors": errors,
         "models": [

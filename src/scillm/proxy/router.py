@@ -819,7 +819,7 @@ class Router:
         is_opencode_go_chat = (
             dep.custom_llm_provider is None
             and bool(dep.api_base)
-            and "opencode.ai/zen/go" in dep.api_base
+            and "opencode.ai/zen" in dep.api_base
         )
         if is_opencode_go_chat and "response_format" in kwargs:
             # OpenCode Go chat/completions models such as GLM can hang when

@@ -29,7 +29,7 @@ from scillm.proxy.providers.claude import (
 
 OPENCODE_GO_PROVIDER = "opencode-go"
 OPENCODE_GO_PREFIX = f"{OPENCODE_GO_PROVIDER}/"
-OPENCODE_GO_DEFAULT_API_BASE = "https://opencode.ai/zen/go/v1"
+OPENCODE_GO_DEFAULT_API_BASE = "https://opencode.ai/zen/v1"
 OPENCODE_SERVER_DEFAULT_URL = "http://127.0.0.1:4096"
 OPENCODE_GO_CHAT_TIMEOUT_SEC = 120
 OPENCODE_GO_MESSAGES_TIMEOUT_SEC = 600
@@ -40,21 +40,48 @@ ENDPOINT_UNKNOWN = "unknown"
 
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 
+# On Zen (opencode.ai/zen/v1) chat/completions serves every model family that
+# this account can reach; /messages is only kept for callers that need the
+# Anthropic body shape. deepseek/minimax MUST stay on chat/completions: the
+# /messages route rejects them with a China-region opt-in RegionError.
 _MODEL_ENDPOINT_TYPES: dict[str, str] = {
-    "deepseek-v4-flash": ENDPOINT_MESSAGES,
-    "deepseek-v4-pro": ENDPOINT_MESSAGES,
-    "glm-5": ENDPOINT_CHAT_COMPLETIONS,
-    "glm-5.1": ENDPOINT_CHAT_COMPLETIONS,
-    "kimi-k2.5": ENDPOINT_CHAT_COMPLETIONS,
-    "kimi-k2.6": ENDPOINT_CHAT_COMPLETIONS,
-    "mimo-v2-omni": ENDPOINT_CHAT_COMPLETIONS,
-    "mimo-v2-pro": ENDPOINT_CHAT_COMPLETIONS,
-    "mimo-v2.5": ENDPOINT_CHAT_COMPLETIONS,
-    "mimo-v2.5-pro": ENDPOINT_CHAT_COMPLETIONS,
-    "minimax-m2.5": ENDPOINT_MESSAGES,
-    "minimax-m2.7": ENDPOINT_MESSAGES,
-    "qwen3.5-plus": ENDPOINT_CHAT_COMPLETIONS,
-    "qwen3.6-plus": ENDPOINT_CHAT_COMPLETIONS,
+    model_id: ENDPOINT_CHAT_COMPLETIONS
+    for model_id in (
+        # OpenAI family (docs list them under /responses; Zen also exposes
+        # them on chat/completions — availability is account-gated).
+        "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna",
+        "gpt-5.5", "gpt-5.5-pro",
+        "gpt-5.4", "gpt-5.4-pro", "gpt-5.4-mini", "gpt-5.4-nano",
+        "gpt-5.3-codex", "gpt-5.3-codex-spark",
+        "gpt-5.2", "gpt-5.2-codex",
+        "gpt-5.1", "gpt-5.1-codex", "gpt-5.1-codex-max", "gpt-5.1-codex-mini",
+        "gpt-5", "gpt-5-codex", "gpt-5-nano",
+        # Anthropic family
+        "claude-fable-5", "claude-opus-5",
+        "claude-opus-4-8", "claude-opus-4-7", "claude-opus-4-6", "claude-opus-4-5",
+        "claude-sonnet-5", "claude-sonnet-4-6", "claude-sonnet-4-5", "claude-sonnet-4",
+        "claude-haiku-4-5",
+        # Google family
+        "gemini-3.7-flash", "gemini-3.6-flash", "gemini-3.5-flash",
+        "gemini-3.5-flash-lite", "gemini-3.1-pro", "gemini-3-flash",
+        # Qwen
+        "qwen3.7-max", "qwen3.7-plus", "qwen3.6-plus", "qwen3.5-plus",
+        # DeepSeek
+        "deepseek-v4-pro", "deepseek-v4-flash", "deepseek-v4-flash-free",
+        # MiniMax
+        "minimax-m3", "minimax-m2.7", "minimax-m2.5",
+        # GLM
+        "glm-5.2", "glm-5.1", "glm-5",
+        # Kimi
+        "kimi-k2.7-code", "kimi-k2.6", "kimi-k2.5",
+        # Grok
+        "grok-4.5", "grok-build-0.1",
+        # Misc / free tier
+        "big-pickle", "mimo-v2.5-free", "north-mini-code-free",
+        "nemotron-3-ultra-free",
+        # Legacy ids kept for existing callers
+        "mimo-v2-omni", "mimo-v2-pro", "mimo-v2.5", "mimo-v2.5-pro",
+    )
 }
 
 
@@ -78,8 +105,31 @@ def opencode_go_model_id(model: str) -> str:
 
 
 def opencode_go_endpoint_type(model_id: str) -> str:
-    """Return the OpenCode Go endpoint type for a model id."""
-    return _MODEL_ENDPOINT_TYPES.get(model_id, ENDPOINT_UNKNOWN)
+    """Return the OpenCode Go endpoint type for a model id.
+
+    Unknown ids default to chat/completions so any model in the live Zen
+    catalog is callable without a code change.
+    """
+    return _MODEL_ENDPOINT_TYPES.get(model_id, ENDPOINT_CHAT_COMPLETIONS)
+
+
+def list_opencode_go_models_from_zen_sync(*, api_base: str | None = None) -> list[str]:
+    """List models from the Zen gateway's public ``/models`` endpoint.
+
+    ``https://opencode.ai/zen/v1/models`` answers without authentication, so
+    this is the authoritative catalog when the local CLI/server are absent.
+    """
+    base = (api_base or os.environ.get("OPENCODE_GO_API_BASE") or OPENCODE_GO_DEFAULT_API_BASE).rstrip("/")
+    with httpx.Client(timeout=5.0) as client:
+        resp = client.get(f"{base}/models")
+    resp.raise_for_status()
+    data = resp.json()
+    rows = data.get("data", []) if isinstance(data, dict) else []
+    return [
+        f"{OPENCODE_GO_PREFIX}{row['id']}"
+        for row in rows
+        if isinstance(row, dict) and isinstance(row.get("id"), str)
+    ]
 
 
 def static_opencode_go_models() -> list[str]:

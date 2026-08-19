@@ -409,7 +409,7 @@ def load_config(path: str | Path) -> ProxyConfig:
     opencode_go_base = (
         os.environ.get("OPENCODE_GO_API_BASE")
         or resolved.get("opencode_go_api_base")
-        or "https://opencode.ai/zen/go/v1"
+        or "https://opencode.ai/zen/v1"
     )
     opencode_go_key = os.environ.get("OPENCODE_GO_API_KEY") or resolved.get("opencode_go_api_key")
     if opencode_go_base and opencode_go_key:
