@@ -18,9 +18,7 @@ from scillm.proxy.app import (
 from scillm.proxy.errors import ProxyError
 from scillm.proxy.providers.opencode_go import (
     ENDPOINT_CHAT_COMPLETIONS,
-    ENDPOINT_MESSAGES,
     OPENCODE_GO_CHAT_TIMEOUT_SEC,
-    OPENCODE_GO_MESSAGES_TIMEOUT_SEC,
     _build_messages_body,
     _collect_system_prompt,
     describe_opencode_go_model,
@@ -38,7 +36,7 @@ class _Request:
 
 
 def test_parse_opencode_models_output_strips_refresh_and_ansi():
-    output = "\x1b[92m\x1b[1mModels cache refreshed\x1b[0m\nopencode-go/kimi-k2.6\nopencode-go/minimax-m2.7\n"
+    output = "\x1b[92m\x1b[1mModels cache refreshed\x1b[0m\nopencode/kimi-k2.6\nopencode/minimax-m2.7\n"
 
     assert parse_opencode_models_output(output) == [
         "opencode-go/kimi-k2.6",
@@ -48,15 +46,15 @@ def test_parse_opencode_models_output_strips_refresh_and_ansi():
 
 def test_endpoint_registry_covers_messages_and_chat_models():
     assert opencode_go_endpoint_type("kimi-k2.6") == ENDPOINT_CHAT_COMPLETIONS
-    assert opencode_go_endpoint_type("deepseek-v4-pro") == ENDPOINT_MESSAGES
-    assert opencode_go_endpoint_type("minimax-m2.7") == ENDPOINT_MESSAGES
+    assert opencode_go_endpoint_type("deepseek-v4-pro") == ENDPOINT_CHAT_COMPLETIONS
+    assert opencode_go_endpoint_type("minimax-m2.7") == ENDPOINT_CHAT_COMPLETIONS
 
 
 def test_describe_opencode_go_model_marks_supported():
     model = describe_opencode_go_model("opencode-go/deepseek-v4-flash", key_configured=True)
 
     assert model["id"] == "opencode-go/deepseek-v4-flash"
-    assert model["endpoint_type"] == ENDPOINT_MESSAGES
+    assert model["endpoint_type"] == ENDPOINT_CHAT_COMPLETIONS
     assert model["supported"] is True
     assert model["key_configured"] is True
     assert model["input"] == {"text": True, "image": False, "pdf": False}
@@ -124,7 +122,7 @@ def test_router_autocreates_opencode_go_chat_group_before_chutes_slash_route():
     assert group.deployments[0].timeout == OPENCODE_GO_CHAT_TIMEOUT_SEC
 
 
-def test_router_autocreates_opencode_go_messages_group():
+def test_router_autocreates_opencode_go_minimax_chat_group():
     config = ProxyConfig(
         opencode_go_api_base="https://opencode.ai/zen/go/v1",
         opencode_go_api_key="test-key",
@@ -135,8 +133,8 @@ def test_router_autocreates_opencode_go_messages_group():
 
     assert group is not None
     assert group.deployments[0].model == "minimax-m2.7"
-    assert group.deployments[0].custom_llm_provider == "opencode-go-messages"
-    assert group.deployments[0].timeout == OPENCODE_GO_MESSAGES_TIMEOUT_SEC
+    assert group.deployments[0].custom_llm_provider is None
+    assert group.deployments[0].timeout == OPENCODE_GO_CHAT_TIMEOUT_SEC
 
 
 def test_chutes_router_does_not_claim_opencode_go_models():

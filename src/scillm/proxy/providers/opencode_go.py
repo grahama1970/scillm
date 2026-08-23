@@ -29,6 +29,8 @@ from scillm.proxy.providers.claude import (
 
 OPENCODE_GO_PROVIDER = "opencode-go"
 OPENCODE_GO_PREFIX = f"{OPENCODE_GO_PROVIDER}/"
+OPENCODE_UPSTREAM_PROVIDER = "opencode"
+OPENCODE_UPSTREAM_PREFIX = f"{OPENCODE_UPSTREAM_PROVIDER}/"
 OPENCODE_GO_DEFAULT_API_BASE = "https://opencode.ai/zen/v1"
 OPENCODE_SERVER_DEFAULT_URL = "http://127.0.0.1:4096"
 OPENCODE_GO_CHAT_TIMEOUT_SEC = 120
@@ -100,8 +102,17 @@ def is_opencode_go_model(model: str) -> bool:
 
 
 def opencode_go_model_id(model: str) -> str:
-    """Strip ``opencode-go/`` from a model id."""
-    return model[len(OPENCODE_GO_PREFIX):] if is_opencode_go_model(model) else model
+    """Strip public or upstream OpenCode provider prefixes from a model id."""
+    if is_opencode_go_model(model):
+        return model[len(OPENCODE_GO_PREFIX):]
+    if model.startswith(OPENCODE_UPSTREAM_PREFIX):
+        return model[len(OPENCODE_UPSTREAM_PREFIX):]
+    return model
+
+
+def opencode_go_upstream_model_id(model: str) -> str:
+    """Return the model id expected by the current OpenCode Zen API."""
+    return opencode_go_model_id(model)
 
 
 def opencode_go_endpoint_type(model_id: str) -> str:
@@ -195,17 +206,23 @@ def parse_opencode_models_output(output: str) -> list[str]:
                 seen.add(token)
                 models.append(token)
                 break
+            if token.startswith(OPENCODE_UPSTREAM_PREFIX):
+                prefixed = f"{OPENCODE_GO_PREFIX}{opencode_go_model_id(token)}"
+                if prefixed not in seen:
+                    seen.add(prefixed)
+                    models.append(prefixed)
+                    break
     return models
 
 
 async def list_opencode_go_models_from_cli(*, refresh: bool = False, verbose: bool = False) -> list[str]:
-    """List OpenCode Go models via ``opencode models opencode-go``."""
+    """List OpenCode Go models via ``opencode models opencode``."""
     args = ["opencode", "models"]
     if refresh:
         args.append("--refresh")
     if verbose:
         args.append("--verbose")
-    args.append(OPENCODE_GO_PROVIDER)
+    args.append(OPENCODE_UPSTREAM_PROVIDER)
 
     proc = await asyncio.create_subprocess_exec(
         *args,
@@ -227,7 +244,7 @@ def list_opencode_go_models_from_cli_sync(*, refresh: bool = False, verbose: boo
         args.append("--refresh")
     if verbose:
         args.append("--verbose")
-    args.append(OPENCODE_GO_PROVIDER)
+    args.append(OPENCODE_UPSTREAM_PROVIDER)
 
     proc = subprocess.run(
         args,
@@ -265,7 +282,7 @@ def list_opencode_go_models_from_server_sync(
         if not isinstance(provider, dict):
             continue
         provider_id = str(provider.get("id") or provider.get("providerID") or provider.get("name") or "")
-        if provider_id == OPENCODE_GO_PROVIDER:
+        if provider_id in {OPENCODE_GO_PROVIDER, OPENCODE_UPSTREAM_PROVIDER}:
             return _extract_models_from_provider_obj(provider)
     return []
 
@@ -286,6 +303,8 @@ def _extract_models_from_provider_obj(provider: Any) -> list[str]:
     def walk(value: Any) -> None:
         if isinstance(value, str):
             if is_opencode_go_model(value):
+                add(opencode_go_model_id(value))
+            elif value.startswith(OPENCODE_UPSTREAM_PREFIX):
                 add(opencode_go_model_id(value))
             elif value in _MODEL_ENDPOINT_TYPES:
                 add(value)
@@ -326,7 +345,7 @@ async def list_opencode_go_models_from_server(
         if not isinstance(provider, dict):
             continue
         provider_id = str(provider.get("id") or provider.get("providerID") or provider.get("name") or "")
-        if provider_id == OPENCODE_GO_PROVIDER:
+        if provider_id in {OPENCODE_GO_PROVIDER, OPENCODE_UPSTREAM_PROVIDER}:
             return _extract_models_from_provider_obj(provider)
     return []
 

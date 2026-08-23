@@ -198,10 +198,68 @@ def live_invalid_selectors() -> None:
     print("live_invalid_selectors_ok claude,codex,opencode-go")
 
 
+def _assistant_text(payload: dict[str, Any]) -> str:
+    choices = payload.get("choices")
+    if not isinstance(choices, list) or not choices:
+        return ""
+    first = choices[0] if isinstance(choices[0], dict) else {}
+    message = first.get("message") if isinstance(first.get("message"), dict) else {}
+    content = message.get("content")
+    return content if isinstance(content, str) else ""
+
+
+def live_opencode_go_chat_consistency() -> None:
+    model = os.environ.get("SCILLM_OPENCODE_GO_PROOF_MODEL", "opencode-go/deepseek-v4-flash")
+    receipt_path = REPO_ROOT / "artifacts" / "agentic-evals" / "opencode-go-chat-consistency.json"
+    status, catalog = _request_json("/v1/scillm/opencode-go/models?refresh=true")
+    _require(status == 200, f"opencode-go catalog returned {status}")
+    rows = catalog.get("models")
+    _require(isinstance(rows, list) and rows, "opencode-go catalog has no models")
+    row = next((item for item in rows if isinstance(item, dict) and item.get("id") == model), None)
+    _require(isinstance(row, dict), f"{model} missing from opencode-go catalog")
+    _require(row.get("supported") is True, f"{model} is not marked supported")
+    _require(row.get("key_configured") is True, f"{model} key_configured is not true")
+
+    status, payload = _request_json(
+        "/v1/chat/completions",
+        method="POST",
+        payload={
+            "model": model,
+            "messages": [{"role": "user", "content": "Reply with exactly: opencode-go-ok"}],
+            "temperature": 0,
+        },
+    )
+    text = _assistant_text(payload).strip()
+    _require(status == 200, f"{model} chat returned {status}: {json.dumps(payload)[:500]}")
+    _require("opencode-go-ok" in text, f"{model} response missing sentinel: {text[:200]}")
+    receipt_path.parent.mkdir(parents=True, exist_ok=True)
+    receipt_path.write_text(
+        json.dumps(
+            {
+                "schema": "scillm.opencode_go_chat_consistency.v1",
+                "model": model,
+                "catalog_status": 200,
+                "chat_status": status,
+                "catalog_model_supported": row.get("supported"),
+                "catalog_key_configured": row.get("key_configured"),
+                "response_model": payload.get("model"),
+                "assistant_text": text,
+                "sentinel": "opencode-go-ok",
+            },
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    print(f"live_opencode_go_chat_consistency_ok model={model}")
+
+
 COMMANDS = {
     "unit-catalog-contract": unit_catalog_contract,
     "unit-reasoning-contract": unit_reasoning_contract,
     "live-catalog-endpoint": live_catalog_endpoint,
+    "live-opencode-go-chat-consistency": live_opencode_go_chat_consistency,
     "live-invalid-selectors": live_invalid_selectors,
 }
 

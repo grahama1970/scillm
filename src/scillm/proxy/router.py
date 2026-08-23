@@ -46,6 +46,7 @@ from scillm.proxy.providers.opencode_go import (
     opencode_go_messages_completion,
     opencode_go_messages_stream,
     opencode_go_model_id,
+    opencode_go_upstream_model_id,
 )
 
 # Gemini OAuth: uses Gemini CLI for headless calls (bypasses 20 RPD API limit)
@@ -703,8 +704,13 @@ class Router:
                 if endpoint_type == ENDPOINT_MESSAGES
                 else OPENCODE_GO_CHAT_TIMEOUT_SEC
             )
+            provider_model = (
+                opencode_go_upstream_model_id(model_id)
+                if endpoint_type == ENDPOINT_CHAT_COMPLETIONS
+                else model_id
+            )
             dep = Deployment(
-                model=model_id,
+                model=provider_model,
                 api_base=self._config.opencode_go_api_base or OPENCODE_GO_DEFAULT_API_BASE,
                 api_key=self._config.opencode_go_api_key or "",
                 timeout=timeout,

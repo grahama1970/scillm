@@ -75,6 +75,46 @@
           "live_invalid_selectors_ok"
         ]
       }
+    },
+    {
+      "name": "live-opencode-go-catalog-chat-consistency",
+      "type": "positive",
+      "real_world": true,
+      "evidence_class": "live_e2e",
+      "timeout_seconds": 90,
+      "command": [
+        "/usr/bin/python3",
+        "../../../scripts/agentic_eval_provider_models.py",
+        "live-opencode-go-chat-consistency"
+      ],
+      "expected": {
+        "exit_code": 0,
+        "stdout_contains": [
+          "live_opencode_go_chat_consistency_ok"
+        ],
+        "artifacts": [
+          {
+            "path": "../../../artifacts/agentic-evals/opencode-go-chat-consistency.json",
+            "json_pointer": "/schema",
+            "equals": "scillm.opencode_go_chat_consistency.v1"
+          },
+          {
+            "path": "../../../artifacts/agentic-evals/opencode-go-chat-consistency.json",
+            "json_pointer": "/chat_status",
+            "equals": 200
+          },
+          {
+            "path": "../../../artifacts/agentic-evals/opencode-go-chat-consistency.json",
+            "json_pointer": "/catalog_model_supported",
+            "equals": true
+          },
+          {
+            "path": "../../../artifacts/agentic-evals/opencode-go-chat-consistency.json",
+            "json_pointer": "/sentinel",
+            "equals": "opencode-go-ok"
+          }
+        ]
+      }
     }
   ]
 }
