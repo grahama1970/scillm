@@ -185,10 +185,22 @@ def _running_in_docker() -> bool:
     return Path("/.dockerenv").exists() or Path("/run/.containerenv").exists()
 
 
+_VERSIONED_PATH_SUFFIX = re.compile(r"/v\d+$")
+
+
 def _with_openai_v1_suffix(base: str) -> str:
-    """Ensure the OpenAI-compatible base URL ends with /v1."""
+    """Ensure the OpenAI-compatible base URL carries a version segment.
+
+    Most OpenAI-compatible providers serve under /v1, so a base without one
+    gets /v1 appended. But some providers already carry their version in the
+    path (z.ai: /api/paas/v4, /api/coding/paas/v4). Blindly appending /v1 to
+    those produces a 404 path like /api/paas/v4/v1/chat/completions. Only
+    append /v1 when the path has no trailing /vN version segment.
+    """
     stripped = base.rstrip("/")
     if stripped.endswith("/v1"):
+        return stripped
+    if _VERSIONED_PATH_SUFFIX.search(urlsplit(stripped).path):
         return stripped
     return f"{stripped}/v1"
 
