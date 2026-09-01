@@ -7,7 +7,10 @@ Uses OAuth tokens from ~/.pi/agent/auth.json (shared with Pi CLI).
 from __future__ import annotations
 
 import json
+import re
+import subprocess
 import time
+from functools import lru_cache
 import uuid
 from typing import Any, AsyncIterator
 
@@ -99,12 +102,45 @@ def _is_temperature_deprecated_error(status_code: int, error_text: str) -> bool:
     return status_code == 400 and "temperature" in lowered and "deprecated" in lowered
 
 
+@lru_cache(maxsize=1)
+def _claude_cli_version() -> str:
+    """Client version reported to Anthropic: the newest of the installed
+    claude CLI and the npm registry's latest. Never hardcoded: a frozen
+    version is exactly what Anthropic starts rejecting (claude-cli/2.1.75
+    400s), and a stale installed CLI has the same problem."""
+    candidates: list[tuple[int, ...]] = []
+    try:
+        out = subprocess.run(
+            ["claude", "--version"], capture_output=True, text=True, timeout=10
+        ).stdout
+        m = re.search(r"\d+\.\d+\.\d+", out)
+        if m:
+            candidates.append(tuple(int(p) for p in m.group(0).split(".")))
+    except Exception:
+        pass
+    try:
+        resp = httpx.get(
+            "https://registry.npmjs.org/@anthropic-ai/claude-code/latest", timeout=10
+        )
+        version = resp.json().get("version", "")
+        if re.fullmatch(r"\d+\.\d+\.\d+", version):
+            candidates.append(tuple(int(p) for p in version.split(".")))
+    except Exception:
+        pass
+    if candidates:
+        return ".".join(str(p) for p in max(candidates))
+    raise ProviderOAuthError(
+        "Cannot determine Claude Code client version: no claude CLI on PATH and "
+        "npm registry unreachable. Install/update the claude CLI in this environment."
+    )
+
+
 def _anthropic_headers(token: str) -> dict[str, str]:
     return {
         "Authorization": f"Bearer {token}",
         "anthropic-version": ANTHROPIC_VERSION,
         "anthropic-beta": ANTHROPIC_BETA,
-        "user-agent": "claude-cli/2.1.75",
+        "user-agent": f"claude-cli/{_claude_cli_version()}",
         "x-app": "cli",
         "content-type": "application/json",
     }
