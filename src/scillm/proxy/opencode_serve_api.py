@@ -61,7 +61,6 @@ from scillm.proxy.opencode_serve import (
     load_debugger_system_prompt,
     extract_assistant_text,
     load_opencode_serve_settings,
-    OpenCodeServeSettings,
     session_epoch_s,
     session_id_from_payload,
     session_is_busy,
@@ -1203,6 +1202,28 @@ def _awaiting_terminal_text_after_tools(message: dict[str, Any] | None) -> bool:
   )
 
 
+def _message_provider_error(message: dict[str, Any] | None) -> dict[str, Any] | None:
+  if not isinstance(message, dict):
+    return None
+  info = message.get("info") if isinstance(message.get("info"), dict) else {}
+  raw = info.get("error")
+  if not isinstance(raw, dict):
+    return None
+  out: dict[str, Any] = {}
+  if isinstance(raw.get("name"), str) and raw.get("name"):
+    out["name"] = raw.get("name")
+  data = raw.get("data") if isinstance(raw.get("data"), dict) else {}
+  provider_id = data.get("providerID") or data.get("providerId") or data.get("provider")
+  if isinstance(provider_id, str) and provider_id:
+    out["provider_id"] = provider_id
+  message_text = raw.get("message") or data.get("message")
+  if isinstance(message_text, str) and message_text:
+    out["message"] = message_text[:1000]
+  if not out:
+    out["raw"] = str(raw)[:1000]
+  return out
+
+
 def _message_info_fields(message: dict[str, Any] | None) -> dict[str, Any]:
   if not isinstance(message, dict):
     return {}
@@ -1216,6 +1237,9 @@ def _message_info_fields(message: dict[str, Any] | None) -> dict[str, Any]:
     out["last_message_completed"] = info.get("completed")
   if info.get("finish") is not None:
     out["last_finish_reason"] = info.get("finish")
+  provider_error = _message_provider_error(message)
+  if provider_error:
+    out["last_provider_error"] = provider_error
   return out
 
 
@@ -1343,7 +1367,10 @@ def _build_terminal_blocker(
     "diff_source": diff_evidence.get("diff_source", ""),
     "git_fallback_reason": diff_evidence.get("fallback_reason", ""),
   }
-  if timeout_summary.get("last_tool_errors"):
+  if timeout_summary.get("last_provider_error"):
+    blocker["provider_error"] = timeout_summary.get("last_provider_error")
+    blocker["primary_reason"] = "provider_auth_error"
+  elif timeout_summary.get("last_tool_errors"):
     blocker["primary_reason"] = "tool_error"
   elif timeout_summary.get("last_tool_scope_violation_count", 0):
     blocker["primary_reason"] = "tool_scope_violation"
@@ -1372,10 +1399,22 @@ def _timeout_project_agent_message(
 ) -> str:
   excerpt = str(timeout_summary.get("last_assistant_excerpt") or "").strip()
   tool_errors = terminal_blocker.get("last_tool_errors") or []
+  provider_error = terminal_blocker.get("provider_error") if isinstance(terminal_blocker.get("provider_error"), dict) else None
+  if provider_error:
+    headline = "OpenCode provider returned a terminal error; session aborted with provider diagnostics."
+  else:
+    headline = f"OpenCode run exceeded timeout_s={timeout_s}. Session aborted; inspect artifacts and retry."
   parts = [
-    f"OpenCode run exceeded timeout_s={timeout_s}. Session aborted; inspect artifacts and retry.",
+    headline,
     f"messages={timeout_summary.get('message_count', 0)} assistant={timeout_summary.get('assistant_count', 0)}.",
   ]
+  if provider_error:
+    parts.append(
+      "Provider error: "
+      f"{provider_error.get('name', 'provider_error')} "
+      f"provider={provider_error.get('provider_id', 'unknown')} "
+      f"{provider_error.get('message', '')}".strip()
+    )
   if excerpt:
     short = excerpt if len(excerpt) <= 400 else excerpt[:400] + "…"
     parts.append(f"Latest assistant excerpt: {short}")
@@ -1855,6 +1894,8 @@ async def _timeout_run_result(
     timeout_summary=timeout_summary,
     terminal_blocker=terminal_blocker,
   )
+  provider_error = terminal_blocker.get("provider_error") if isinstance(terminal_blocker.get("provider_error"), dict) else None
+  result_status = "provider_error" if provider_error else "timeout"
   result = {
     "schema": "scillm.opencode_run.result.v1",
     "run_id": run.run_id,
@@ -1862,7 +1903,7 @@ async def _timeout_run_result(
     "logical_agent": spec.agent or None,
     "session_id": run.session_id,
     "session_lineage": lineage if any(lineage.values()) else None,
-    "status": "timeout",
+    "status": result_status,
     "timeout_s": timeout_s,
     "assistant_text": partial_assistant_text,
     "collaboration_item": _collaboration_item(
@@ -1870,7 +1911,7 @@ async def _timeout_run_result(
       logical_agent=spec.agent or None,
       model=spec.model,
       response=partial_assistant_text,
-      status="timeout",
+      status=result_status,
     ),
     "message": message,
     "messages_snapshot_count": len(messages_snapshot),
@@ -1889,8 +1930,8 @@ async def _timeout_run_result(
   result = _apply_patch_delegate_status(result, spec=spec, run=run, diff_evidence=diff_evidence)
   run.write_result(result)
   run.write_status(
-    state="timeout",
-    phase="timed_out",
+    state=result_status,
+    phase="provider_error" if provider_error else "timed_out",
     timeout_s=timeout_s,
     timeout_summary=timeout_summary,
     terminal_blocker=terminal_blocker,
@@ -1898,7 +1939,7 @@ async def _timeout_run_result(
     patch_delegate_reason=result.get("patch_delegate_reason"),
   )
   run.emit(
-    "run_timeout",
+    "run_provider_error" if provider_error else "run_timeout",
     timeout_s=timeout_s,
     primary_reason=terminal_blocker.get("primary_reason"),
     message_count=timeout_summary.get("message_count", 0),

@@ -1,0 +1,51 @@
+{
+  "version": 2,
+  "skill": "scillm",
+  "trials": 2,
+  "proof_scope": "scillm#37 OpenCode serve terminal provider errors are preserved instead of masked as timeouts",
+  "claims": {
+    "proves": "A retained regression exercises the OpenCode serve timeout/result path and verifies assistant info.error ProviderAuthError is surfaced as provider_error/provider_auth_error, not timeout_before_terminal_sentinel.",
+    "does_not_prove": "Provider credentials are configured, Google calls succeed, the Ask README writer completes, or all OpenCode provider errors are semantically recoverable."
+  },
+  "capability_claims": [
+    {
+      "id": "scillm.opencode.provider_error_surface",
+      "description": "OpenCode serve preserves terminal provider errors from message snapshots instead of collapsing them into timeout results.",
+      "criticality": "critical",
+      "evidence_required": {"fault_injected_deterministic": true, "live_e2e": false}
+    }
+  ],
+  "cases": [
+    {
+      "name": "provider-auth-error-not-timeout",
+      "type": "adversarial",
+      "real_world": true,
+      "evidence_class": "fault_injected_deterministic",
+      "supports_claims": ["scillm.opencode.provider_error_surface"],
+      "command": [
+        "bash",
+        "-lc",
+        "cd .. && UV_PROJECT_ENVIRONMENT=/tmp/scillm-uv-env uv run pytest -q tests/test_opencode_serve_api.py::test_timeout_run_preserves_provider_auth_error"
+      ],
+      "expected": {
+        "exit_code": 0,
+        "stdout_contains": ["1 passed"]
+      }
+    },
+    {
+      "name": "ordinary-timeout-diagnostics-still-work",
+      "type": "positive",
+      "real_world": true,
+      "evidence_class": "deterministic",
+      "command": [
+        "bash",
+        "-lc",
+        "cd .. && UV_PROJECT_ENVIRONMENT=/tmp/scillm-uv-env uv run pytest -q tests/test_opencode_serve_api.py::test_timeout_run_preserves_reasoning_excerpt"
+      ],
+      "expected": {
+        "exit_code": 0,
+        "stdout_contains": ["1 passed"]
+      }
+    }
+  ]
+}

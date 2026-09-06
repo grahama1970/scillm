@@ -282,6 +282,84 @@ def test_timeout_run_preserves_reasoning_excerpt(tmp_path: Path, monkeypatch: py
 
 
 
+def test_timeout_run_preserves_provider_auth_error(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from scillm.proxy.opencode_serve_api import _timeout_run_result
+
+    monkeypatch.setenv("SCILLM_OPENCODE_SERVE_OUTPUT_DIR", str(tmp_path))
+    run = OpenCodeServeRun(
+        run_id="oc-provider-auth-error",
+        artifact_root=tmp_path,
+        caller_skill="tau",
+        agent="build",
+        session_id="sess-provider-auth-error",
+        request_payload={"prompt": "patch"},
+        directory=str(tmp_path / "ws"),
+    )
+    (tmp_path / "ws").mkdir()
+    spec = OpenCodeRunRequest(prompt="patch", agent="build", timeout_s=600)
+    messages = [
+        {
+            "info": {
+                "role": "user",
+                "id": "u1",
+                "agent": "build",
+                "model": {"providerID": "google", "modelID": "gemini-3-pro-image-preview"},
+            },
+            "parts": [{"type": "text", "text": "fix it"}],
+        },
+        {
+            "info": {
+                "role": "assistant",
+                "id": "a1",
+                "error": {
+                    "name": "ProviderAuthError",
+                    "data": {
+                        "providerID": "google",
+                        "message": "Google Generative AI API key is missing.",
+                    },
+                },
+            },
+            "parts": [{"type": "patch", "files": []}],
+        },
+    ]
+
+    mock_client = AsyncMock()
+    mock_client.__aenter__.return_value = mock_client
+    mock_client.__aexit__.return_value = None
+    mock_client.list_messages = AsyncMock(return_value=messages)
+    mock_client.diff = AsyncMock(return_value=[])
+    mock_client.abort = AsyncMock(return_value={})
+    mock_client.session_status_map = AsyncMock(return_value={"sess-provider-auth-error": {"status": "idle"}})
+
+    with patch("scillm.proxy.opencode_serve_api.OpenCodeServeClient", return_value=mock_client):
+        result = asyncio.run(
+            _timeout_run_result(run, spec, receipt=SkillViewReceipt((), (), (), None), timeout_s=600.0)
+        )
+
+    assert result["status"] == "provider_error"
+    blocker = result["terminal_blocker"]
+    assert blocker["cause"] == "scillm_timeout"
+    assert blocker["primary_reason"] == "provider_auth_error"
+    assert blocker["provider_error"] == {
+        "name": "ProviderAuthError",
+        "provider_id": "google",
+        "message": "Google Generative AI API key is missing.",
+    }
+    assert "ProviderAuthError" in result["project_agent_message"]
+    assert "timeout_before_terminal_sentinel" not in result["project_agent_message"]
+    status = json.loads((tmp_path / "oc-provider-auth-error" / "status.json").read_text(encoding="utf-8"))
+    assert status["state"] == "provider_error"
+    assert status["phase"] == "provider_error"
+    events = [
+        json.loads(line)["event"]
+        for line in (tmp_path / "oc-provider-auth-error" / "events.jsonl").read_text().splitlines()
+        if line.strip()
+    ]
+    assert "run_provider_error" in events
+    assert "run_timeout" not in events
+
+
+
 def test_opencode_run_requires_caller_skill(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("SCILLM_OPENCODE_SERVE_OUTPUT_DIR", str(tmp_path))
     app = FastAPI()
@@ -653,7 +731,6 @@ def test_opencode_run_forks_session(tmp_path: Path, monkeypatch: pytest.MonkeyPa
     app = FastAPI()
     app.include_router(create_opencode_serve_router(lambda _request: None), prefix="/v1/scillm")
 
-    parent_session = {"id": "sess-parent"}
     child_session = {"id": "sess-child"}
     message = {
         "info": {"role": "assistant", "id": "msg-1"},
