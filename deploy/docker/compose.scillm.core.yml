@@ -58,6 +58,11 @@ services:
       - "${HOME}/.local/share/opencode:/root/.local/share/opencode"
       - "${HOME}/.config/opencode:/root/.config/opencode:ro"
       - "${HOME}/.cache/opencode:/root/.cache/opencode"
+      # The proxy validates OpenCode-serve cwd before handing a request to the
+      # opencode-serve container. Mount the same primary checkout root here so
+      # host paths such as /home/graham/workspace/experiments/agent-skills are
+      # visible to the validation layer instead of failing before provider launch.
+      - "${HOME}/workspace:/home/graham/workspace:ro"
       # JSONL backup — independent of DB, survives wipes, append-only
       - "/mnt/storage12tb/scillm-logs:/mnt/storage12tb/scillm-logs"
     healthcheck:
