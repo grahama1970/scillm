@@ -2192,7 +2192,7 @@ async def _load_middleware(config: ProxyConfig) -> list[BaseMiddleware]:
             logger.debug("CallerPolicyMiddleware not loaded: {}", exc)
 
     # ChutesRouter selects best model variant based on utilization (before VlmRouter)
-    middlewares.extend([ChutesRouter(), VlmRouter(), ConcurrencyMiddleware(), JsonGuard()])
+    middlewares.extend([ChutesRouter(), VlmRouter(), ConcurrencyMiddleware(config), JsonGuard()])
     logger.info("ChutesRouter loaded (utilization-aware routing)")
 
     # Grounding guard — verifies response is grounded in provided source text
@@ -2439,6 +2439,8 @@ async def lifespan(app: FastAPI):
     config_path = os.environ.get("CONFIG_FILE_PATH", "local/proxy_server_config.yaml")
     logger.info("Loading config from {}", config_path)
     _config = load_config(config_path)
+    from chutes.middleware.concurrency_guard import configure_routing_scopes
+    configure_routing_scopes(_config)
     _router = Router(_config)
     _middleware_chain = MiddlewareChain(await _load_middleware(_config))
     _embedding_client = httpx.AsyncClient(base_url=EMBEDDING_SERVICE_URL, timeout=30.0)

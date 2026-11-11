@@ -21,6 +21,7 @@ import asyncio
 import os
 import time
 from typing import Any, Dict
+from urllib.parse import urlsplit
 
 import httpx
 from loguru import logger
@@ -53,6 +54,7 @@ _DEFAULT_LIMITS: Dict[str, int] = {
     "deepseek": 8,
     "gemini": 2,       # Google free tier: ~2 RPM. Was 10, caused 563 429s/942 questions.
     "openrouter": 6,
+    "zai": 2,          # z.ai account domain (coding + PaaS aliases share quota)
     "certainly": 1,
     "codeworld": 1,
     "claude": 2,       # Claude OAuth - RPM-based limits (50 RPM Tier 1), not concurrency
@@ -118,6 +120,11 @@ _rate_limit_hits: Dict[str, list] = {}  # Timestamps of recent 429s
 _last_recovery: Dict[str, float] = {}   # Last time we restored a slot
 _state_loaded: bool = False             # Whether we've loaded from ArangoDB
 _paused_until: Dict[str, float] = {}    # Provider → monotonic timestamp when pause ends
+
+# Routing metadata is installed by the proxy integration boundary at startup.
+# The guard must scope requests by resolved deployment metadata, not aliases.
+_routing_scope_map: Dict[str, str] = {}
+_routing_config: Any | None = None
 
 # ── State ────────────────────────────────────────────────────────────────
 _semaphores: Dict[str, asyncio.Semaphore] = {}
@@ -232,35 +239,146 @@ async def load_state_from_arango() -> None:
         logger.debug("concurrency_guard: load state error: {}", exc)
 
 
-def _resolve_provider(model: str) -> str:
-    """Determine provider key from model name."""
-    model_lower = model.lower()
+def _ensure_provider_scope(scope: str) -> str:
+    """Register an otherwise unknown endpoint scope with the default limit."""
+    if scope not in PROVIDER_LIMITS:
+        PROVIDER_LIMITS[scope] = DEFAULT_LIMIT
+    return scope
 
-    # OpenCode Go model ids also contain "/", so detect before generic
-    # provider/model slash routing to Chutes.
-    if model_lower.startswith("opencode-go/") or model_lower in OPENCODE_GO_ALIASES:
+
+def _deployment_quota_scope(group_name: str, deployment: Any) -> str:
+    """Return the canonical provider/account quota scope for one deployment.
+
+    The deployment's custom provider and API host are routing metadata already
+    resolved by ``ProxyConfig``.  Host paths are intentionally ignored so z.ai
+    coding and PaaS aliases share the same account-domain cooldown.
+    """
+    custom_provider = str(getattr(deployment, "custom_llm_provider", "") or "").lower()
+    api_base = str(getattr(deployment, "api_base", "") or "")
+    parsed_base = urlsplit(api_base)
+    host = (parsed_base.hostname or "").lower()
+    model = str(getattr(deployment, "model", "") or "").lower()
+    group = str(group_name or "").lower()
+
+    if "anthropic" in custom_provider or "anthropic" in host:
+        return "claude"
+    if "codex" in custom_provider:
+        return "codex"
+    if "gemini" in custom_provider:
+        return "gemini"
+    if "opencode-go" in custom_provider or "opencode.ai" in host:
         return "opencode-go"
 
-    # ── Chutes detection FIRST (Org/Model format) ─────────────────────────
-    # Models like "deepseek-ai/DeepSeek-V3.1-TEE" or "Qwen/Qwen3-30B" are Chutes
-    # Must check BEFORE substring matching, otherwise "deepseek" in model_lower
-    # would incorrectly resolve to the "deepseek" provider (direct API, not Chutes)
+    host_scopes = (
+        ("api.z.ai", "zai"),
+        ("generativelanguage.googleapis.com", "gemini"),
+        ("api.anthropic.com", "claude"),
+        ("api.openai.com", "openai"),
+        ("api.deepseek.com", "deepseek"),
+        ("api.moonshot.ai", "moonshot"),
+        ("api.moonshot.cn", "moonshot"),
+        ("openrouter.ai", "openrouter"),
+        ("chutes.ai", "chutes"),
+        ("11434", "ollama"),
+    )
+    for host_fragment, scope in host_scopes:
+        if host_fragment in host or (host_fragment == "11434" and parsed_base.port == 11434):
+            return scope
+
+    # Configured groups without a usable endpoint still have a stable provider
+    # name in their group/model metadata.  This is a fallback, not alias parsing.
+    for scope in sorted(PROVIDER_LIMITS, key=len, reverse=True):
+        if scope in group or scope in model:
+            return scope
+    if "/" in model:
+        return "chutes"
+    if host:
+        return _ensure_provider_scope(f"endpoint:{host}")
+    return "default"
+
+
+def _lookup_case_insensitive(mapping: Any, key: str) -> Any:
+    if not isinstance(mapping, dict):
+        return None
+    if key in mapping:
+        return mapping[key]
+    lowered = key.lower()
+    for candidate, value in mapping.items():
+        if str(candidate).lower() == lowered:
+            return value
+    return None
+
+
+def _configured_quota_scope(model: str, config: Any) -> str | None:
+    """Resolve model aliases/groups to deployment quota metadata."""
+    if config is None:
+        return None
+    aliases = getattr(config, "aliases", {})
+    groups = getattr(config, "model_groups", {})
+    name = str(model or "").strip()
+    seen: set[str] = set()
+    while name and name.lower() not in seen:
+        seen.add(name.lower())
+        target = _lookup_case_insensitive(aliases, name)
+        if isinstance(target, str) and target and target.lower() != name.lower():
+            name = target
+            continue
+        group = _lookup_case_insensitive(groups, name)
+        if group is None:
+            return None
+        deployments = getattr(group, "deployments", []) or []
+        if not deployments:
+            return None
+        scopes = {_deployment_quota_scope(name, deployment) for deployment in deployments}
+        # A model group with multiple deployments is still one configured
+        # routing group; when its endpoints agree, use that shared domain.
+        if len(scopes) == 1:
+            return scopes.pop()
+        return _deployment_quota_scope(name, deployments[0])
+    return None
+
+
+def configure_routing_scopes(config: Any) -> None:
+    """Install loaded proxy routing metadata for alias-safe guard resolution."""
+    global _routing_config
+    _routing_config = config
+    _routing_scope_map.clear()
+    groups = getattr(config, "model_groups", {})
+    for name in groups:
+        scope = _configured_quota_scope(str(name), config)
+        if scope:
+            _routing_scope_map[str(name).lower()] = scope
+    for alias in getattr(config, "aliases", {}) or {}:
+        scope = _configured_quota_scope(str(alias), config)
+        if scope:
+            _routing_scope_map[str(alias).lower()] = scope
+
+
+def _resolve_provider(model: str, config: Any | None = None) -> str:
+    """Determine provider/account scope from loaded routing metadata."""
+    model_lower = str(model or "").strip().lower()
+    configured = _configured_quota_scope(model, config or _routing_config)
+    if configured:
+        return configured
+    mapped = _routing_scope_map.get(model_lower)
+    if mapped:
+        return mapped
+
+    # Fallback for dynamic/direct models that do not have a configured group.
+    # This path uses provider markers, never a request-alias-derived semaphore.
+    if model_lower.startswith("opencode-go/") or model_lower in OPENCODE_GO_ALIASES:
+        return "opencode-go"
     if "/" in model_lower and not model_lower.startswith("http"):
         return "chutes"
-
-    # ── Common prefix patterns ────────────────────────────────────────────
     if model_lower.startswith("text"):
         return "chutes"
     if model_lower.startswith("local"):
         return "ollama"
     if model_lower.startswith("vlm"):
-        return "gemini"  # VLM cascade starts with Gemini
-
-    # ── Substring matching for provider names ─────────────────────────────
-    for provider in PROVIDER_LIMITS:
+        return "gemini"
+    for provider in sorted(PROVIDER_LIMITS, key=len, reverse=True):
         if provider in model_lower:
             return provider
-
     return "default"
 
 
@@ -551,11 +669,14 @@ def start_background_cleanup() -> None:
 class ConcurrencyMiddleware(BaseMiddleware):
     """Limits concurrent requests per provider. Queues excess with bounds."""
 
+    def __init__(self, config: Any | None = None) -> None:
+        self._config = config
+
     async def pre_call(self, request: dict) -> dict | None:
         # Ensure background cleanup is running
         start_background_cleanup()
         model = request.get("model", "")
-        provider = _resolve_provider(model)
+        provider = _resolve_provider(model, self._config)
 
         # ── Cleanup stale slots (zombie request protection) ───────────────
         # Releases slots held longer than SLOT_MAX_AGE_S (hung requests)
