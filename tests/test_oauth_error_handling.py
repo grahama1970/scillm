@@ -148,6 +148,94 @@ async def test_claude_forced_refresh_retries_revoked_access_token(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_claude_http_200_refusal_is_structured_error(monkeypatch):
+    class FakeResponse:
+        status_code = 200
+        text = "{}"
+
+        def json(self):
+            return {
+                "model": "claude-opus-5-5",
+                "content": [],
+                "stop_reason": "refusal",
+                "usage": {"input_tokens": 3, "output_tokens": 0},
+            }
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def post(self, *_args, **_kwargs):
+            return FakeResponse()
+
+    monkeypatch.setattr(claude, "get_anthropic_token", lambda **_kwargs: "access-token")
+    monkeypatch.setattr(httpx, "AsyncClient", FakeClient)
+
+    with pytest.raises(ProviderOAuthError) as exc_info:
+        await claude.claude_completion(
+            "claude-opus-5-5", [{"role": "user", "content": "refuse this"}]
+        )
+
+    details = exc_info.value.to_dict()["error"]["details"]
+    assert exc_info.value.status_code == 502
+    assert details["provider_error_code"] == "PROVIDER_REFUSED"
+    assert details["provider_status_code"] == 200
+    assert "permitted fallback" in details["project_agent_message"]
+
+
+@pytest.mark.asyncio
+async def test_claude_stream_refusal_emits_structured_error_and_done(monkeypatch):
+    class FakeResponse:
+        status_code = 200
+
+        async def aiter_text(self):
+            yield 'event: message_delta\ndata: {"delta":{"stop_reason":"refusal"},"message":{"model":"claude-opus-5-5"}}\n\n'
+
+        async def aread(self):
+            return b""
+
+    class FakeStream:
+        async def __aenter__(self):
+            return FakeResponse()
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        def stream(self, *_args, **_kwargs):
+            return FakeStream()
+
+    monkeypatch.setattr(claude, "get_anthropic_token", lambda **_kwargs: "access-token")
+    monkeypatch.setattr(httpx, "AsyncClient", FakeClient)
+
+    output = b"".join([
+        chunk async for chunk in claude.claude_completion_stream(
+            "claude-opus-5-5", [{"role": "user", "content": "refuse this"}]
+        )
+    ]).decode()
+
+    assert '"provider_error_code": "PROVIDER_REFUSED"' in output
+    assert "Treat as provider refusal" in output
+    assert output.rstrip().endswith("data: [DONE]")
+    assert '"finish_reason": "stop"' not in output
+
+
+@pytest.mark.asyncio
 async def test_claude_retries_without_deprecated_temperature(monkeypatch):
     request_bodies: list[dict] = []
 

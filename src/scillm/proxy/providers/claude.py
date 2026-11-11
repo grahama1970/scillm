@@ -331,8 +331,19 @@ def _anthropic_to_openai_response(
                 )
             )
 
-    # Map stop reason
+    # Refusals may arrive as HTTP 200 with no content; never expose them as success.
     stop_reason = data.get("stop_reason", "end_turn")
+    if stop_reason == "refusal":
+        raise ProviderOAuthError(
+            provider="anthropic-oauth",
+            status_code=502,
+            message="Claude refused the request without returning content.",
+            provider_error_code="PROVIDER_REFUSED",
+            provider_status_code=200,
+            model_requested=model,
+            provider_auth_status="configured",
+            project_agent_message="Treat as provider refusal; do not parse as empty output. Use a permitted fallback only if policy allows.",
+        )
     if stop_reason == "max_tokens":
         finish_reason = "length"
     elif stop_reason == "tool_use":
@@ -677,6 +688,19 @@ async def claude_completion_stream(
                                 yield sse_done().encode()
                                 return
                             stop_reason = delta.get("stop_reason", "end_turn")
+                            if stop_reason == "refusal":
+                                err = sse_format({"error": {
+                                    "message": "Claude refused the request without returning content.",
+                                    "type": "provider_error",
+                                    "provider_error_code": "PROVIDER_REFUSED",
+                                    "provider_status_code": 200,
+                                    "provider": "anthropic-oauth",
+                                    "model_requested": model,
+                                    "project_agent_message": "Treat as provider refusal; do not parse as empty output. Use a permitted fallback only if policy allows.",
+                                }})
+                                yield err.encode()
+                                yield sse_done().encode()
+                                return
                             if stop_reason == "max_tokens":
                                 finish = "length"
                             elif stop_reason == "tool_use":
