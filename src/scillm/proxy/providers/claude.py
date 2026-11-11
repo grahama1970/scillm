@@ -102,6 +102,13 @@ def _is_temperature_deprecated_error(status_code: int, error_text: str) -> bool:
     return status_code == 400 and "temperature" in lowered and "deprecated" in lowered
 
 
+def _normalize_thinking_temperature(body: dict[str, Any], reasoning_forwarded: bool) -> None:
+    """Anthropic only permits temperature=1 when extended thinking is enabled."""
+    if reasoning_forwarded and "temperature" in body and body["temperature"] != 1:
+        body.pop("temperature")
+        logger.info("Claude OAuth: omitted incompatible temperature because thinking is enabled")
+
+
 @lru_cache(maxsize=1)
 def _claude_cli_version() -> str:
     """Client version reported to Anthropic: the newest of the installed
@@ -428,6 +435,7 @@ async def claude_completion(
         stop = kwargs["stop"]
         body["stop_sequences"] = stop if isinstance(stop, list) else [stop]
     reasoning_forwarded, _, reasoning_ignored_reason = _apply_reasoning_effort(body, reasoning_effort)
+    _normalize_thinking_temperature(body, reasoning_forwarded)
     if reasoning_effort and not reasoning_forwarded and reasoning_ignored_reason == "unsupported_effort_for_provider":
         raise ProviderOAuthError(
             provider="anthropic-oauth",
@@ -563,6 +571,7 @@ async def claude_completion_stream(
         stop = kwargs["stop"]
         body["stop_sequences"] = stop if isinstance(stop, list) else [stop]
     reasoning_forwarded, _, reasoning_ignored_reason = _apply_reasoning_effort(body, reasoning_effort)
+    _normalize_thinking_temperature(body, reasoning_forwarded)
     if reasoning_effort and not reasoning_forwarded and reasoning_ignored_reason == "unsupported_effort_for_provider":
         err = sse_format({"error": {
             "message": f"Claude OAuth does not support reasoning_effort={reasoning_effort!r}.",

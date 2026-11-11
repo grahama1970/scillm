@@ -1,0 +1,36 @@
+{
+  "verdict": "pass",
+  "reviewer_provider": "anthropic",
+  "author_provider": "openai",
+  "base": "d645f8556306070f57a9d695a2bc752459ba10b2",
+  "files": [
+    "src/scillm/proxy/providers/claude.py",
+    "tests/test_oauth_error_handling.py"
+  ],
+  "invariants_checked": [
+    "fail_closed",
+    "no_silent_substitution",
+    "approved_models",
+    "names_prove_claims"
+  ],
+  "invariant_notes": {
+    "fail_closed": "Unsupported reasoning_effort still raises ProviderOAuthError / emits SSE error; non-200 still surfaces structured error; normalization only removes temperature when thinking was actually applied.",
+    "no_silent_substitution": "Temperature omission is logged at INFO in _normalize_thinking_temperature; model and thinking block untouched; no provider/model fallback added.",
+    "approved_models": "body['model'] still from existing CLAUDE_MODEL_MAP lookup; diff does not touch model selection.",
+    "names_prove_claims": "_normalize_thinking_temperature and test_claude_omits_temperature_when_thinking_is_enabled match behavior; test asserts single request, no temperature, thinking budget 8192."
+  },
+  "effect_readback": {
+    "command": "python /tmp/readback_thinking_temp.py  # fake httpx.AsyncClient; non-stream+stream with reasoning_effort=high,temperature=0.1; temp=1 control; no-thinking control",
+    "result_quote": "post claude-sonnet-4-6 {'type': 'enabled', 'budget_tokens': 8192} False | stream claude-sonnet-4-6 {'type': 'enabled', 'budget_tokens': 8192} False | post claude-sonnet-4-6 {'type': 'enabled', 'budget_tokens': 8192} 1 | post claude-sonnet-4-6 None 0.1 | requests 4"
+  },
+  "tests_run": {
+    "command": "python -m pytest -q tests/test_oauth_error_handling.py",
+    "result": "10 passed"
+  },
+  "findings": [
+    "non-blocking: no dedicated streaming test for temperature omission (verified by readback only)",
+    "non-blocking: test does not assert model field or log emission"
+  ],
+  "greenfield": false,
+  "ts": "2026-11-11T17:42:23Z"
+}

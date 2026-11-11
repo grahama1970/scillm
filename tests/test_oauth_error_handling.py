@@ -236,6 +236,52 @@ async def test_claude_stream_refusal_emits_structured_error_and_done(monkeypatch
 
 
 @pytest.mark.asyncio
+async def test_claude_omits_temperature_when_thinking_is_enabled(monkeypatch):
+    request_bodies: list[dict] = []
+
+    class FakeResponse:
+        status_code = 200
+        text = "{}"
+
+        def json(self):
+            return {
+                "model": "claude-sonnet-4-6",
+                "content": [{"type": "text", "text": "OK"}],
+                "stop_reason": "end_turn",
+                "usage": {"input_tokens": 1, "output_tokens": 1},
+            }
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def post(self, _url, *, json, headers):
+            request_bodies.append(dict(json))
+            return FakeResponse()
+
+    monkeypatch.setattr(claude, "get_anthropic_token", lambda **_kwargs: "access-token")
+    monkeypatch.setattr(httpx, "AsyncClient", FakeClient)
+
+    result = await claude.claude_completion(
+        "claude-sonnet-4-6",
+        [{"role": "user", "content": "Return exactly OK."}],
+        reasoning_effort="high",
+        temperature=0.1,
+    )
+
+    assert len(request_bodies) == 1
+    assert "temperature" not in request_bodies[0]
+    assert request_bodies[0]["thinking"] == {"type": "enabled", "budget_tokens": 8192}
+    assert result.choices[0].message.content == "OK"
+
+
+@pytest.mark.asyncio
 async def test_claude_retries_without_deprecated_temperature(monkeypatch):
     request_bodies: list[dict] = []
 
