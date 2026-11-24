@@ -94,7 +94,7 @@ services:
     ports:
       - "127.0.0.1:${OPENCODE_SERVE_PORT:-4098}:${OPENCODE_SERVE_PORT:-4098}"
       # Codex ChatGPT OAuth browser callback.
-      - "127.0.0.1:1455:1455"
+      - "127.0.0.1:1456:1455"   # host side moved off 1455: that port is OpenAI's OAuth callback and must stay free for Magpie sign-ins (2026-11-24)
     volumes:
       # Directory mount, not single-file: auth.json is rotated by atomic rename
       # and a missing file at container start becomes a root-owned dir (issue #22 class).
